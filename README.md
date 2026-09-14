@@ -35,14 +35,15 @@ Linkex 自領域へ一時コピー
 
 - 現行Version: **v1.0.0**
 - Git tag: **`v1.0.0` あり**
-- GitHub Release: **未作成**
+- GitHub Release: **既存tag `v1.0.0` から手動公開する運用**
 - 現行CI/CD: **なし**
 
-現在の配布物はリポジトリ直下にあります。
+v1.0.0 の正式配布では、GitHub Release Assets の次のファイルを使用します。
 
-- `linkex-downloader.user.js` — 最新ソース
-- `linkex_downloader_v1.0.0.user.js` — v1.0.0 固定userscript
-- `linkex_downloader_v1.0.0.zip` — v1.0.0 配布ZIP
+- `linkex_downloader_v1.0.0.user.js` — **推奨。v1.0.0 固定userscript**
+- `linkex_downloader_v1.0.0.zip` — 同じuserscriptを含む補助配布ZIP
+
+リポジトリ直下の `linkex-downloader.user.js` は最新ソースです。Release Assetとしてはversion固定 `.user.js` を第一選択とし、ZIPは保存・展開用の代替として扱います。
 
 ## 主な機能
 
@@ -113,20 +114,25 @@ Node.js / Python等の外部ランタイムは不要です。
 
 ## インストール
 
+### GitHub Releaseから導入する場合（推奨）
+
 1. Chrome / Edge に Tampermonkey をインストールします。
-2. このリポジトリの `linkex_downloader_v1.0.0.user.js` を開きます。
-3. Tampermonkeyで新規スクリプトを作成します。
-4. 新規スクリプトの内容をすべて削除し、userscript全文を貼り付けて保存します。
-5. Linkexへログインした状態で `https://disk.linkex.io/` を開きます。
-6. 右下に **Linkex Downloader v1.0.0** パネルが表示されれば導入完了です。
+2. GitHub Releases の **v1.0.0** を開きます。
+3. Release Assets から **`linkex_downloader_v1.0.0.user.js`** をダウンロードします。
+4. Tampermonkeyで新規スクリプトを作成します。
+5. 新規スクリプトの内容をすべて削除し、userscript全文を貼り付けて保存します。
+6. Linkexへログインした状態で `https://disk.linkex.io/` を開きます。
+7. 右下に **Linkex Downloader v1.0.0** パネルが表示されれば導入完了です。
 
-配布ZIP `linkex_downloader_v1.0.0.zip` を利用する場合は、展開して同名userscriptを取り出してください。
+`linkex_downloader_v1.0.0.zip` は同じuserscriptを含む補助配布物です。ZIPを使用する場合は展開し、`linkex_downloader_v1.0.0.user.js` を取り出して同じ手順で導入してください。
 
-> 現時点では GitHub Release は作成されていないため、「Releasesから取得」ではなくリポジトリ内の配布物を利用してください。
+GitHub Release公開前、またはRelease Assetsを利用できない場合は、リポジトリ直下のversion固定 `linkex_downloader_v1.0.0.user.js` を利用できます。
 
 ## 更新
 
-新Versionへ更新する場合は、Tampermonkey内のスクリプト本文を新しい `linkex-downloader.user.js` またはversion固定userscriptで置き換えます。
+新Versionへ更新する場合は、Tampermonkey内のスクリプト本文を新しいversion固定 `.user.js` または `linkex-downloader.user.js` で置き換えます。
+
+安定版を利用する場合は、GitHub Releaseのversion固定 `.user.js` を優先してください。`linkex-downloader.user.js` は `main` の最新ソースです。
 
 更新前に未完了Queueがある場合は注意してください。GM storage / IndexedDB schemaが将来変わる場合、既存Queueとの互換性が必要になります。
 
@@ -343,7 +349,7 @@ UIの **診断ログを保存** から次のようなJSONを書き出せます�
 - File System Access APIが必要です。
 - Firefox等は未確認です。
 - Linkex API / Web / CDN仕様変更で動作しなくなる可能性があります。
-- GitHub Releaseは現時点で未作成です。
+- GitHub Releaseは現在、自動化されておらず手動公開です。
 - 自動更新機能はありません。
 - Licenseは未設定です。
 
@@ -374,8 +380,8 @@ Queue実行中にLinkex側へ別のファイル追加が発生していないか
 ```text
 Linkex-Downloader/
 ├─ linkex-downloader.user.js            # 現在の正本・最新userscript
-├─ linkex_downloader_v1.0.0.user.js     # v1.0.0固定配布物
-├─ linkex_downloader_v1.0.0.zip         # v1.0.0配布ZIP
+├─ linkex_downloader_v1.0.0.user.js     # v1.0.0固定配布物 / 推奨Release Asset
+├─ linkex_downloader_v1.0.0.zip         # v1.0.0補助配布ZIP
 ├─ README.md                             # 利用者向け主要資料
 ├─ DEVELOPMENT.md                        # 開発・安全設計・引き継ぎ
 ├─ CHANGELOG.md                          # Version履歴
