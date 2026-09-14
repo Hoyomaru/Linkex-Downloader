@@ -10,15 +10,127 @@
 
 - 現行Version: **v1.0.0**
 - Git tag: **`v1.0.0` あり**
-- GitHub Release: **未作成**
+- GitHub Release: **手動公開前 / 未作成**
 - 現行 GitHub Actions / CI/CD: **なし**
 - `linkex-downloader.user.js`: 最新ソース
 - `linkex_downloader_v1.0.0.user.js`: v1.0.0 のversion固定配布用コピー
-- `linkex_downloader_v1.0.0.zip`: v1.0.0 配布ZIP
+- `linkex_downloader_v1.0.0.zip`: v1.0.0 補助配布ZIP
 
-v1.0.0 作成時には一時的な GitHub Actions workflow が使われましたが、そのworkflowは `chore: remove one-off release workflow` で削除済みです。したがって、今後のrelease工程は現在のところ自動化されていません。
+v1.0.0 作成時には一時的な GitHub Actions workflow が使われましたが、そのworkflowは `chore: remove one-off release workflow` で削除済みです。したがって、GitHub Releaseは現在手動で作成します。
 
-## v1.0.0 の過去の検証情報
+## v1.0.0 GitHub Release の公開内容
+
+### Release title
+
+```text
+Linkex Downloader v1.0.0 — 初回安定版
+```
+
+### Tag
+
+```text
+v1.0.0
+```
+
+既存の `v1.0.0` tagを使用します。Release作成のためにtagを作り直したり移動したりしないでください。
+
+### Release Assets
+
+Releaseには次の2ファイルを添付する方針です。
+
+| Asset | 位置づけ | 推奨度 |
+|---|---|---|
+| `linkex_downloader_v1.0.0.user.js` | Tampermonkeyへ導入するversion固定userscript | **推奨 / 第一選択** |
+| `linkex_downloader_v1.0.0.zip` | 上記userscriptを格納した補助配布物 | 任意 / 代替 |
+
+**利用者には `.user.js` を第一選択として案内してください。** ZIPを使っても機能上の利点はなく、展開して同じuserscriptを取り出すだけです。ZIPは、`.user.js` 単体を直接保存しづらい環境、アーカイブ保管、まとめてダウンロードしたい場合の代替として残します。
+
+### v1.0.0 Release Notes
+
+以下をGitHub Releaseの本文として使用します。
+
+```markdown
+Linkex Downloader の初回安定版 **v1.0.0** です。
+
+Linkex の共有リンク内にある複数ファイルを、Linkex の自分のストレージを一時作業領域として使いながら、**1ファイルずつ安全にローカルへ保存**します。
+
+> [!IMPORTANT]
+> 本ツールは Linkex 公式とは無関係の非公式ツールです。Linkex 側の Web / API / CDN 仕様変更により将来動作しなくなる可能性があります。
+
+## 主な機能
+
+- `https://l2e.click/d/...` 形式の共有URLを解析
+- 共有フォルダを再帰走査し、全ファイルのQueueを作成
+- Linkex自領域へ1ファイルずつ一時コピー
+- コピー前後のID差分からコピー先 `destId` の所有権を確認
+- signed CDN URLからローカルへダウンロード
+- Range Requestによる途中再開
+- signed URL失効時（403）のURL再取得
+- CDN実サイズを基準にローカル保存を検証
+- 検証完了後、自分で作成した一時コピー1件だけを削除
+- ページ再読み込み後のQueue再開
+- 容量不足ファイルの安全なスキップ
+- Windows向けファイル名sanitize / path collision回避
+- 別tabとの二重実行防止lease
+- 診断ログJSON出力とToken / signed URL等のマスク
+
+## 安全設計
+
+Linkex上の既存ファイルを誤削除しないことを最優先にしています。
+
+- ローカル保存が `LOCAL_COMMITTED` になるまでLinkex側を削除しない
+- Downloader自身が作成したと証明できる `destId` だけ削除
+- DELETEは常に `select_all:false` + 単一 `file_ids:[destId]`
+- COPY応答不明時はcopy POSTを盲目的に再送せず、実状態を照合
+- DELETE応答不明時もdelete POSTを盲目的に再送せず、実状態を照合
+- コピー先の所有権を一意に証明できない場合は安全側で停止
+- ローカル検証サイズとCDN実サイズが一致しない場合は削除しない
+
+## インストール
+
+**推奨:** `linkex_downloader_v1.0.0.user.js`
+
+1. Chrome / Edge に Tampermonkey をインストールします。
+2. Release Assets から `linkex_downloader_v1.0.0.user.js` をダウンロードします。
+3. Tampermonkeyで新規スクリプトを作成します。
+4. userscript全文を貼り付けて保存します。
+5. Linkexへログインした状態で `https://disk.linkex.io/` を開きます。
+6. 右下に **Linkex Downloader v1.0.0** パネルが表示されれば導入完了です。
+
+`linkex_downloader_v1.0.0.zip` は同じuserscriptを含む補助配布物です。ZIPを使う場合は展開して `.user.js` を取り出してください。
+
+## 動作確認済み環境
+
+- Chromium系ブラウザ
+- Chrome / Edge
+- Tampermonkey
+- File System Access API
+- `https://disk.linkex.io/` にログインしたLinkexアカウント
+
+Chrome / Edge以外は未確認です。
+
+## 既知の制限
+
+- Queue実行中に別tab・スマホ・別端末からLinkexへファイル追加/コピーを行うと、コピー先IDの所有権判定が曖昧になる可能性があります。
+- 単一ファイルがLinkexの総容量を超える場合は現行方式では処理できません。
+- File System Access APIが必要です。
+- Linkex側のWeb / API / CDN仕様変更で動作しなくなる可能性があります。
+- 自動更新機能はありません。
+
+## SHA-256
+
+```text
+linkex_downloader_v1.0.0.user.js
+928e9aabace1972f41eb97b7b185d40e1c94cfe342ee97fc6cb0880571acdde5
+
+linkex_downloader_v1.0.0.zip
+196b8500a5908a1afcae52f3fae8b239733d608ea2766ec5aa4f564e9cc30f83
+```
+
+詳細な使い方、安全設計、トラブルシューティングはリポジトリの `README.md` を参照してください。
+```
+
+## v1.0.0 の検証済みHash
 
 履歴上の一時workflowでは次の SHA-256 を検証していました。
 
@@ -30,15 +142,15 @@ linkex_downloader_v1.0.0.user.js
 928e9aabace1972f41eb97b7b185d40e1c94cfe342ee97fc6cb0880571acdde5
 ```
 
-これは **v1.0.0 作成時の履歴として確認できる値**です。将来版では必ずその版の成果物を新たにhash検証してください。
+これは **v1.0.0 作成時の履歴として確認できる値**です。GitHub Releaseへ添付するファイルがリポジトリ直下の既存v1.0.0成果物と同一であることを確認したうえで掲載してください。将来版では必ずその版の成果物を新たにhash検証してください。
 
 ## リリース成果物の役割
 
 | ファイル | 役割 |
 |---|---|
-| `linkex-downloader.user.js` | `main` 上の最新開発/安定ソース |
-| `linkex_downloader_vX.Y.Z.user.js` | 特定Versionの固定配布物 |
-| `linkex_downloader_vX.Y.Z.zip` | 固定userscriptを含む配布ZIP |
+| `linkex-downloader.user.js` | `main` 上の最新開発/安定ソース。Release Assetには通常使用しない |
+| `linkex_downloader_vX.Y.Z.user.js` | 特定Versionの固定配布物。**Release Assetの第一選択** |
+| `linkex_downloader_vX.Y.Z.zip` | 固定userscriptを含む補助配布ZIP |
 
 `linkex-downloader.user.js` とversion固定userscriptは、release時点では内容を一致させてください。
 
@@ -188,13 +300,13 @@ linkex_downloader_vX.Y.Z.user.js
 
 ### 13. ZIPを作成
 
-最低限version固定userscriptを含むZIPを作成します。
+必要に応じてversion固定userscriptを含むZIPを作成します。
 
 ```text
 linkex_downloader_vX.Y.Z.zip
 ```
 
-ZIP展開後のuserscriptと、リポジトリ内version固定userscriptのbyte内容が一致することを確認してください。
+ZIPは補助Assetです。ZIP展開後のuserscriptと、リポジトリ内version固定userscriptのbyte内容が一致することを確認してください。
 
 ### 14. SHA-256を記録
 
@@ -251,8 +363,10 @@ vX.Y.Z
 
 推奨asset:
 
-- `linkex_downloader_vX.Y.Z.user.js`
-- `linkex_downloader_vX.Y.Z.zip`
+1. `linkex_downloader_vX.Y.Z.user.js` — **推奨 / 第一選択**
+2. `linkex_downloader_vX.Y.Z.zip` — 補助 / 任意
+
+`linkex-downloader.user.js` は `main` の最新ソースとして維持し、通常はRelease Assetとして重複添付しません。
 
 Release notesには最低限以下を含めます。
 
@@ -268,7 +382,8 @@ GitHub上で次を確認します。
 
 - tagが正しいcommitを指す
 - GitHub Releaseが存在する
-- assetがダウンロードできる
+- `.user.js` Assetがダウンロードできる
+- ZIPを添付した場合はZIPもダウンロードできる
 - userscriptの `@version` と `VERSION` が一致する
 - ZIP内userscriptが固定配布ファイルと一致する
 - READMEのVersion/導入手順が一致する
@@ -277,11 +392,11 @@ GitHub上で次を確認します。
 
 ## 現在の注意事項
 
-### v1.0.0 はtagあり / GitHub Releaseなし
+### v1.0.0 は既存tagから手動Releaseする
 
-現状のREADMEや過去コミットには「Release」を意図した記述がありますが、GitHub API上ではReleaseは作成されていません。
+`v1.0.0` tagはすでに存在します。GitHub Release作成時はこの既存tagを選択し、tagを作り直したり別commitへ移動したりしないでください。
 
-そのため v1.0.0 の利用者向け配布元は、現状ではリポジトリ内のversion固定userscript / ZIPです。
+Release作成前はリポジトリ直下のversion固定userscript / ZIPが配布物です。Release公開後はGitHub Release Assetsを利用者向けの正式な配布導線とします。
 
 ### CI/CDは現在存在しない
 
