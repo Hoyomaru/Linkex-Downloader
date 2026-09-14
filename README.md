@@ -35,10 +35,15 @@ Linkex 自領域へ一時コピー
 
 - 現行Version: **v1.0.0**
 - Git tag: **`v1.0.0` あり**
-- GitHub Release: **既存tag `v1.0.0` から手動公開する運用**
+- GitHub Release: **v1.0.0 公開済み（2026-09-14）**
+- Release title: **Linkex Downloader v1.0.0 — 初回安定版**
 - 現行CI/CD: **なし**
 
-v1.0.0 の正式配布では、GitHub Release Assets の次のファイルを使用します。
+正式配布先:
+
+- https://github.com/Hoyomaru/Linkex-Downloader/releases/tag/v1.0.0
+
+Release Assets:
 
 - `linkex_downloader_v1.0.0.user.js` — **推奨。v1.0.0 固定userscript**
 - `linkex_downloader_v1.0.0.zip` — 同じuserscriptを含む補助配布ZIP
@@ -126,7 +131,7 @@ Node.js / Python等の外部ランタイムは不要です。
 
 `linkex_downloader_v1.0.0.zip` は同じuserscriptを含む補助配布物です。ZIPを使用する場合は展開し、`linkex_downloader_v1.0.0.user.js` を取り出して同じ手順で導入してください。
 
-GitHub Release公開前、またはRelease Assetsを利用できない場合は、リポジトリ直下のversion固定 `linkex_downloader_v1.0.0.user.js` を利用できます。
+Release Assetsを利用できない場合は、リポジトリ直下のversion固定 `linkex_downloader_v1.0.0.user.js` も利用できます。
 
 ## 更新
 
