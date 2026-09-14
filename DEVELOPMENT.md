@@ -1,21 +1,50 @@
-# Linkex Downloader — Development Guide
+# Linkex Downloader — 開発・引き継ぎガイド
 
-このファイルは、別チャット・別セッションでも GitHub だけを見て開発を継続できるようにするための引き継ぎ資料です。
+この文書は、別チャット・別セッション・別開発者でも、GitHubリポジトリだけを見て安全に開発を継続できるようにするための資料です。
 
-**現在の正本 (Source of Truth) は `main` の `linkex-downloader.user.js` です。**
-README は利用者向け、CHANGELOG は変更履歴、このファイルは設計・安全条件・開発手順を扱います。
+**現在動作している実装の正本（Source of Truth）は `main` の `linkex-downloader.user.js` です。**
 
-## Current release
+READMEは利用者向け、CHANGELOGは変更履歴、`docs/ARCHITECTURE.md` は全体構造、`docs/RELEASE.md` は公開手順、`docs/TROUBLESHOOTING.md` は問題解決を扱います。
+
+## 現在の状態
+
+2026-09-14 時点で確認した状態です。
 
 - Stable: **v1.0.0**
+- userscript metadata `@version`: **1.0.0**
+- `const VERSION`: **1.0.0**
+- Git tag: **`v1.0.0` あり**
+- GitHub Release: **0件 / 未作成**
+- 現行 GitHub Actions / CI/CD: **なし**
+- Issue: **なし**
+- Pull Request: **なし**
 - Runtime: Tampermonkey userscript
 - Target: `https://disk.linkex.io/*`
 - Main API origin: `https://prod.linksvc.xyz`
-- Tested on Chromium 系ブラウザ (Chrome / Edge)
+- 実機確認ブラウザ: Chromium系（Chrome / Edge）
+- License: **未設定**
 
-## What the downloader does
+### リポジトリ直下
 
-共有 URL を再帰解析し、各ファイルを 1 件ずつ次のトランザクションで処理します。
+```text
+Linkex-Downloader/
+├─ linkex-downloader.user.js
+├─ linkex_downloader_v1.0.0.user.js
+├─ linkex_downloader_v1.0.0.zip
+├─ README.md
+├─ DEVELOPMENT.md
+├─ CHANGELOG.md
+└─ docs/
+   ├─ ARCHITECTURE.md
+   ├─ RELEASE.md
+   └─ TROUBLESHOOTING.md
+```
+
+`linkex-downloader.user.js` と `linkex_downloader_v1.0.0.user.js` は現在同じGit blob内容です。前者を最新ソース、後者をv1.0.0固定配布物として扱います。
+
+## プロジェクトの目的
+
+Linkex共有内の複数ファイルを、Linkexの自分のストレージを一時作業領域として使いながら、1ファイルずつ安全にローカルへ保存します。
 
 ```text
 shared file
@@ -27,40 +56,113 @@ shared file
   -> next file
 ```
 
-Linkex の無料ストレージを一時作業領域として使い回す設計です。
+最優先事項は **既存ユーザーデータを誤削除しないこと** です。
 
-## Non-negotiable safety invariants
+## 絶対に壊してはいけない安全不変条件
 
-ここは新機能追加時も崩してはいけません。
+ここは新機能追加・リファクタ・UI変更時も弱めてはいけません。
 
-1. **ローカル保存が `LOCAL_COMMITTED` になるまで Linkex 側を削除しない。**
-2. **Downloader 自身が作成したと証明できる `destId` だけ削除する。**
-3. DELETE は常に `select_all:false` かつ `file_ids:[destId]` の **1 件だけ**。
-4. COPY の応答が不明なとき、copy POST を盲目的に再送しない。まず実状態を照合する。
-5. DELETE の応答が不明なとき、delete POST を盲目的に再送しない。まず `destId` の存在/不在を照合する。
-6. コピー前後で新規 ID が複数増え、所有権を一意に証明できない場合は停止する。名前から推測して続行しない。
-7. `destId` がコピー前 ID 集合に含まれていた場合は削除拒否。
-8. ダウンロードに使用した ID と所有権確定 ID が一致しない場合は削除拒否。
-9. ローカルの検証済みサイズと CDN 実サイズが一致しない場合は削除拒否。
-10. 危険な曖昧状態は「失敗して止まる」ほうを選ぶ。誤削除より停止を優先する。
+1. **ローカル保存が `LOCAL_COMMITTED` になるまでLinkex側を削除しない。**
+2. **Downloader自身が作成したと証明できる `destId` だけ削除する。**
+3. DELETEは常に `select_all:false` かつ `file_ids:[destId]` の **1件だけ**。
+4. COPY応答が不明なとき、copy POSTを盲目的に再送しない。まず実状態を照合する。
+5. DELETE応答が不明なとき、delete POSTを盲目的に再送しない。まず `destId` の存在/不在を照合する。
+6. コピー前後で新規IDが複数増え、所有権を一意に証明できない場合は停止する。名前から推測して続行しない。
+7. `destId` がコピー前ID集合に含まれていた場合は削除拒否。
+8. ダウンロードに使用したIDと所有権確定IDが一致しない場合は削除拒否。
+9. ローカル検証済みサイズとCDN実サイズが一致しない場合は削除拒否。
+10. `verifiedAt` がない場合は削除拒否。
+11. 削除直前の `destId` のname / Linkex metadata sizeが所有権確定時と一致しない場合は削除拒否。
+12. leaseを失った場合は処理を停止する。
+13. 危険な曖昧状態は「失敗して止まる」側を選ぶ。誤削除より停止を優先する。
 
-## Known Linkex API surface
+**「便利だから」「復旧しやすいから」という理由で、上記ガードを外したり自動再送へ置き換えないこと。**
 
-現行 v1.0.0 が使用している範囲です。
+## アーキテクチャ概要
 
-| Purpose | Method | Path | Auth |
-|---|---|---|---|
-| Share metadata | GET | `/api/drive/v1/share/get` | No |
-| Share contents | GET | `/api/drive/v1/share/get/content` | No |
-| Storage usage | GET | `/api/drive/v1/usage` | Yes |
-| Own file list | GET | `/api/drive/v1/file/list` | Yes |
-| Copy shared file | POST | `/api/drive/v1/file/copy` | Yes |
-| Copy task status | GET | `/api/drive/v1/task/get` | Yes |
-| Delete own file | POST | `/api/drive/v1/file/delete` | Yes |
+詳細図は [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) を参照してください。
+
+単一userscriptですが、責務は次のように分かれています。
+
+| 領域 | 主な責務 | 主な関数/クラス |
+|---|---|---|
+| 署名 | MD5、header/body hash、Linkex互換sign | `md5()`, `signRequest()`, `runSignatureSelfTest()` |
+| API | Linkex API要求 | `LinkexApi` |
+| 認証検出 | Local Storageからcredential候補検出 | `discoverCredentials()` |
+| 共有解析 | URL解析、再帰manifest | `parseShareToken()`, `buildManifest()` |
+| Ownership | copy前後ID差分、候補検証 | `reconcileCopy()`, `isPlausibleCopy()` |
+| Download | signed URL、Range、checkpoint、verify | `downloadOwnedFile()` |
+| Delete | 最終guard、DELETE、reconcile | `assertDeleteGuards()`, `ensureDeleted()` |
+| Queue | 直列処理、skip、pause/resume | `createQueueFromManifest()`, `processQueue()` |
+| 排他 | tab lease | `acquireLease()`, `assertLease()` |
+| 永続化 | GM storage / IndexedDB | `saveQueueJob()`, `idbPutHandle()` 等 |
+| UI/診断 | パネル、event log、support JSON | `createPanel()`, `downloadSupportBundle()` |
+
+## Userscript metadata / 権限
+
+現行ヘッダー:
+
+```text
+@match   https://disk.linkex.io/*
+@connect prod.linksvc.xyz
+@grant   GM_xmlhttpRequest
+@grant   GM_getValue
+@grant   GM_setValue
+@grant   unsafeWindow
+@run-at  document-idle
+```
+
+CDN downloadはpage-origin `fetch()` を使うためCDN向け `@connect` は設定していません。
+
+## 認証・署名
+
+### Credential取得
+
+Downloader独自のtoken設定欄はありません。
+
+`discoverCredentials()` が `localStorage` 内のJSONを走査し、JWTらしい `token` / `accessToken` / `diskToken` 等を候補化して、パス名等からscoreを付けて選択します。
+
+実tokenをソース・ドキュメント・Issue・診断ログへ貼らないでください。
+
+### Request signing
+
+認証付き/Linkex API requestはLinkex Webと同系統の署名を生成します。
+
+主なheader:
+
+- `X-LinkInflu-App: linkex`
+- `X-LinkInflu-App-Lang`
+- `X-LinkInflu-Ts`
+- `X-LinkInflu-Sign`
+- `Authorization: Bearer <token>`（auth endpointのみ）
+
+`signRequest()` は `x-linkinflu-*` headerを `key=value` にして文字列sortし、MD5 hashを作ります。POST/PUT/PATCHではbody hashも署名対象です。
+
+署名keyは `KEY_BYTES` から `deriveSigningKey()` で復元しています。秘密値をドキュメントへ展開しないでください。
+
+### 署名セルフテスト
+
+`runSignatureSelfTest()` には既知ベクトルが2件あります。
+
+**署名ロジックを変更する場合、セルフテストPASSを必須条件にしてください。**
+
+## 利用API
+
+現行v1.0.0で確認できる範囲です。
+
+| 用途 | Method | Path | 認証 | 書込 |
+|---|---|---|---|---|
+| Share metadata | GET | `/api/drive/v1/share/get` | 不要 | いいえ |
+| Share contents | GET | `/api/drive/v1/share/get/content` | 不要 | いいえ |
+| Storage usage | GET | `/api/drive/v1/usage` | 必要 | いいえ |
+| Own file list | GET | `/api/drive/v1/file/list` | 必要 | いいえ |
+| Copy shared file | POST | `/api/drive/v1/file/copy` | 必要 | **はい** |
+| Copy task | GET | `/api/drive/v1/task/get` | 必要 | いいえ |
+| Delete own file | POST | `/api/drive/v1/file/delete` | 必要 | **はい** |
 
 ### Copy request
 
-単一ファイルコピーは次の形です。
+単一ファイルcopy:
 
 ```json
 {
@@ -73,7 +175,13 @@ Linkex の無料ストレージを一時作業領域として使い回す設計�
 }
 ```
 
-`task_id` が返る場合は `/task/get` をポーリングします。公式実装で確認済みの terminal failure として `failed`, `size_exceeded`, `insufficient_storage` を扱います。
+`task_id` が返る場合は `/task/get` をpollします。
+
+terminal failureとして実装が扱う値:
+
+- `failed`
+- `size_exceeded`
+- `insufficient_storage`
 
 ### Delete request
 
@@ -86,77 +194,83 @@ Linkex の無料ストレージを一時作業領域として使い回す設計�
 }
 ```
 
-一括削除 (`select_all:true`) は Downloader では使用禁止です。
+`select_all:true` はDownloaderでは使用禁止です。
 
-## Request signing and authentication
+## Manifest / 共有走査
 
-認証付き API は Linkex Web と同じ署名方式を再現しています。
-
-使用ヘッダー:
-
-- `X-LinkInflu-App: linkex`
-- `X-LinkInflu-App-Lang`
-- `X-LinkInflu-Ts`
-- `X-LinkInflu-Sign`
-- `Authorization: Bearer <token>` (認証 endpoint のみ)
-
-署名器は `signRequest()` に集約しています。MD5 を使用し、`x-linkinflu-*` ヘッダーを `key=value` 形式で文字列ソートして header hash を作ります。POST/PUT/PATCH は body hash も含めます。
-
-**署名ロジックを変更するときは必ず `runSignatureSelfTest()` を通すこと。** v1.0.0 には HAR 由来の既知ベクトルが入っています。
-
-ログイン token は Downloader 独自保存せず、Linkex ページの Local Storage から検出します。診断ログ出力では JWT・token・署名付き URL などをマスクします。
-
-## Manifest / share traversal
-
-`buildManifest()` が共有フォルダを再帰走査します。
+`buildManifest()` が共有を再帰走査します。
 
 - `/share/get/content`
 - `page_size=100`
-- ページング完走
-- フォルダ再帰
-- 循環検知
-- `sourceId`, `name`, `size`, `remotePath`, `parentId` を保持
+- paging完走
+- folder recursion
+- folder循環検知
+- safety limit: page > 10000で停止
 
-Queue 開始時に manifest から immutable に近い source 情報を作成します。
+fileごとに主に以下を保持します。
+
+- `sourceId`
+- `name`
+- `type`
+- `size`
+- `remotePath`
+- `parentId`
+
+Queue作成時にsource情報をcompact化し、ローカルpathも固定します。
 
 ## Copy ownership proof
 
-コピー前に Linkex ルートの ID 集合を記録し、コピー後に差分を取ります。
+### 基本原理
 
-所有権を確定してよいのは、原則として次の条件を満たす場合だけです。
+copy前にLinkex root file ID集合を `beforeIds` として保存し、copy後のrootとの差分を取ります。
 
-- コピー後に増えた ID が **1 件だけ**
-- その候補の Linkex metadata size が source metadata size と一致
-- 拡張子と normalized stem が一致
-- 作成時刻が copy intent より不自然に古くない
+ownership確定条件:
 
-成功状態は `CONFIRMED`。
+- 増えたIDが **1件だけ**
+- candidate metadata size == source metadata size
+- extension一致
+- normalized stem一致
+- candidate作成時刻がcopy intentより不自然に古くない
 
-差分が複数なら `AMBIGUOUS` として停止します。
+成功時のreconcile resultは `CONFIRMED`。
 
-### Important operational limitation
+Queue側は互換のため `CONFIRMED` または `UNIQUE` を成功として扱いますが、現行 `reconcileCopy()` の返値は `CONFIRMED` です。
 
-Queue 実行中に別タブ・スマホ・別端末から Linkex へファイル追加/コピーをすると、ID 差分による所有権証明が曖昧になる可能性があります。
+### 曖昧時
 
-そのため **Queue 実行中は外部から Linkex を変更しない**ことを前提にしています。
+差分IDが複数なら `AMBIGUOUS` → transaction `AMBIGUOUS_COPY` → Queue `BLOCKED/PAUSED`。
+
+**名前が似ている等の推測で1件選ばないこと。**
+
+### 運用上の重要制限
+
+Queue実行中に別tab・スマホ・別端末・別自動処理からLinkexへfile追加/copyを行うと、ID差分によるownership proofが曖昧になる可能性があります。
+
+同一userscript storage内のtabはleaseで防ぎますが、別端末まで排他できません。
 
 ## Download semantics
 
-- signed CDN URL は own file list の対象 `destId` から取得
-- Range Request による途中再開
-- 約 2 MiB ごとに checkpoint
-- 403 等で URL が失効した場合は Linkex 側から最新 URL を取り直して再試行
-- Range を要求したのに CDN が `200 OK` を返した場合は Range 無視と判断し、0 byte から安全に書き直す
-- `416` はローカルサイズとの照合対象
-- network/CDN/range 系の一時エラーは最大 3 回の再試行
+`downloadOwnedFile()` の主要挙動:
+
+- ownership確定済み `destId` のown file metadataからsigned URL取得
+- local file sizeをoffsetにしてRange request
+- 約2 MiBごとにcheckpoint
+- 403時は同じ `destId` からURL再取得して再試行
+- Range要求に `200 OK` が返った場合はRange無視とみなし0 byteから書き直し
+- `416` ではCDN total sizeとlocal sizeを照合
+- local > CDN totalなら0 byteから安全に書き直し
+- network/CDN/range系はQueue層で最大3回retry
 
 ### Size verification rule
 
-**Linkex metadata の `size` と CDN の実バイト数が一致しないケースを実機で確認済みです。**
+**Linkex metadata の `size` とCDN実バイト数が一致しないケースを実機確認済みです。**
 
-そのため最終的なローカル完全性判定は Linkex metadata size ではなく、CDN の `Content-Length` / `Content-Range` から得た実サイズを基準にします。
+用途を分離します。
 
-Linkex metadata size はコピー候補の identity 照合にのみ使います。
+- Linkex metadata size: copy candidate identity
+- CDN `Content-Length` / Range由来size: local completeness
+
+metadata sizeをlocal verify基準へ戻さないでください。
 
 ## Delete guards
 
@@ -164,110 +278,425 @@ Linkex metadata size はコピー候補の identity 照合にのみ使います�
 
 最低条件:
 
-- tx state が `LOCAL_COMMITTED`
+- tx state == `LOCAL_COMMITTED`
 - `confirmedDest.id` が存在
-- `confirmedDest.id` がコピー前 ID 集合に存在しない
+- `beforeIds` が存在
+- `confirmedDest.id` が `beforeIds` に含まれない
 - `download.destId === confirmedDest.id`
 - `downloadedBytes === expectedCdnBytes > 0`
 - `verifiedAt` が存在
-- 削除直前に現在の `destId` の name / metadata size が所有権確定時と一致
 
-DELETE 応答後も `destId` が実際に消えたことを確認してから `DONE` にします。
+その後 `ensureDeleted()` が削除直前にcurrent own fileを再取得し、`sameOwnedIdentity()` で:
 
-## Queue state / recovery
+- id
+- name
+- Linkex metadata size
 
-主な file transaction states:
+をownership確定時と照合します。
+
+DELETE後も `reconcileDelete()` で `destId` が実際に消えたことを確認してから `DONE` にします。
+
+## 状態遷移
+
+詳細図: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)
+
+主要transaction state:
 
 ```text
-PENDING
 COPY_INTENT
-COPYING / COPY_REQUEST_SENT
-COPIED
-DOWNLOADING / DOWNLOAD_PAUSED
+COPY_REQUEST_SENT
+NEEDS_RECONCILE
+OWNERSHIP_CONFIRMED
+DOWNLOAD_READY
+DOWNLOADING
+DOWNLOAD_PAUSED
+VERIFY_FAILED
 LOCAL_COMMITTED
-DELETE_INTENT / DELETE_REQUEST_SENT / DELETE_UNCERTAIN
+DELETE_INTENT
+DELETE_REQUEST_SENT
+DELETE_UNCERTAIN
+DELETE_UNCERTAIN_PRESENT
 DONE
 ```
 
-Queue item 側には `SKIPPED_CAPACITY`, `UNFITTABLE`, `BLOCKED` 等もあります。
+異常系:
 
-Queue 全体は `READY`, `RUNNING`, `PAUSED`, `PAUSED_USER`, `DONE`, `DONE_WITH_SKIPS` 等を取ります。
+```text
+AMBIGUOUS_COPY
+UNCERTAIN_NO_EVIDENCE
+COPY_REJECTED_CAPACITY
+COPY_REJECTED_SIZE
+```
 
-### Recovery policy
+Queue item state:
 
-- COPY 不明: copy 再送前に reconcile
-- DELETE 不明: delete を再送せず reconcile
-- Download: File System Access API の既存ファイルと checkpoint から Range 再開
-- 危険な状態: Queue を `PAUSED` / item を `BLOCKED` にして停止
-- 容量不足 / 単一ファイル上限: 安全に判定できるケースのみ skip して次へ
+```text
+PENDING
+COPYING
+COPIED
+DOWNLOADING
+LOCAL_COMMITTED
+DELETING
+DONE
+SKIPPED_CAPACITY
+UNFITTABLE
+BLOCKED
+ERROR
+```
+
+Queue全体:
+
+```text
+READY
+RUNNING
+PAUSED
+PAUSED_USER
+DONE
+DONE_WITH_SKIPS
+```
+
+## Queue / 非同期処理
+
+Full Queueは **常に1ファイルずつ直列** です。
+
+並列copy/download/deleteはしていません。
+
+処理順:
+
+```text
+ensureCopyOwned()
+  ↓
+ensureDownloaded()
+  ↓
+ensureDeleted()
+  ↓
+次item
+```
+
+### 容量判定
+
+copy前に `/usage` から:
+
+```text
+free = total_space - used_space
+```
+
+を計算します。
+
+- `file size > total_space` → `UNFITTABLE`
+- `file size > free` → `SKIPPED_CAPACITY`
+
+server taskが `insufficient_storage` / `size_exceeded` を返した場合もそれぞれ安全skipへ変換します。
+
+### Retry可能なskip
+
+`resetRetryableSkips()` は `SKIPPED_CAPACITY` / `UNFITTABLE` のうち、`confirmedDest.id` がないものだけ `PENDING` へ戻します。
+
+ownership確定済みの状態を安易に初期化しません。
+
+## 再試行ポリシー
+
+| エラー/状態 | 方針 |
+|---|---|
+| network / CDN / range系download | 最大3回retry |
+| CDN 403 | URL再取得後retry |
+| Range requestに200 | 0 byteから安全に書き直し |
+| 416 + local == CDN total | 完成済み扱い |
+| 416 + local > CDN total | truncateして0 byteから |
+| COPY task `insufficient_storage` | safe skip |
+| COPY task `size_exceeded` | safe skip |
+| COPY request結果不明 | **POST再送せずreconcile** |
+| COPY差分複数 | stop / BLOCKED |
+| COPY evidenceなし | stop / BLOCKED |
+| DELETE request結果不明 | **POST再送せずreconcile** |
+| DELETE後もdestId存在 | stop / BLOCKED |
+| lease喪失 | stop |
+| delete guard不成立 | stop |
 
 ## Persistence
 
-現行の主要 storage:
+| 保存先 | Key / DB | 用途 | 復旧での使用 |
+|---|---|---|---|
+| GM storage | `linkexQueueFullV1` | Full Queue | 再読み込み後のQueue復元 |
+| GM storage | `linkexQueueFullLeaseV1` | lease | tab二重実行防止 |
+| GM storage | `linkexCopyProbeStateV1` | 現transaction | download checkpoint / tx sync |
+| IndexedDB | `linkexDownloaderProbeV1` | File System handle | 保存先再取得 |
+| GM storage | `linkexDownloaderEventLogV1` | 診断event | support JSON |
+| GM storage | `linkexDownloaderUiPrefsV1` | `collapsed` 等 | UI復元 |
+| GM storage | `lastShareUrl` | 最後の共有URL | UI入力復元 |
 
-- `linkexQueueFullV1` — Full Queue state
-- `linkexQueueFullLeaseV1` — 多重起動防止 lease
-- `linkexCopyProbeStateV1` — transaction / probe state
-- `linkexDownloaderProbeV1` (IndexedDB) — File System Access API handle
-- `linkexDownloaderEventLogV1` — 診断イベント
-- `linkexDownloaderUiPrefsV1` — UI 設定
-- `lastShareUrl` — 最後の共有 URL
+IndexedDB store名:
 
-Queue の directory/file handle は IndexedDB に保存し、GM storage 側には JSON state を保存します。
+```text
+handles
+```
+
+Queue root DirectoryHandleは `operationId = queue-full:<jobId>` で保存します。
+
+### Schema変更時
+
+GM / IndexedDB schemaを変更する場合は、既存ユーザーの途中Queueを壊さないmigrationを先に設計してください。
+
+「古いkeyを消して新しく作る」は、未完了Queueや一時コピーを孤立させる可能性があるため禁止です。
 
 ## Multi-tab protection
 
-Queue は lease + tab ID を利用して多重実行を防ぎます。
+lease実装:
 
-新機能で非同期処理を追加するときも、Linkex の write 操作前後では lease が有効か確認してください。
+- key: `linkexQueueFullLeaseV1`
+- owner: random `TAB_ID`
+- expiry: 約30秒
+- heartbeat: 約8秒
+- acquire後に短いrandom delayを入れてownerを再検証
 
-## Local path rules
+write処理前後では `assertLease()` を通します。
 
-Windows を考慮して次を処理します。
+別端末/別browser profileとの分散lockではありません。
 
-- `< > : " / \\ | ? *` 等を `_` に変換
-- control characters を除去
-- 末尾スペース/ピリオドを除去
-- `CON`, `PRN`, `AUX`, `NUL`, `COM1`...`LPT9` 等を回避
-- 長すぎる segment を短縮
-- sanitize 後に同一 path になった場合は source ID / path 由来 hash suffix で一意化
+## ローカルpath規則
 
-Queue 作成時に local path を確定し、途中で名前を変えない設計です。
+`sanitizeSegment()` / `allocateLocalPaths()`:
 
-## Verified development history
+- Windows禁止文字 → `_`
+- control characters除去
+- 末尾space/dot除去
+- 空文字 → `_`
+- reserved device name回避
+- segment長 > 140 を短縮
+- collision時はFNV-1a由来hash suffix
+- 必要なら追加counter
 
-実機で段階的に確認しました。
+Queue作成後の `localSegments` は固定し、resume時も同じpathを使います。
 
-- v0.1.x: 署名・認証・共有解析・容量取得 (read-only)
-- v0.2.0: 単一ファイル copy と destId 所有権確定
-- v0.3.x: signed CDN download / Range / ローカル検証
-- v0.4.0: `LOCAL_COMMITTED` 後の安全な単一 ID delete
-- v0.5.x: 2 ファイル Queue pilot / recovery
-- v0.6.0: 全ファイル Queue
-- v1.0.0: verified v0.6 transaction core を維持し、正式 UI / diagnostics を追加
+## File System Access API
 
-過去の重要バグ:
+Tampermonkey sandboxからWindow methodを直接呼ぶと `Illegal invocation` が発生した履歴があります。
 
-1. v0.3.0 — DL ボタンを UI に追加し忘れ、初期化が `null.addEventListener` で停止。v0.3.1 で修正。
-2. v0.3.1 — Tampermonkey sandbox から `showSaveFilePicker` を呼び `Illegal invocation`。ページ本体 Window を receiver にして v0.3.2 で修正。
-3. v0.5.0 — `reconcileCopy()` の成功値 `CONFIRMED` に対し Queue 側が `UNIQUE` を待っていたため誤停止。v0.5.1 で修正。
+そのため:
 
-これらは「API core が正しくても UI / glue code で回帰する」例なので、正式版更新時は smoke test を行ってください。
+- `getNativePageWindow()`
+- `Reflect.apply(picker, pageWindow, [...])`
 
-## Release / test checklist
+を使用しています。
 
-新バージョンを stable とする前に最低限確認すること:
+`showSaveFilePicker` / `showDirectoryPicker` 周辺を変更する場合、このreceiver要件を壊さないでください。
 
-1. `runSignatureSelfTest()` が全 PASS
-2. 共有 URL 解析成功
-3. 再帰 manifest が期待件数になる
-4. 2〜3 ファイル以上の Queue が完走
-5. ローカルファイルが正常に開ける
-6. 一時コピーが Linkex に残っていない
-7. 診断ログ JSON を保存できる
-8. ページ再読み込み後に UI が正常起動
-9. 可能なら途中停止 → Queue 再開も確認
-10. DELETE safety invariants を変更していないことをレビュー
+## 診断・ログ
+
+### Event log
+
+- key: `linkexDownloaderEventLogV1`
+- 最大: 800件
+- UI progressは高頻度書込を避けるためthrottle
+
+### Support bundle
+
+`downloadSupportBundle()` がJSONを書き出します。
+
+内容:
+
+- product
+- version
+- generatedAt
+- signature self-test
+- Queue state
+- events
+
+### Redaction
+
+`redactForExport()` は以下を対象に伏せます。
+
+- JWTらしい文字列
+- token
+- authorization
+- cookie
+- signature
+- signed URL / URL key
+- headers
+
+診断機能を拡張する場合は、**便利なログ追加より秘密情報非出力を優先**してください。
+
+## UI
+
+現行パネルの主要操作:
+
+- 共有リンクを解析
+- 署名テスト
+- 全ファイル開始
+- Queueを再開
+- 現在ファイル後に停止
+- 容量スキップを再試行
+- 診断ログを保存
+- 状態を再表示
+- 最小化/展開
+
+### Pause semantics
+
+「現在ファイル後に停止」は `stopRequested=true` を保存します。
+
+現在itemの `COPY → DL → VERIFY → DELETE` を安全な境界まで完了した後に `PAUSED_USER` となります。
+
+即時abortではありません。
+
+## 実機確認済み
+
+開発履歴上、実機で段階的に確認されたもの:
+
+- v0.1.x: signing / auth / share parse / usage（read-only）
+- v0.2.0: single file copy / destId ownership
+- v0.3.x: signed CDN download / Range / local verify
+- v0.4.0: `LOCAL_COMMITTED` 後のsingle destId delete
+- v0.5.x: 2-file Queue pilot / recovery
+- v0.6.0: all-file Queue
+- v1.0.0: verified v0.6 transaction core + production UI / diagnostics
+
+README記載の確認項目:
+
+- 共有リンク解析
+- 再帰全ファイル列挙
+- copy
+- ownership確定
+- CDN download
+- Range resume
+- 403 URL refresh
+- local size verify
+- single-ID delete
+- multi-file Queue
+- page reload resume
+- full traversal
+- capacity skip
+- diagnostics
+
+## 過去に発生した重要バグ
+
+### v0.3.0 — DL UI欠落
+
+**症状**
+
+DLボタンをUIへ追加し忘れ、初期化が `null.addEventListener` 相当で停止。
+
+**修正**
+
+v0.3.1でボタンを追加し、UI初期化を修正。
+
+**再発防止**
+
+API coreだけでなく正式UIのsmoke testを行う。
+
+### v0.3.1 — `Illegal invocation`
+
+**症状**
+
+Tampermonkey sandboxから `showSaveFilePicker()` を呼ぶと失敗。
+
+**原因**
+
+Window methodのreceiverがuserscript側Windowになっていた。
+
+**修正**
+
+v0.3.2でpage Windowを `Reflect.apply()` のreceiverへ固定。
+
+**再発防止**
+
+File System Access API呼出しではnative page Window receiverを維持する。
+
+### v0.5.0 — reconcile成功state不一致
+
+**症状**
+
+正常copyでもQueueが停止。
+
+**原因**
+
+`reconcileCopy()` が `CONFIRMED` を返す一方、Queue側が `UNIQUE` を待っていた。
+
+**修正**
+
+v0.5.1でstate判定を一致。
+
+**現行補足**
+
+現行Queue側は `CONFIRMED || UNIQUE` を許容します。
+
+## 未確認事項
+
+コード/履歴から確定できない、または現時点で実機再検証していないもの:
+
+- Firefox等、Chrome/Edge以外のブラウザ
+- macOS / LinuxでのFile System Access API実機運用
+- Tampermonkey userscript削除時にGM storage / IndexedDBがどこまで自動消去されるか
+- 将来Versionへのstate migration
+- Linkex API仕様が2026-09-14以降も同一であること
+- 長時間・非常に大量のfile Queueでの耐久性上限
+- 別端末同時操作を完全に防ぐ仕組み
+
+未確認を確認済みとしてドキュメント化しないでください。
+
+## 既知制限
+
+- File System Access API必須
+- Queue実行中の外部Linkex変更はownership proofを曖昧化する
+- leaseは別端末を排他しない
+- 単一fileがLinkex総容量を超えると処理不可
+- Linkex API/Web/CDN変更に依存
+- 自動更新なし
+- 現行CI/CDなし
+- License未設定
+
+## 現在のGitHubリリース運用
+
+### v1.0.0 tag
+
+`v1.0.0` tagは存在します。
+
+### GitHub Release
+
+GitHub Releases APIで **Release 0件** を確認しています。
+
+したがって現時点ではREADMEの配布先はリポジトリ内の固定userscript / ZIPです。
+
+### 過去の一時workflow
+
+v1.0.0では一時的に `.github/workflows/publish-v1.0.0.yml` が使われました。
+
+履歴で確認できる処理:
+
+- staged base64 chunkからZIP再構築
+- ZIP SHA-256検証
+- ZIPからuserscript抽出
+- userscript SHA-256検証
+- latest sourceへcopy
+- release artifactsをcommit/push
+
+そのworkflowは `chore: remove one-off release workflow` で削除済みです。
+
+現在の詳細手順は [`docs/RELEASE.md`](docs/RELEASE.md) を参照してください。
+
+## リリース前チェックリスト
+
+最低限:
+
+1. `@version` / `VERSION` 一致
+2. `runSignatureSelfTest()` 全PASS
+3. 共有URL解析
+4. 再帰manifest件数確認
+5. 2〜3file以上のQueue完走
+6. local file正常オープン
+7. 一時copy残存なし
+8. diagnostics JSON保存
+9. page reload後UI起動
+10. 可能ならpause/resume
+11. DELETE safety invariants review
+12. README更新
+13. DEVELOPMENT更新
+14. CHANGELOG更新
+15. docs必要箇所更新
+16. version固定userscript作成
+17. ZIP生成
+18. SHA-256検証
+19. tag
+20. GitHub Release作成
 
 ## Versioning guidance
 
@@ -275,14 +704,35 @@ Queue 作成時に local path を確定し、途中で名前を変えない設�
 - Backward-compatible feature: minor (`1.x.0`)
 - State schema / behavior / compatibility を大きく壊す変更: major
 
-GM / IndexedDB の schema を変える場合は、既存ユーザーの途中 Queue を壊さない migration を先に設計してください。
+## 開発開始時の手順
 
-## How to continue in a new ChatGPT chat
+1. `README.md`
+2. `DEVELOPMENT.md`
+3. `CHANGELOG.md`
+4. 必要な `docs/*`
+5. 最新 `linkex-downloader.user.js`
 
-新しいチャットでは次のように依頼すれば十分です。
+を確認します。
 
-> `Hoyomaru/Linkex-Downloader` の `README.md`、`DEVELOPMENT.md`、`CHANGELOG.md`、最新 `linkex-downloader.user.js` を読んで、現在の安全設計を維持したまま開発を続けてください。
+その後、変更対象の関数だけでなく前後のstate/persistence/safety guardも確認してください。
 
-その後、追加したい機能を説明してください。
+## 開発終了時の手順
 
-**特に削除・コピー・復旧ロジックを変更する場合は、コードを書く前に DEVELOPMENT.md の safety invariants と現行実装を照合すること。**
+1. codeを再確認
+2. Version情報を確認
+3. READMEを同期
+4. DEVELOPMENTを同期
+5. CHANGELOGを更新
+6. 必要なdocsを更新
+7. link切れ確認
+8. 存在しない機能を書いていないか確認
+9. 未確認事項を確認済み扱いしていないか確認
+10. 秘密情報混入がないか確認
+
+## 新しいChatGPT / AIへの引き継ぎ
+
+次のように依頼すれば開発を再開できる状態を維持してください。
+
+> `Hoyomaru/Linkex-Downloader` の `README.md`、`DEVELOPMENT.md`、`CHANGELOG.md`、必要な `docs/*`、最新 `linkex-downloader.user.js` を最初に確認してください。現在の仕様・安全設計・既知制限を維持したまま開発を続けてください。
+
+特にCOPY・DELETE・復旧・Queue・署名・永続化を変更する場合は、コードを書く前に本書の安全不変条件と現行実装を照合してください。
