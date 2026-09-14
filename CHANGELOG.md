@@ -17,6 +17,9 @@
 - v1.0.0作成時の一時release workflowが履歴上存在し、現在は削除済みであることを記録
 - v1.0.0 GitHub Releaseのタイトル・Release Notes・Asset方針を整理
 - Release Assetはversion固定 `.user.js` を推奨配布物、`.zip` を補助配布物とする方針を明記
+- GitHub Release `v1.0.0` の正式公開後、README / DEVELOPMENT / RELEASE手順を公開済み状態へ同期
+- 公開後のAsset digest照合をリリースチェックへ追加
+- standalone `.user.js` Release AssetのSHA-256がRelease Notes記載値と異なることを記録。ZIPのSHA-256は一致
 
 > このUnreleasedセクションはドキュメント整備のみです。`linkex-downloader.user.js` の実行ロジックおよびVersionは変更していません。
 
@@ -54,12 +57,19 @@
 
 ### Distribution
 
-- `linkex-downloader.user.js` — `main` の最新ソース
-- `linkex_downloader_v1.0.0.user.js` — **v1.0.0 の推奨Release Asset**
-- `linkex_downloader_v1.0.0.zip` — 同じversion固定userscriptを含む補助Release Asset
 - Git tag `v1.0.0`
+- GitHub Release **`Linkex Downloader v1.0.0 — 初回安定版`** を2026-09-14に公開
+- Release Asset: `linkex_downloader_v1.0.0.user.js`（推奨）
+- Release Asset: `linkex_downloader_v1.0.0.zip`（補助）
+- `linkex-downloader.user.js` は `main` の最新ソースとして維持
 
-GitHub Releaseは tag `v1.0.0` を対象に手動作成する運用です。Release Assetとしては `.user.js` を第一選択とし、`.zip` は展開して利用したい場合や保存用の代替として扱います。
+Release URL:
+
+```text
+https://github.com/Hoyomaru/Linkex-Downloader/releases/tag/v1.0.0
+```
+
+公開後のGitHub Release API確認では、ZIP Assetのdigestは作成時の検証値と一致しています。standalone `.user.js` は公開Assetのbyte列がリポジトリ直下の固定userscriptと異なり、Release APIのdigestは `742088619d02e166a41ed244863ddc7a0b0d1fbc7347a8302801dfdd1feba364` です。詳細は `docs/RELEASE.md` を参照してください。
 
 ---
 
