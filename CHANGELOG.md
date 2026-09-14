@@ -12,9 +12,11 @@
 - `docs/ARCHITECTURE.md` を追加
 - `docs/RELEASE.md` を追加
 - `docs/TROUBLESHOOTING.md` を追加
-- 現在のGitHub状態を再確認し、`v1.0.0` tagは存在する一方、GitHub Releaseは未作成であることを明記
+- 現在のGitHub状態を再確認し、`v1.0.0` tagが存在することを確認
 - 現行リポジトリにGitHub Actions / CI/CDが存在しないことを明記
 - v1.0.0作成時の一時release workflowが履歴上存在し、現在は削除済みであることを記録
+- v1.0.0 GitHub Releaseのタイトル・Release Notes・Asset方針を整理
+- Release Assetはversion固定 `.user.js` を推奨配布物、`.zip` を補助配布物とする方針を明記
 
 > このUnreleasedセクションはドキュメント整備のみです。`linkex-downloader.user.js` の実行ロジックおよびVersionは変更していません。
 
@@ -52,12 +54,12 @@
 
 ### Distribution
 
-- `linkex-downloader.user.js`
-- `linkex_downloader_v1.0.0.user.js`
-- `linkex_downloader_v1.0.0.zip`
+- `linkex-downloader.user.js` — `main` の最新ソース
+- `linkex_downloader_v1.0.0.user.js` — **v1.0.0 の推奨Release Asset**
+- `linkex_downloader_v1.0.0.zip` — 同じversion固定userscriptを含む補助Release Asset
 - Git tag `v1.0.0`
 
-GitHub Release自体は、2026-09-14の再確認時点では作成されていません。
+GitHub Releaseは tag `v1.0.0` を対象に手動作成する運用です。Release Assetとしては `.user.js` を第一選択とし、`.zip` は展開して利用したい場合や保存用の代替として扱います。
 
 ---
 
