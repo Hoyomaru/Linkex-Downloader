@@ -1,148 +1,78 @@
 # Linkex Downloader — リリース手順
 
-この文書は、Linkex Downloader の新しい安定版を作成・検証・公開するための手順です。
+この文書は、Linkex Downloader の安定版を作成・検証・公開するための手順と、現在の公開状態を記録します。
 
 現在動作している実装の正本は `main` の `linkex-downloader.user.js` です。安全条件の詳細は [`../DEVELOPMENT.md`](../DEVELOPMENT.md) を参照してください。
 
 ## 現在のリリース状態
 
-2026-09-14 時点で確認できる状態:
+2026-09-14 時点:
 
 - 現行Version: **v1.0.0**
-- Git tag: **`v1.0.0` あり**
-- GitHub Release: **手動公開前 / 未作成**
+- Git tag: **`v1.0.0`**
+- GitHub Release: **公開済み**
+- Release title: **Linkex Downloader v1.0.0 — 初回安定版**
+- Draft: **false**
+- Prerelease: **false**
+- Published: **2026-09-14T13:56:48Z**
+- Release URL: `https://github.com/Hoyomaru/Linkex-Downloader/releases/tag/v1.0.0`
 - 現行 GitHub Actions / CI/CD: **なし**
-- `linkex-downloader.user.js`: 最新ソース
-- `linkex_downloader_v1.0.0.user.js`: v1.0.0 のversion固定配布用コピー
-- `linkex_downloader_v1.0.0.zip`: v1.0.0 補助配布ZIP
 
-v1.0.0 作成時には一時的な GitHub Actions workflow が使われましたが、そのworkflowは `chore: remove one-off release workflow` で削除済みです。したがって、GitHub Releaseは現在手動で作成します。
+v1.0.0 作成時には一時的な GitHub Actions workflow が使われましたが、そのworkflowは `chore: remove one-off release workflow` で削除済みです。現在のrelease工程は手動です。
 
-## v1.0.0 GitHub Release の公開内容
+## v1.0.0 Release Assets
 
-### Release title
-
-```text
-Linkex Downloader v1.0.0 — 初回安定版
-```
-
-### Tag
-
-```text
-v1.0.0
-```
-
-既存の `v1.0.0` tagを使用します。Release作成のためにtagを作り直したり移動したりしないでください。
-
-### Release Assets
-
-Releaseには次の2ファイルを添付する方針です。
+GitHub Releaseには次の2ファイルが公開されています。
 
 | Asset | 位置づけ | 推奨度 |
 |---|---|---|
 | `linkex_downloader_v1.0.0.user.js` | Tampermonkeyへ導入するversion固定userscript | **推奨 / 第一選択** |
-| `linkex_downloader_v1.0.0.zip` | 上記userscriptを格納した補助配布物 | 任意 / 代替 |
+| `linkex_downloader_v1.0.0.zip` | version固定userscriptを含む補助配布物 | 任意 / 代替 |
 
-**利用者には `.user.js` を第一選択として案内してください。** ZIPを使っても機能上の利点はなく、展開して同じuserscriptを取り出すだけです。ZIPは、`.user.js` 単体を直接保存しづらい環境、アーカイブ保管、まとめてダウンロードしたい場合の代替として残します。
+利用者には `.user.js` を第一選択として案内します。ZIPはアーカイブ保管や `.user.js` 単体を直接保存しづらい場合の代替です。
 
-### v1.0.0 Release Notes
+`linkex-downloader.user.js` は `main` 上の最新ソースであり、通常はRelease Assetとして重複添付しません。
 
-以下をGitHub Releaseの本文として使用します。
+## v1.0.0 公開AssetのSHA-256
 
-```markdown
-Linkex Downloader の初回安定版 **v1.0.0** です。
-
-Linkex の共有リンク内にある複数ファイルを、Linkex の自分のストレージを一時作業領域として使いながら、**1ファイルずつ安全にローカルへ保存**します。
-
-> [!IMPORTANT]
-> 本ツールは Linkex 公式とは無関係の非公式ツールです。Linkex 側の Web / API / CDN 仕様変更により将来動作しなくなる可能性があります。
-
-## 主な機能
-
-- `https://l2e.click/d/...` 形式の共有URLを解析
-- 共有フォルダを再帰走査し、全ファイルのQueueを作成
-- Linkex自領域へ1ファイルずつ一時コピー
-- コピー前後のID差分からコピー先 `destId` の所有権を確認
-- signed CDN URLからローカルへダウンロード
-- Range Requestによる途中再開
-- signed URL失効時（403）のURL再取得
-- CDN実サイズを基準にローカル保存を検証
-- 検証完了後、自分で作成した一時コピー1件だけを削除
-- ページ再読み込み後のQueue再開
-- 容量不足ファイルの安全なスキップ
-- Windows向けファイル名sanitize / path collision回避
-- 別tabとの二重実行防止lease
-- 診断ログJSON出力とToken / signed URL等のマスク
-
-## 安全設計
-
-Linkex上の既存ファイルを誤削除しないことを最優先にしています。
-
-- ローカル保存が `LOCAL_COMMITTED` になるまでLinkex側を削除しない
-- Downloader自身が作成したと証明できる `destId` だけ削除
-- DELETEは常に `select_all:false` + 単一 `file_ids:[destId]`
-- COPY応答不明時はcopy POSTを盲目的に再送せず、実状態を照合
-- DELETE応答不明時もdelete POSTを盲目的に再送せず、実状態を照合
-- コピー先の所有権を一意に証明できない場合は安全側で停止
-- ローカル検証サイズとCDN実サイズが一致しない場合は削除しない
-
-## インストール
-
-**推奨:** `linkex_downloader_v1.0.0.user.js`
-
-1. Chrome / Edge に Tampermonkey をインストールします。
-2. Release Assets から `linkex_downloader_v1.0.0.user.js` をダウンロードします。
-3. Tampermonkeyで新規スクリプトを作成します。
-4. userscript全文を貼り付けて保存します。
-5. Linkexへログインした状態で `https://disk.linkex.io/` を開きます。
-6. 右下に **Linkex Downloader v1.0.0** パネルが表示されれば導入完了です。
-
-`linkex_downloader_v1.0.0.zip` は同じuserscriptを含む補助配布物です。ZIPを使う場合は展開して `.user.js` を取り出してください。
-
-## 動作確認済み環境
-
-- Chromium系ブラウザ
-- Chrome / Edge
-- Tampermonkey
-- File System Access API
-- `https://disk.linkex.io/` にログインしたLinkexアカウント
-
-Chrome / Edge以外は未確認です。
-
-## 既知の制限
-
-- Queue実行中に別tab・スマホ・別端末からLinkexへファイル追加/コピーを行うと、コピー先IDの所有権判定が曖昧になる可能性があります。
-- 単一ファイルがLinkexの総容量を超える場合は現行方式では処理できません。
-- File System Access APIが必要です。
-- Linkex側のWeb / API / CDN仕様変更で動作しなくなる可能性があります。
-- 自動更新機能はありません。
-
-## SHA-256
+GitHub Release APIが公開Assetについて返しているdigestは次のとおりです。
 
 ```text
 linkex_downloader_v1.0.0.user.js
-928e9aabace1972f41eb97b7b185d40e1c94cfe342ee97fc6cb0880571acdde5
+742088619d02e166a41ed244863ddc7a0b0d1fbc7347a8302801dfdd1feba364
 
 linkex_downloader_v1.0.0.zip
 196b8500a5908a1afcae52f3fae8b239733d608ea2766ec5aa4f564e9cc30f83
 ```
 
-詳細な使い方、安全設計、トラブルシューティングはリポジトリの `README.md` を参照してください。
-```
+### standalone `.user.js` のhash差分について
 
-## v1.0.0 の検証済みHash
-
-履歴上の一時workflowでは次の SHA-256 を検証していました。
+v1.0.0作成時の一時workflowで検証された、リポジトリ直下のversion固定userscriptのSHA-256は次です。
 
 ```text
-linkex_downloader_v1.0.0.zip
-196b8500a5908a1afcae52f3fae8b239733d608ea2766ec5aa4f564e9cc30f83
-
-linkex_downloader_v1.0.0.user.js
 928e9aabace1972f41eb97b7b185d40e1c94cfe342ee97fc6cb0880571acdde5
 ```
 
-これは **v1.0.0 作成時の履歴として確認できる値**です。GitHub Releaseへ添付するファイルがリポジトリ直下の既存v1.0.0成果物と同一であることを確認したうえで掲載してください。将来版では必ずその版の成果物を新たにhash検証してください。
+一方、GitHub Releaseへ実際にアップロードされたstandalone `.user.js` のdigestは `742088...` です。
+
+確認できるサイズ:
+
+```text
+repository version-fixed userscript: 77,630 bytes
+published standalone Release Asset: 79,276 bytes
+差: 1,646 bytes
+```
+
+リポジトリの固定userscriptは1,646行であり、サイズ差はLFからCRLFへの改行変換で各改行に1 byte追加された場合と整合します。このため **内容上は改行コード差である可能性が高い**ですが、byte-levelでは同一ではないのでSHA-256は一致しません。
+
+GitHub Release Notesには現在、standalone `.user.js` のSHAとして過去の `928e...` が記載されています。その値は **現在公開されているstandalone Assetの実digestとは一致していません**。ZIPの `196b...` は一致しています。
+
+整理方法は次のどちらかです。
+
+1. **推奨:** standalone `.user.js` Assetを、リポジトリ直下の `linkex_downloader_v1.0.0.user.js` とbyte-identicalなファイルへ差し替える。これによりRelease Notesの `928e...`、ZIP内userscript、リポジトリ固定userscriptを統一できる。
+2. 現在のstandalone Assetを維持し、GitHub Release NotesのSHA-256を `742088619d02e166a41ed244863ddc7a0b0d1fbc7347a8302801dfdd1feba364` へ修正する。
+
+今後は **Release公開後にGitHub APIのAsset `digest` とRelease Notes記載値を再照合する**ことを必須工程にします。
 
 ## リリース成果物の役割
 
@@ -152,7 +82,7 @@ linkex_downloader_v1.0.0.user.js
 | `linkex_downloader_vX.Y.Z.user.js` | 特定Versionの固定配布物。**Release Assetの第一選択** |
 | `linkex_downloader_vX.Y.Z.zip` | 固定userscriptを含む補助配布ZIP |
 
-`linkex-downloader.user.js` とversion固定userscriptは、release時点では内容を一致させてください。
+release時点では、最新ソース・version固定userscript・ZIP内userscriptの内容を意図どおり一致させてください。byte-level hashを公開する場合は改行コードを含めて同一であることを確認します。
 
 ## Versioning
 
@@ -164,7 +94,7 @@ linkex_downloader_v1.0.0.user.js
 
 GM storage / IndexedDB schemaを変更する場合は、version番号を上げるだけではなく既存Queueのmigration方針を先に設計してください。
 
-## リリース前に更新するVersion
+## リリース前に一致させるVersion
 
 最低限、次を一致させます。
 
@@ -296,7 +226,7 @@ UIの **署名テスト** を実行し、すべて `PASS` であることを確�
 linkex_downloader_vX.Y.Z.user.js
 ```
 
-内容が最新ソースと一致していることをhash等で確認します。
+最新ソースとversion固定userscriptの内容が一致することをhash等で確認します。
 
 ### 13. ZIPを作成
 
@@ -318,6 +248,8 @@ Get-FileHash .\linkex_downloader_vX.Y.Z.zip -Algorithm SHA256
 ```
 
 release notes にhashを掲載する場合は、実際に生成した成果物の値を使用してください。
+
+**注意:** Editor等で開いて保存するとLF/CRLF変換だけでもSHA-256が変わります。Releaseへアップロードするファイルは、検証したbyte列そのものを使用してください。
 
 ### 15. 最終ドキュメント同期
 
@@ -368,13 +300,27 @@ vX.Y.Z
 
 `linkex-downloader.user.js` は `main` の最新ソースとして維持し、通常はRelease Assetとして重複添付しません。
 
-Release notesには最低限以下を含めます。
+Release Notesには最低限以下を含めます。
 
 - 主な追加/変更/修正
 - 重要な安全設計変更の有無
 - 既知制限
 - インストール/更新上の注意
 - SHA-256（掲載する場合）
+
+### 19. 公開後Asset検証
+
+Release公開後、GitHub Release API / UIで次を確認します。
+
+- ReleaseがDraftではない
+- Prerelease設定が意図どおり
+- Tagが正しい
+- Asset名が正しい
+- Asset sizeが意図どおり
+- GitHubが返すAsset digestと手元のSHA-256が一致
+- Release Notesにhashを掲載した場合、その値とも一致
+
+**公開前hashだけを信用して工程完了としないでください。**
 
 ## リリース後確認
 
@@ -389,17 +335,12 @@ GitHub上で次を確認します。
 - READMEのVersion/導入手順が一致する
 - CHANGELOGにreleaseが記録されている
 - `main` のlatest sourceが意図した内容である
+- **公開Asset digestとRelease NotesのSHAが一致する**
 
-## 現在の注意事項
+## CI/CD
 
-### v1.0.0 は既存tagから手動Releaseする
+現在、継続的なGitHub Actions / CI/CDはありません。
 
-`v1.0.0` tagはすでに存在します。GitHub Release作成時はこの既存tagを選択し、tagを作り直したり別commitへ移動したりしないでください。
-
-Release作成前はリポジトリ直下のversion固定userscript / ZIPが配布物です。Release公開後はGitHub Release Assetsを利用者向けの正式な配布導線とします。
-
-### CI/CDは現在存在しない
-
-一時的に使われた `publish-v1.0.0.yml` は削除済みです。今後release自動化を導入する場合は、特定Version専用workflowではなく、Version引数・tag・hash検証を一般化した設計を検討してください。
+v1.0.0作成時に一時的に使われた `publish-v1.0.0.yml` は削除済みです。今後release自動化を導入する場合は、特定Version専用workflowではなく、Version引数・tag・hash検証を一般化した設計を検討してください。
 
 ただし、自動化導入のためにCOPY/DELETE等の本体ロジックを変更する必要はありません。
