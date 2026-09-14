@@ -35,44 +35,21 @@ GitHub Releaseには次の2ファイルが公開されています。
 
 ## v1.0.0 公開AssetのSHA-256
 
-GitHub Release APIが公開Assetについて返しているdigestは次のとおりです。
+GitHub Release APIで公開後に再確認した最終digestは次のとおりです。
 
 ```text
 linkex_downloader_v1.0.0.user.js
-742088619d02e166a41ed244863ddc7a0b0d1fbc7347a8302801dfdd1feba364
+928e9aabace1972f41eb97b7b185d40e1c94cfe342ee97fc6cb0880571acdde5
 
 linkex_downloader_v1.0.0.zip
 196b8500a5908a1afcae52f3fae8b239733d608ea2766ec5aa4f564e9cc30f83
 ```
 
-### standalone `.user.js` のhash差分について
+standalone `.user.js` はリポジトリ直下の `linkex_downloader_v1.0.0.user.js` と同じ **77,630 bytes** で、v1.0.0作成時の検証値およびRelease Notes記載値と一致しています。ZIPも検証値と一致しています。
 
-v1.0.0作成時の一時workflowで検証された、リポジトリ直下のversion固定userscriptのSHA-256は次です。
+つまり現在のv1.0.0は、**Release Notes / 公開 `.user.js` / 公開ZIPのSHA-256が整合した状態**です。
 
-```text
-928e9aabace1972f41eb97b7b185d40e1c94cfe342ee97fc6cb0880571acdde5
-```
-
-一方、GitHub Releaseへ実際にアップロードされたstandalone `.user.js` のdigestは `742088...` です。
-
-確認できるサイズ:
-
-```text
-repository version-fixed userscript: 77,630 bytes
-published standalone Release Asset: 79,276 bytes
-差: 1,646 bytes
-```
-
-リポジトリの固定userscriptは1,646行であり、サイズ差はLFからCRLFへの改行変換で各改行に1 byte追加された場合と整合します。このため **内容上は改行コード差である可能性が高い**ですが、byte-levelでは同一ではないのでSHA-256は一致しません。
-
-GitHub Release Notesには現在、standalone `.user.js` のSHAとして過去の `928e...` が記載されています。その値は **現在公開されているstandalone Assetの実digestとは一致していません**。ZIPの `196b...` は一致しています。
-
-整理方法は次のどちらかです。
-
-1. **推奨:** standalone `.user.js` Assetを、リポジトリ直下の `linkex_downloader_v1.0.0.user.js` とbyte-identicalなファイルへ差し替える。これによりRelease Notesの `928e...`、ZIP内userscript、リポジトリ固定userscriptを統一できる。
-2. 現在のstandalone Assetを維持し、GitHub Release NotesのSHA-256を `742088619d02e166a41ed244863ddc7a0b0d1fbc7347a8302801dfdd1feba364` へ修正する。
-
-今後は **Release公開後にGitHub APIのAsset `digest` とRelease Notes記載値を再照合する**ことを必須工程にします。
+今後も **Release公開後にGitHub APIのAsset `digest` とRelease Notes記載値を再照合する**ことを必須工程にします。
 
 ## リリース成果物の役割
 
