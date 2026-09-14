@@ -86,6 +86,15 @@ UI の **診断ログを保存** から JSON ログを書き出せます。
 
 診断ログでは、認証 Token・共有 Token・署名付き URL などの機密情報を伏せて出力します。
 
+## Development
+
+今後の機能追加・バグ修正を別チャットや別セッションで続ける場合は、次の資料を先に確認してください。
+
+- [DEVELOPMENT.md](DEVELOPMENT.md) — API、状態遷移、安全不変条件、復旧方針、実機検証履歴、開発・リリースチェックリスト
+- [CHANGELOG.md](CHANGELOG.md) — v1.0.0 までの変更履歴と pre-release の検証経緯
+
+新しい ChatGPT チャットでは、`README.md`、`DEVELOPMENT.md`、`CHANGELOG.md`、最新の `linkex-downloader.user.js` を読ませれば、現在の設計を前提に開発を継続できます。
+
 ## License
 
 ライセンスは現在未設定です。第三者への再配布条件を定める場合は `LICENSE` を追加してください。
