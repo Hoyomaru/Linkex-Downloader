@@ -2,103 +2,128 @@
 
 このプロジェクトの主な変更履歴です。
 
+## [Unreleased]
+
+### Documentation
+
+- READMEを利用者向け主要ドキュメントとして拡充
+- 動作環境、導入、更新、アンインストール、UI操作、保存先、復旧、永続化、API概要、安全設計、制限事項を整理
+- `DEVELOPMENT.md` を開発・AI引き継ぎ向けに拡充
+- `docs/ARCHITECTURE.md` を追加
+- `docs/RELEASE.md` を追加
+- `docs/TROUBLESHOOTING.md` を追加
+- 現在のGitHub状態を再確認し、`v1.0.0` tagは存在する一方、GitHub Releaseは未作成であることを明記
+- 現行リポジトリにGitHub Actions / CI/CDが存在しないことを明記
+- v1.0.0作成時の一時release workflowが履歴上存在し、現在は削除済みであることを記録
+
+> このUnreleasedセクションはドキュメント整備のみです。`linkex-downloader.user.js` の実行ロジックおよびVersionは変更していません。
+
 ## [1.0.0] - 2026-09-14
 
 ### Added
 
-- 初回正式リリース
-- Linkex 共有 URL の解析
-- 共有フォルダの再帰走査と全ファイル manifest 作成
-- 1 ファイルずつの安全な一時コピー
-- コピー前後 ID 差分による `destId` 所有権確定
-- signed CDN URL からのローカルダウンロード
-- Range Request による途中再開
-- CDN URL 失効時の再取得
-- CDN 実サイズ基準のローカル検証
-- `LOCAL_COMMITTED` 後の一時コピー自動削除
-- DELETE 前の多重 safety guard
-- 複数ファイル Full Queue
-- ページ再読み込み後の Queue 再開
-- 容量不足 / 単一ファイル上限の安全なスキップ
-- Windows 向けファイル名 sanitize と path collision 回避
-- 多重タブ実行防止 lease
-- 進捗 UI / 最小化
-- 診断ログ JSON 出力と機密情報マスク
+- 初回正式版ソース/配布物
+- Linkex共有URLの解析
+- 共有フォルダの再帰走査と全ファイルmanifest作成
+- 1ファイルずつの安全な一時copy
+- copy前後ID差分による `destId` ownership確定
+- signed CDN URLからのlocal download
+- Range Requestによる途中再開
+- CDN URL失効時の再取得
+- CDN実サイズ基準のlocal verify
+- `LOCAL_COMMITTED` 後の一時copy自動delete
+- DELETE前の多重safety guard
+- 複数ファイルFull Queue
+- ページ再読み込み後のQueue再開
+- 容量不足 / 単一ファイル上限の安全なskip
+- Windows向けファイル名sanitizeとpath collision回避
+- 多重tab実行防止lease
+- 進捗UI / 最小化
+- 診断ログJSON出力と機密情報mask
 
 ### Safety
 
-- COPY 応答不明時は盲目的に再送せず reconcile
-- DELETE 応答不明時は盲目的に再送せず reconcile
-- Downloader 自身が作成したと証明できる `destId` のみ削除
-- DELETE は常に `select_all:false` + 単一 `file_ids:[destId]`
-- ローカル保存検証前の削除を禁止
-- 所有権が曖昧な場合は安全側で停止
+- COPY応答不明時は盲目的に再送せずreconcile
+- DELETE応答不明時は盲目的に再送せずreconcile
+- Downloader自身が作成したと証明できる `destId` のみdelete
+- DELETEは常に `select_all:false` + 単一 `file_ids:[destId]`
+- local保存検証前のdeleteを禁止
+- ownershipが曖昧な場合は安全側で停止
+
+### Distribution
+
+- `linkex-downloader.user.js`
+- `linkex_downloader_v1.0.0.user.js`
+- `linkex_downloader_v1.0.0.zip`
+- Git tag `v1.0.0`
+
+GitHub Release自体は、2026-09-14の再確認時点では作成されていません。
 
 ---
 
 ## Pre-release development history
 
-以下は v1.0.0 に至る段階的な実機検証版です。Git tag / GitHub Release として公開されていない場合があります。
+以下は v1.0.0 に至る段階的な実機検証版です。Git tag / GitHub Releaseとして公開されていない場合があります。
 
 ### v0.6.0
 
-- 2 件制限を外し、共有内の全ファイル Queue に対応
+- 2件制限を外し、共有内の全ファイルQueueに対応
 - フォルダ構造維持
-- Windows path sanitize / collision 回避
-- 容量不足ファイルの skip と再試行
+- Windows path sanitize / collision回避
+- 容量不足ファイルのskipと再試行
 - 全件処理の実機成功を確認
 
 ### v0.5.1
 
-- Queue Pilot の copy reconciliation 成功状態名を修正
-- `reconcileCopy()` が返す `CONFIRMED` と Queue 側判定を一致させた
-- 停止済み `UNCERTAIN_NO_EVIDENCE` job を copy 再送なしで救済できるよう修正
+- Queue Pilotのcopy reconciliation成功状態名を修正
+- `reconcileCopy()` が返す `CONFIRMED` とQueue側判定を一致
+- 停止済み `UNCERTAIN_NO_EVIDENCE` jobをcopy再送なしで救済できるよう修正
 
 ### v0.5.0
 
-- 2 ファイル連続 Queue Pilot
-- Queue 再開 / クラッシュ復旧の検証
+- 2ファイル連続Queue Pilot
+- Queue再開 / crash recoveryの検証
 - 安全境界での停止・再開
 
 ### v0.4.0
 
-- `LOCAL_COMMITTED` 後の単一 `destId` delete を追加
-- delete guard / delete reconciliation を検証
-- 誤削除防止の最終 safety gate を実機確認
+- `LOCAL_COMMITTED` 後の単一 `destId` deleteを追加
+- delete guard / delete reconciliationを検証
+- 誤削除防止の最終safety gateを実機確認
 
 ### v0.3.2
 
-- Tampermonkey sandbox から `showSaveFilePicker()` を呼ぶ際の `Illegal invocation` を修正
-- page Window を `Reflect.apply()` の receiver に固定
-- ダウンロード / サイズ検証の実機成功を確認
+- Tampermonkey sandboxから `showSaveFilePicker()` を呼ぶ際の `Illegal invocation` を修正
+- page Windowを `Reflect.apply()` のreceiverに固定
+- download / size verifyの実機成功を確認
 
 ### v0.3.1
 
-- v0.3.0 で欠落していた「確定済みコピーをDL・検証」ボタンを追加
-- UI 初期化時の `null.addEventListener` 相当の停止を修正
+- v0.3.0で欠落していた「確定済みcopyをDL・検証」ボタンを追加
+- UI初期化時の `null.addEventListener` 相当の停止を修正
 
 ### v0.3.0
 
-- 確定済み `destId` からの signed CDN download
+- 確定済み `destId` からのsigned CDN download
 - Range resume
 - checkpoint
-- 403 / URL refresh 対応
-- CDN 実サイズによるローカル検証
-- 自動削除はまだ未実装
+- 403 / URL refresh対応
+- CDN実サイズによるlocal verify
+- 自動deleteはまだ未実装
 
 ### v0.2.0
 
-- 単一 shared file の copy probe
-- copy 前後の root ID 差分から新規 `destId` を一意に確定
-- 所有権が曖昧な場合は停止
-- delete / download は未実装
+- 単一shared fileのcopy probe
+- copy前後のroot ID差分から新規 `destId` を一意に確定
+- ownershipが曖昧な場合は停止
+- delete / downloadは未実装
 
 ### v0.1.0
 
-- Read-only 診断版
+- Read-only診断版
 - request signing self-test
-- Linkex 認証情報検出
-- 共有 URL 解析
+- Linkex認証情報検出
+- 共有URL解析
 - recursive manifest
-- storage usage 取得
-- Linkex 上のデータ変更は一切なし
+- storage usage取得
+- Linkex上のデータ変更は一切なし
