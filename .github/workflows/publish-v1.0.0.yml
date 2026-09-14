@@ -1,0 +1,46 @@
+name: Publish v1.0.0 artifacts
+
+on:
+  push:
+    paths:
+      - '.github/workflows/publish-v1.0.0.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Rebuild and verify artifacts
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat .release/v1.0.0/part*.b64 > /tmp/linkex-v1.0.0.zip.b64
+          base64 -d /tmp/linkex-v1.0.0.zip.b64 > linkex_downloader_v1.0.0.zip
+          echo '196b8500a5908a1afcae52f3fae8b239733d608ea2766ec5aa4f564e9cc30f83  linkex_downloader_v1.0.0.zip' | sha256sum -c -
+
+          unzip -p linkex_downloader_v1.0.0.zip linkex_downloader_v1.0.0.user.js > linkex_downloader_v1.0.0.user.js
+          echo '928e9aabace1972f41eb97b7b185d40e1c94cfe342ee97fc6cb0880571acdde5  linkex_downloader_v1.0.0.user.js' | sha256sum -c -
+
+          cp linkex_downloader_v1.0.0.user.js linkex-downloader.user.js
+          rm -rf .release
+
+      - name: Commit release artifacts
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add README.md linkex-downloader.user.js linkex_downloader_v1.0.0.user.js linkex_downloader_v1.0.0.zip .release
+          if git diff --cached --quiet; then
+            echo 'No changes to commit.'
+            exit 0
+          fi
+          git commit -m 'release: publish Linkex Downloader v1.0.0'
+          git push
