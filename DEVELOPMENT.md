@@ -44,7 +44,7 @@ Linkex-Downloader/
 
 `linkex-downloader.user.js` とリポジトリ直下の `linkex_downloader_v1.0.0.user.js` は現在同じGit blob内容です。前者を最新ソース、後者をv1.0.0固定配布物として扱います。
 
-GitHub Releaseにはversion固定 `.user.js` とZIPの2つをAssetとして添付しています。公開Assetのbyte-level hashについては後述の「現在のGitHubリリース運用」を参照してください。
+GitHub Releaseにはversion固定 `.user.js` とZIPの2つをAssetとして添付しています。公開後の最終確認で、両AssetのSHA-256はRelease Notes記載値と一致しています。
 
 ## プロジェクトの目的
 
@@ -668,36 +668,23 @@ Release Assets:
 
 利用者向け第一選択はversion固定 `.user.js`、ZIPは補助配布物です。
 
-### v1.0.0 Asset hashの注意
+### v1.0.0 Asset hashの最終確認
 
-GitHub Release APIが返す実際のAsset digest:
+GitHub Release APIで差し替え後に確認した実際のAsset digest:
 
 ```text
 linkex_downloader_v1.0.0.user.js
-742088619d02e166a41ed244863ddc7a0b0d1fbc7347a8302801dfdd1feba364
+928e9aabace1972f41eb97b7b185d40e1c94cfe342ee97fc6cb0880571acdde5
 
 linkex_downloader_v1.0.0.zip
 196b8500a5908a1afcae52f3fae8b239733d608ea2766ec5aa4f564e9cc30f83
 ```
 
-一方、v1.0.0作成時の一時workflowが検証したリポジトリ直下のversion固定userscriptは:
+standalone `.user.js` は **77,630 bytes** で、リポジトリ直下のversion固定userscriptおよびv1.0.0作成時の検証値と一致します。Release Notesに記載したSHA-256とも一致しています。
 
-```text
-928e9aabace1972f41eb97b7b185d40e1c94cfe342ee97fc6cb0880571acdde5
-```
+したがって、v1.0.0の公開成果物については **公開Asset / Release Notes / リポジトリ固定userscriptの整合性確認済み**です。
 
-です。
-
-公開されたstandalone `.user.js` は 79,276 bytes、リポジトリ直下の固定userscriptは 77,630 bytesです。差は **1,646 bytes** で、固定userscriptの行数も **1,646行** です。この差はLF→CRLFの改行変換と整合しますが、byte-levelで同一ではないためSHA-256は異なります。
-
-したがって、Release Notesへhashを掲載する場合は **GitHub上で公開されているAssetそのもののdigest** を使用してください。現在のRelease Notesに記載したstandalone `.user.js` の `928e...` は公開Assetの実digestとは一致していません。ZIPの `196b...` は一致しています。
-
-最も整理された状態にするには、次のどちらかを行います。
-
-1. standalone `.user.js` Assetをリポジトリ直下の固定userscriptとbyte-identicalなファイルへ差し替え、`928e...` に統一する
-2. 現在のstandalone Assetを維持し、Release Notesの `.user.js` SHA-256を `742088...` へ修正する
-
-今後はRelease upload後にGitHub APIのAsset `digest` とRelease Notes記載値を必ず照合してください。
+今後もRelease upload後にGitHub APIのAsset `digest` とRelease Notes記載値を必ず照合してください。
 
 ### 過去の一時workflow
 
