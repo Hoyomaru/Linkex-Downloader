@@ -1,0 +1,23 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+      - 'fix/**'
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Show Node version
+        run: node --version
+      - name: Syntax check userscript
+        run: node --check linkex-downloader.user.js
+      - name: Run regression tests
+        run: node --test tests/*.test.js
