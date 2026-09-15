@@ -19,7 +19,7 @@ jobs:
           fetch-depth: 0
 
       - name: Apply quick download UI patch
-        run: python tools/apply_quick_download_ui.py
+        run: python tools/run_quick_patch.py
 
       - name: Syntax check userscript
         run: node --check linkex-downloader.user.js
