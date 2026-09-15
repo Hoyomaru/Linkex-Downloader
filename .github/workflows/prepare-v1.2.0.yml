@@ -21,6 +21,9 @@ jobs:
       - name: Apply v1.2.0 preparation
         run: python tools/prepare_v1_2_0.py
 
+      - name: Keep existing CI workflow for Actions-token push
+        run: git checkout origin/main -- .github/workflows/ci.yml
+
       - name: Stage generated repository state for consistency checks
         run: git add -A
 
