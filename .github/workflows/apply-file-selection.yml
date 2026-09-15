@@ -1,0 +1,39 @@
+name: Apply file selection feature
+
+on:
+  push:
+    branches:
+      - feat/file-selection-queue
+    paths:
+      - tools/apply-file-selection.py
+      - .github/workflows/apply-file-selection.yml
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: feat/file-selection-queue
+          fetch-depth: 0
+      - name: Apply selective queue patches
+        run: python3 tools/apply-file-selection.py
+      - name: Syntax check
+        run: node --check linkex-downloader.user.js
+      - name: Regression tests
+        run: node --test tests/*.test.js
+      - name: Remove one-off patch machinery
+        run: |
+          rm -f tools/apply-file-selection.py
+          rm -f .github/workflows/apply-file-selection.yml
+          rmdir tools 2>/dev/null || true
+      - name: Commit feature
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -m "feat: add selective file queues"
+          git push origin HEAD:feat/file-selection-queue
