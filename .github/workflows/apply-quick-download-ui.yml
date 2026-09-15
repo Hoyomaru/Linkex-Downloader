@@ -1,0 +1,41 @@
+name: Apply quick download UI
+
+on:
+  push:
+    branches:
+      - feat/quick-download-ui
+    paths:
+      - .github/workflows/apply-quick-download-ui.yml
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Apply quick download UI patch
+        run: python tools/apply_quick_download_ui.py
+
+      - name: Syntax check userscript
+        run: node --check linkex-downloader.user.js
+
+      - name: Run regression tests
+        run: node --test tests/*.test.js
+
+      - name: Verify fixed release artifacts remain unchanged
+        run: git diff --exit-code origin/main -- linkex_downloader_v1.1.0.user.js linkex_downloader_v1.1.0.zip
+
+      - name: Commit implementation
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add linkex-downloader.user.js tests/linkex-downloader.test.js README.md CHANGELOG.md docs/ARCHITECTURE.md docs/TROUBLESHOOTING.md
+          git status --short
+          git commit -m "feat: add one-click all download and compact UI"
+          git push origin HEAD:feat/quick-download-ui
