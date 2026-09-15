@@ -621,6 +621,7 @@
   // --- F-H: confirmed destId only download path (NO DELETE) ---
   const DOWNLOAD_DB = 'linkexDownloaderProbeV1';
   const DOWNLOAD_STORE = 'handles';
+  const PREFERRED_DIR_HANDLE_KEY = 'preferred-download-root:v1';
   const CHECKPOINT_BYTES = 2 * 1024 * 1024;
 
   function openDownloadDb() {
@@ -1603,6 +1604,13 @@
         #linkex-full-queue .primary { background:#2563eb; color:#fff; }
         #linkex-full-queue .warn { background:#d97706; color:#fff; }
         #linkex-full-queue .secondary { background:#374151; color:#fff; }
+        #linkex-full-queue .primary-actions { display:grid; grid-template-columns:1fr; gap:7px; margin-bottom:9px; }
+        #linkex-full-queue .action-main { padding:12px 12px; font-size:14px; }
+        #linkex-full-queue .action-secondary { padding:8px 10px; font-size:12px; }
+        #linkex-full-queue details.more { margin-top:9px; border-top:1px solid #374151; padding-top:7px; }
+        #linkex-full-queue details.more > summary { cursor:pointer; color:#cbd5e1; font-size:12px; font-weight:700; user-select:none; padding:4px 1px 7px; }
+        #linkex-full-queue details.more .more-body { padding-top:2px; }
+        #linkex-full-queue [hidden] { display:none !important; }
         #linkex-full-queue .progress-wrap { margin:2px 0 9px; }
         #linkex-full-queue .progress-meta { display:flex; justify-content:space-between; gap:8px; font-size:11px; color:#cbd5e1; margin-bottom:4px; }
         #linkex-full-queue .progress { height:7px; border-radius:999px; background:#1f2937; overflow:hidden; border:1px solid #374151; }
@@ -1633,23 +1641,33 @@
         <div class="body">
           <div id="lf-share-context" class="share-context" hidden></div>
           <input id="lf-url" placeholder="https://l2e.click/d/xxxxxxxx" />
-          <div class="row"><button id="lf-analyze" class="primary">共有リンクを解析</button><button id="lf-selftest" class="secondary">署名テスト</button></div>
-          <div class="row"><button id="lf-start" class="warn" disabled>全ファイル開始</button><button id="lf-start-selected" class="primary" disabled>選択ファイル開始</button></div>
+          <div class="primary-actions">
+            <button id="lf-start" class="primary action-main" disabled>すべてダウンロード</button>
+            <button id="lf-select-mode" class="secondary action-secondary" disabled>ファイルを選ぶ</button>
+          </div>
           <div id="lf-selection" class="selection" hidden>
             <div id="lf-selection-meta" class="selection-meta">0 / 0 selected</div>
             <input id="lf-file-filter" placeholder="ファイル名 / パスで絞り込み" />
             <div class="selection-actions"><button id="lf-select-all" class="secondary">全件選択</button><button id="lf-clear-all" class="secondary">全解除</button><button id="lf-select-visible" class="secondary">表示中を選択</button><button id="lf-clear-visible" class="secondary">表示中を解除</button></div>
             <div id="lf-file-list" class="file-list"></div>
             <div id="lf-selection-note" class="notice"></div>
+            <div class="row" style="margin-top:8px;margin-bottom:0"><button id="lf-start-selected" class="primary" disabled>選択をダウンロード</button></div>
           </div>
-          <div class="row"><button id="lf-resume" class="primary" disabled>Queueを再開</button><button id="lf-pause" class="secondary" disabled>現在ファイル後に停止</button></div>
-          <div class="row"><button id="lf-retry" class="secondary" disabled>容量スキップを再試行</button><button id="lf-abandon" class="secondary" disabled>Queueを安全に破棄</button></div>
-          <div class="row"><button id="lf-export" class="secondary">診断ログを保存</button><button id="lf-refresh" class="secondary">状態を再表示</button></div>
+          <div id="lf-queue-actions" class="row" hidden><button id="lf-resume" class="primary" disabled>Queueを再開</button><button id="lf-pause" class="secondary" disabled>現在ファイル後に停止</button></div>
           <div class="progress-wrap">
             <div class="progress-meta"><span id="lf-progress-text">Queueなし</span><span id="lf-progress-pct">0%</span></div>
             <div class="progress"><i id="lf-progress-bar"></i></div>
           </div>
-          <div id="lf-status" class="status">v0.6.0で実機検証済みのトランザクション中核を維持した正式版です。\n1ファイルずつ COPY → DL → VERIFY → 所有destIdだけDELETE します。</div>
+          <div id="lf-status" class="status">共有ページでは「すべてダウンロード」だけで解析からQueue開始まで進めます。\n安全処理は1ファイルずつ COPY → DL → VERIFY → 所有destIdだけDELETE します。</div>
+          <details id="lf-more" class="more">
+            <summary>詳細</summary>
+            <div class="more-body">
+              <div class="row"><button id="lf-destination" class="secondary">保存先を変更</button><button id="lf-analyze" class="secondary">共有を再解析</button></div>
+              <div class="row"><button id="lf-selftest" class="secondary">署名テスト</button><button id="lf-export" class="secondary">診断ログを保存</button></div>
+              <div class="row"><button id="lf-refresh" class="secondary">状態を再表示</button><button id="lf-retry" class="secondary" disabled>容量スキップを再試行</button></div>
+              <div class="row" style="margin-bottom:0"><button id="lf-abandon" class="secondary" disabled>Queueを安全に破棄</button></div>
+            </div>
+          </details>
           <div class="notice">安全規則: copy/delete応答不明時は盲目的に再送しません。削除はLOCAL_COMMITTEDかつ所有権確定済みdestId 1件だけ。実行中は別端末からLinkexを変更しないでください。診断ログはtoken・署名付きURLを伏せて書き出します。</div>
         </div>
       </div>`;
@@ -1660,6 +1678,7 @@
     const status = root.querySelector('#lf-status');
     const analyzeBtn = root.querySelector('#lf-analyze');
     const startBtn = root.querySelector('#lf-start');
+    const selectModeBtn = root.querySelector('#lf-select-mode');
     const selectedStartBtn = root.querySelector('#lf-start-selected');
     const selectionPanel = root.querySelector('#lf-selection');
     const selectionMeta = root.querySelector('#lf-selection-meta');
@@ -1674,6 +1693,8 @@
     const pauseBtn = root.querySelector('#lf-pause');
     const retryBtn = root.querySelector('#lf-retry');
     const abandonBtn = root.querySelector('#lf-abandon');
+    const destinationBtn = root.querySelector('#lf-destination');
+    const queueActions = root.querySelector('#lf-queue-actions');
     const exportBtn = root.querySelector('#lf-export');
     const refreshBtn = root.querySelector('#lf-refresh');
     const collapseBtn = root.querySelector('#lf-collapse');
@@ -1701,7 +1722,12 @@
     let running = false;
     let activeRunJob = null;
     let selectedIndexes = new Set();
+    let selectionExpanded = false;
+    let preparing = false;
     let pageShareTarget = null;
+    let preferredBaseDirHandle = null;
+    let preferredDirPermission = 'unknown';
+    let preferredHandleReady = false;
     input.value = GM_getValue(LAST_URL_KEY, '') || '';
 
     const prefs = loadUiPrefs();
@@ -1709,6 +1735,61 @@
     collapseBtn.textContent = prefs.collapsed ? '+' : '−';
 
     function isTerminal(job) { return job && ['DONE','DONE_WITH_SKIPS'].includes(job.state); }
+
+    function preferredDirectoryLabel() {
+      if (!preferredHandleReady) return '読み込み中…';
+      if (!preferredBaseDirHandle) return '未設定（初回に選択）';
+      const suffix = preferredDirPermission === 'granted' ? '' : '（再許可が必要）';
+      return `${preferredBaseDirHandle.name || '選択済みフォルダ'}${suffix}`;
+    }
+
+    async function refreshPreferredDirectoryState({reloadHandle = false} = {}) {
+      try {
+        if (reloadHandle || !preferredHandleReady) preferredBaseDirHandle = await idbGetHandle(PREFERRED_DIR_HANDLE_KEY);
+        if (!preferredBaseDirHandle) preferredDirPermission = 'missing';
+        else if (preferredBaseDirHandle.queryPermission) preferredDirPermission = await preferredBaseDirHandle.queryPermission({mode:'readwrite'});
+        else preferredDirPermission = 'prompt';
+      } catch (e) {
+        console.warn('[Linkex preferred directory]', e);
+        preferredBaseDirHandle = null;
+        preferredDirPermission = 'missing';
+      } finally {
+        preferredHandleReady = true;
+        syncSharePageContext({initial:true});
+        refreshQueueUi();
+      }
+    }
+
+    async function rememberPreferredDirectory(handle) {
+      await idbPutHandle(PREFERRED_DIR_HANDLE_KEY, handle);
+      preferredBaseDirHandle = handle;
+      preferredDirPermission = 'granted';
+      preferredHandleReady = true;
+      syncSharePageContext({initial:true});
+      refreshQueueUi();
+      return handle;
+    }
+
+    async function acquirePreferredBaseDirFromGesture({forcePicker = false} = {}) {
+      // showDirectoryPicker / requestPermission はuser gestureが必要。
+      // この関数のpicker分岐より前にnetwork/IDB awaitを置かないこと。
+      if (forcePicker || !preferredBaseDirHandle || preferredDirPermission === 'denied' || preferredDirPermission === 'missing') {
+        const picked = await invokeDirectoryPicker({mode:'readwrite'});
+        await ensureHandlePermission(picked);
+        return await rememberPreferredDirectory(picked);
+      }
+      if (preferredDirPermission === 'granted') return preferredBaseDirHandle;
+      if (preferredBaseDirHandle.requestPermission) {
+        const permission = await preferredBaseDirHandle.requestPermission({mode:'readwrite'});
+        preferredDirPermission = permission;
+        if (permission === 'granted') {
+          syncSharePageContext({initial:true});
+          refreshQueueUi();
+          return preferredBaseDirHandle;
+        }
+      }
+      throw new LinkexError('保存先フォルダへの書き込み権限がありません。「詳細」→「保存先を変更」から選び直してください。', {kind:'filesystem'});
+    }
 
     function shortShareToken(token) {
       const value = String(token || '');
@@ -1728,18 +1809,19 @@
         input.hidden = true;
         shareContextEl.hidden = false;
         const authReady = !!readCredentialBridge();
-        shareContextEl.textContent = `このページの共有: ${shortShareToken(next.shareToken)} · Linkex認証連携: ${authReady ? '準備済み' : '未準備（初回はdisk.linkex.ioを開いてください）'}`;
-        analyzeBtn.textContent = 'この共有を解析';
+        shareContextEl.textContent = `このページの共有: ${shortShareToken(next.shareToken)} · 認証: ${authReady ? '準備済み' : '未準備'} · 保存先: ${preferredDirectoryLabel()}`;
+        analyzeBtn.textContent = 'この共有を再解析';
       } else {
         input.hidden = false;
         shareContextEl.hidden = true;
         shareContextEl.textContent = '';
-        analyzeBtn.textContent = '共有リンクを解析';
+        analyzeBtn.textContent = '共有URLを解析';
       }
 
-      if (onShareHost && !running && manifest && manifest.shareToken !== nextToken) {
+      if (onShareHost && !running && !preparing && manifest && manifest.shareToken !== nextToken) {
         manifest = null;
         selectedIndexes.clear();
+        selectionExpanded = false;
         fileFilter.value = '';
         renderSelection();
         if (!initial) write('共有ページが変わりました。現在の共有を解析してください。');
@@ -1771,7 +1853,7 @@
 
     function renderSelection() {
       const hasManifest = !!manifest?.files?.length;
-      selectionPanel.hidden = !hasManifest;
+      selectionPanel.hidden = !hasManifest || !selectionExpanded;
       if (!hasManifest) {
         fileList.replaceChildren();
         selectionMeta.textContent = '0 / 0 selected';
@@ -1803,6 +1885,7 @@
       selectionNote.textContent = visible.length > shown.length ? `絞り込み結果 ${visible.length}件のうち先頭300件を表示しています。検索欄で絞り込めます。` : `表示中: ${visible.length}件`;
     }
 
+    input.addEventListener('input', refreshQueueUi);
     fileFilter.addEventListener('input', renderSelection);
     fileList.addEventListener('change', event => {
       const checkbox = event.target?.closest?.('input[type="checkbox"][data-index]');
@@ -1849,14 +1932,21 @@
     function refreshQueueUi() {
       const job = loadQueueJob();
       const active = job && !isTerminal(job);
-      resumeBtn.disabled = running || !active;
-      startBtn.disabled = running || !manifest?.files?.length || !!active;
-      selectedStartBtn.disabled = running || !manifest?.files?.length || selectedIndexes.size === 0 || !!active;
+      const busy = running || preparing;
+      const hasShareInput = !!detectSharePageTarget(globalThis.location?.href || '') || !!String(input.value || '').trim();
+      resumeBtn.disabled = busy || !active;
+      resumeBtn.hidden = running || !active;
       pauseBtn.disabled = !running || !activeRunJob || !!activeRunJob.stopRequested;
+      pauseBtn.hidden = !running;
+      queueActions.hidden = resumeBtn.hidden && pauseBtn.hidden;
+      startBtn.disabled = busy || !!active || !hasShareInput || !preferredHandleReady;
+      selectModeBtn.disabled = busy || !!active || !hasShareInput;
+      selectedStartBtn.disabled = busy || !manifest?.files?.length || selectedIndexes.size === 0 || !!active || !preferredHandleReady;
       const c = queueCounts(job);
-      retryBtn.disabled = running || !job || !(c.skippedCapacity || c.unfittable) || !isTerminal(job);
-      abandonBtn.disabled = running || !active;
-      analyzeBtn.disabled = running;
+      retryBtn.disabled = busy || !job || !(c.skippedCapacity || c.unfittable) || !isTerminal(job);
+      abandonBtn.disabled = busy || !active;
+      analyzeBtn.disabled = busy || !hasShareInput;
+      destinationBtn.disabled = busy;
       refreshProgress();
       return job;
     }
@@ -1875,25 +1965,24 @@
       recordEvent(ok ? 'info' : 'error', 'signature-selftest', ok ? 'PASS' : 'FAIL', {tests:tests.map(t=>({name:t.name,ok:t.ok}))});
     });
 
-    analyzeBtn.addEventListener('click', async () => {
-      analyzeBtn.disabled = true;
-      try {
-        const pageTargetAtStart = detectSharePageTarget(globalThis.location?.href || '');
-        const sourceInput = pageTargetAtStart?.href || input.value;
-        const token = pageTargetAtStart?.shareToken || parseShareToken(sourceInput);
-        GM_setValue(LAST_URL_KEY, String(sourceInput || '').trim());
-        const api = new LinkexApi({token:null});
-        write('共有manifestを読み取り中…');
-        const nextManifest = await buildManifest(api, token, x => write(`共有manifestを読み取り中…\nfiles: ${x.files}\n${x.path || ''}`));
-        if (pageTargetAtStart) {
-          const currentTarget = detectSharePageTarget(globalThis.location?.href || '');
-          if (currentTarget?.shareToken !== token) throw new LinkexError('解析中に共有ページが変わりました。現在の共有をもう一度解析してください。', {kind:'share_context_changed'});
-        }
-        manifest = nextManifest;
-        selectedIndexes = new Set(manifest.files.map((_, i) => i));
-        fileFilter.value = '';
-        renderSelection();
-        const largest = [...manifest.files].sort((a,b)=>Number(b.size||0)-Number(a.size||0))[0];
+    async function analyzeCurrentShare({announceSuccess = true} = {}) {
+      const pageTargetAtStart = detectSharePageTarget(globalThis.location?.href || '');
+      const sourceInput = pageTargetAtStart?.href || input.value;
+      const token = pageTargetAtStart?.shareToken || parseShareToken(sourceInput);
+      GM_setValue(LAST_URL_KEY, String(sourceInput || '').trim());
+      const api = new LinkexApi({token:null});
+      write('共有manifestを読み取り中…');
+      const nextManifest = await buildManifest(api, token, x => write(`共有manifestを読み取り中…\nfiles: ${x.files}\n${x.path || ''}`));
+      if (pageTargetAtStart) {
+        const currentTarget = detectSharePageTarget(globalThis.location?.href || '');
+        if (currentTarget?.shareToken !== token) throw new LinkexError('解析中に共有ページが変わりました。現在の共有をもう一度解析してください。', {kind:'share_context_changed'});
+      }
+      manifest = nextManifest;
+      selectedIndexes = new Set(manifest.files.map((_, i) => i));
+      fileFilter.value = '';
+      renderSelection();
+      const largest = [...manifest.files].sort((a,b)=>Number(b.size||0)-Number(a.size||0))[0];
+      if (announceSuccess) {
         write([
           '解析成功（読み取りのみ）',
           `共有名: ${manifest.shareName || '(unknown)'}`,
@@ -1902,17 +1991,30 @@
           `合計: ${formatBytes(manifest.totalBytes)}`,
           largest ? `最大ファイル: ${formatBytes(largest.size)}  ${largest.remotePath}` : '',
           '',
-          '「全ファイル開始」または一覧で絞り込んだ「選択ファイル開始」を選べます。処理自体は従来どおり1件ずつ安全に実行します。'
+          '全件なら「すべてダウンロード」、必要なものだけなら「ファイルを選ぶ」を使えます。'
         ].filter(Boolean).join('\n'), 'ok');
-        recordEvent('info', 'manifest', '共有解析成功', {shareName:manifest.shareName, fileCount:manifest.files.length, folderCount:manifest.folders.length, totalBytes:manifest.totalBytes});
-      } catch (e) {
-        console.error('[Linkex analyze]', e);
-        write(`解析失敗: ${e?.message || e}`, 'err');
-        recordEvent('error', 'manifest', `共有解析失敗: ${e?.message || e}`);
-        manifest = null;
-        selectedIndexes.clear();
-        renderSelection();
-      } finally { analyzeBtn.disabled = false; refreshQueueUi(); }
+      }
+      recordEvent('info', 'manifest', '共有解析成功', {shareName:manifest.shareName, fileCount:manifest.files.length, folderCount:manifest.folders.length, totalBytes:manifest.totalBytes});
+      return manifest;
+    }
+
+    function handleAnalyzeFailure(e) {
+      console.error('[Linkex analyze]', e);
+      write(`解析失敗: ${e?.message || e}`, 'err');
+      recordEvent('error', 'manifest', `共有解析失敗: ${e?.message || e}`);
+      manifest = null;
+      selectedIndexes.clear();
+      selectionExpanded = false;
+      renderSelection();
+    }
+
+    analyzeBtn.addEventListener('click', async () => {
+      if (running || preparing) return;
+      preparing = true;
+      refreshQueueUi();
+      try { await analyzeCurrentShare({announceSuccess:true}); }
+      catch (e) { handleAnalyzeFailure(e); }
+      finally { preparing = false; refreshQueueUi(); }
     });
 
     async function runJob(job, queueRoot, resume=false) {
@@ -1945,7 +2047,7 @@
       }
     }
 
-    async function startManifestQueue(selection = null) {
+    async function startManifestQueue(selection = null, {baseDir = null, skipConfirm = false} = {}) {
       if (!manifest || running) return;
       const selected = selection == null ? null : Array.from(selection).sort((a,b) => a - b);
       const chosenFiles = selected == null ? manifest.files : selected.map(index => manifest.files[index]).filter(Boolean);
@@ -1955,6 +2057,7 @@
       if (isSharePageHost(currentHref) && (!currentPageTarget || currentPageTarget.shareToken !== manifest.shareToken)) {
         manifest = null;
         selectedIndexes.clear();
+        selectionExpanded = false;
         fileFilter.value = '';
         renderSelection();
         write('共有ページが解析時点から変わっています。現在の共有をもう一度解析してください。', 'err');
@@ -1964,45 +2067,100 @@
       if (!resolveCredentials()) { write(credentialBootstrapMessage(), 'err'); syncSharePageContext({initial:true}); return; }
       const totalBytes = chosenFiles.reduce((sum, file) => sum + Number(file?.size || 0), 0);
       const modeText = selected == null ? '全ファイル' : '選択ファイル';
-      const pageWindow = getNativePageWindow();
-      const ok = Reflect.apply(pageWindow.confirm, pageWindow, [`${modeText} ${chosenFiles.length}件（合計 ${formatBytes(totalBytes)}）を順番に処理します。
-
-各ファイルはLinkexへ一時コピー → ローカル検証 → 確定済み一時コピーだけ削除します。
-開始しますか？`]);
-      if (!ok) return;
-      let baseDir;
-      try { baseDir = await invokeDirectoryPicker({mode:'readwrite'}); }
-      catch (e) { if (e?.name !== 'AbortError') write(`保存先選択失敗: ${e?.message || e}`, 'err'); return; }
+      if (!skipConfirm) {
+        const pageWindow = getNativePageWindow();
+        const ok = Reflect.apply(pageWindow.confirm, pageWindow, [`${modeText} ${chosenFiles.length}件（合計 ${formatBytes(totalBytes)}）を順番に処理します。\n\n各ファイルはLinkexへ一時コピー → ローカル検証 → 確定済み一時コピーだけ削除します。\n開始しますか？`]);
+        if (!ok) return;
+      }
+      let chosenBaseDir = baseDir;
+      if (!chosenBaseDir) {
+        try { chosenBaseDir = await invokeDirectoryPicker({mode:'readwrite'}); }
+        catch (e) { if (e?.name !== 'AbortError') write(`保存先選択失敗: ${e?.message || e}`, 'err'); return; }
+      }
       running = true;
       try {
         await acquireLease();
         const activeJob = loadQueueJob();
         if (activeJob && !isTerminal(activeJob)) throw new LinkexError('別の未完了Queueを検出しました。状態を再表示してから再開または整理してください。', {kind:'queue_conflict'});
-        await ensureHandlePermission(baseDir);
+        await ensureHandlePermission(chosenBaseDir);
         const job = createQueueFromManifest(manifest, selected);
-        const queueRoot = await baseDir.getDirectoryHandle(job.folderName, {create:true});
+        const queueRoot = await chosenBaseDir.getDirectoryHandle(job.folderName, {create:true});
         await putQueueRootHandle(job, queueRoot);
         saveQueueJob(job);
         recordEvent('info', 'queue-created', `Queue作成: ${job.jobId}`, {jobId:job.jobId, selectionMode:job.selectionMode, sourceOriginalCount:job.sourceOriginalCount, shareName:job.shareName, folderName:job.folderName, items:job.items.length, totalBytes:job.sourceTotalBytes});
-        write(`${modeText} Queue作成
-
-${queueSummary(job)}
-
-${job.items.length}ファイルを順次処理します。`, 'ok');
+        write(`${modeText} Queue作成\n\n${queueSummary(job)}\n\n${job.items.length}ファイルを順次処理します。`, 'ok');
         await runJob(job, queueRoot, false);
       } catch (e) {
         console.error('[Linkex Queue]', e);
         const job = loadQueueJob();
-        write(`Queue停止: ${e?.message || e}
-
-${queueSummary(job)}
-
-危険な状態では安全側で停止します。「Queueを再開」はcopy/delete POSTを盲目的に再送しません。`, 'err');
+        write(`Queue停止: ${e?.message || e}\n\n${queueSummary(job)}\n\n危険な状態では安全側で停止します。「Queueを再開」はcopy/delete POSTを盲目的に再送しません。`, 'err');
       } finally { running = false; releaseLease(); syncSharePageContext({initial:true}); refreshQueueUi(); }
     }
 
-    startBtn.addEventListener('click', () => startManifestQueue(null));
-    selectedStartBtn.addEventListener('click', () => startManifestQueue(new Set(selectedIndexes)));
+    startBtn.addEventListener('click', async () => {
+      if (running || preparing) return;
+      const active = loadQueueJob();
+      if (active && !isTerminal(active)) { write('未完了Queueがあります。先に「Queueを再開」または詳細から状態を確認してください。'); refreshQueueUi(); return; }
+      if (!resolveCredentials()) { write(credentialBootstrapMessage(), 'err'); syncSharePageContext({initial:true}); return; }
+      preparing = true;
+      refreshQueueUi();
+      try {
+        // user gestureが失われる前に保存先permission/pickerを確定し、その後でnetwork解析する。
+        const baseDir = await acquirePreferredBaseDirFromGesture();
+        await analyzeCurrentShare({announceSuccess:false});
+        preparing = false;
+        refreshQueueUi();
+        await startManifestQueue(null, {baseDir, skipConfirm:true});
+      } catch (e) {
+        if (e?.name !== 'AbortError') {
+          if (e?.kind === 'filesystem') write(`保存先準備失敗: ${e?.message || e}`, 'err');
+          else handleAnalyzeFailure(e);
+        }
+      } finally {
+        preparing = false;
+        refreshQueueUi();
+      }
+    });
+
+    selectModeBtn.addEventListener('click', async () => {
+      if (running || preparing) return;
+      preparing = true;
+      refreshQueueUi();
+      try {
+        await analyzeCurrentShare({announceSuccess:false});
+        selectionExpanded = true;
+        renderSelection();
+        write(`ファイルを選択してください。\n${manifest.files.length}件 / ${formatBytes(manifest.totalBytes)}\n選択後に「選択をダウンロード」を押します。`, 'ok');
+      } catch (e) { handleAnalyzeFailure(e); }
+      finally { preparing = false; refreshQueueUi(); }
+    });
+
+    selectedStartBtn.addEventListener('click', async () => {
+      if (running || preparing || !manifest || !selectedIndexes.size) return;
+      if (!resolveCredentials()) { write(credentialBootstrapMessage(), 'err'); syncSharePageContext({initial:true}); return; }
+      preparing = true;
+      refreshQueueUi();
+      try {
+        const baseDir = await acquirePreferredBaseDirFromGesture();
+        preparing = false;
+        refreshQueueUi();
+        await startManifestQueue(new Set(selectedIndexes), {baseDir, skipConfirm:true});
+      } catch (e) {
+        if (e?.name !== 'AbortError') write(`保存先準備失敗: ${e?.message || e}`, 'err');
+      } finally { preparing = false; refreshQueueUi(); }
+    });
+
+    destinationBtn.addEventListener('click', async () => {
+      if (running || preparing) return;
+      preparing = true;
+      refreshQueueUi();
+      try {
+        const handle = await acquirePreferredBaseDirFromGesture({forcePicker:true});
+        write(`保存先を「${handle.name || '選択済みフォルダ'}」に設定しました。次回から権限が有効なら1クリックで開始できます。`, 'ok');
+      } catch (e) {
+        if (e?.name !== 'AbortError') write(`保存先変更失敗: ${e?.message || e}`, 'err');
+      } finally { preparing = false; refreshQueueUi(); }
+    });
 
     resumeBtn.addEventListener('click', async () => {
       if (running) return;
@@ -2108,6 +2266,7 @@ ${queueSummary(job)}
       setInterval(() => syncCredentialBridgeFromDisk({clearIfMissing:true}), 60000);
     }
     syncSharePageContext({initial:true});
+    void refreshPreferredDirectoryState({reloadHandle:true});
     let observedPageHref = String(globalThis.location?.href || '');
     setInterval(() => {
       const currentHref = String(globalThis.location?.href || '');
@@ -2117,12 +2276,13 @@ ${queueSummary(job)}
     }, 750);
     globalThis.addEventListener?.('focus', () => {
       if (isDiskStoragePage()) syncCredentialBridgeFromDisk();
+      void refreshPreferredDirectoryState({reloadHandle:false});
       syncSharePageContext({initial:true});
     });
 
     const existing = refreshQueueUi();
     if (existing) {
-      if (existing.state === 'DONE') write(`前回Full Queueは完了済みです。\n\n${queueSummary(existing, {detail:true})}\n\n別共有は解析して「全ファイル開始」できます。`, 'ok');
+      if (existing.state === 'DONE') write(`前回Full Queueは完了済みです。\n\n${queueSummary(existing, {detail:true})}\n\n別共有は「すべてダウンロード」から開始できます。`, 'ok');
       else if (existing.state === 'DONE_WITH_SKIPS') write(`前回Full Queueはスキップありで走査完了しています。\n\n${queueSummary(existing, {detail:true})}\n\n容量条件を変えた場合は「容量スキップを再試行」が使えます。`, 'ok');
       else write(`未完了Full Queueを検出しました。\n\n${queueSummary(existing)}\n\n「Queueを再開」で状態照合から続けられます。`, '');
     }
