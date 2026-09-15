@@ -4,6 +4,10 @@
 
 ## [Unreleased]
 
+次回リリース向けの変更はここへ追記します。
+
+## [1.1.0] - 2026-09-15
+
 ### Fixed
 
 - Downloaderパネルをviewport内に制限し、縦に収まらない場合はパネル本文をスクロール可能に修正
@@ -39,7 +43,6 @@
 - 公開後のAsset digest照合をリリースチェックへ追加
 - standalone `.user.js` Release Assetをリポジトリ固定版とbyte-identicalなファイルへ差し替え、Release Notes記載SHA-256との一致を確認
 
-> このUnreleasedセクションにはv1.0.0以降の未リリース変更を記録しています。正式リリースまでは `linkex-downloader.user.js` のVersionは1.0.0のままです。
 
 ## [1.0.0] - 2026-09-14
 

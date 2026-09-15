@@ -8,41 +8,42 @@ READMEは利用者向け、CHANGELOGは変更履歴、`docs/ARCHITECTURE.md` は
 
 ## 現在の状態
 
-2026-09-14 時点で確認した状態です。
+2026-09-15 時点で確認した状態です。
 
-- Stable: **v1.0.0**
-- userscript metadata `@version`: **1.0.0**
-- `const VERSION`: **1.0.0**
-- Git tag: **`v1.0.0` あり**
-- GitHub Release: **v1.0.0 公開済み（1件）**
-- Release title: **Linkex Downloader v1.0.0 — 初回安定版**
-- Release URL: `https://github.com/Hoyomaru/Linkex-Downloader/releases/tag/v1.0.0`
+- Stable: **v1.1.0**
+- userscript metadata `@version`: **1.1.0**
+- `const VERSION`: **1.1.0**
+- Git tag: **`v1.1.0`**
+- GitHub Release: **v1.1.0 公開済み**
+- Release title: **Linkex Downloader v1.1.0 — 選択Queue・安全性強化**
+- Release URL: `https://github.com/Hoyomaru/Linkex-Downloader/releases/tag/v1.1.0`
 - 現行 GitHub Actions: **CIあり**（userscript構文チェック + Node標準回帰テスト）
-- Issue: **なし**
-- Pull Request: **なし**
 - Runtime: Tampermonkey userscript
 - Target: `https://disk.linkex.io/*`
 - Main API origin: `https://prod.linksvc.xyz`
 - 実機確認ブラウザ: Chromium系（Chrome / Edge）
 - License: **未設定**
-
 ### リポジトリ直下
 
 ```text
 Linkex-Downloader/
 ├─ linkex-downloader.user.js
+├─ linkex_downloader_v1.1.0.user.js
+├─ linkex_downloader_v1.1.0.zip
 ├─ linkex_downloader_v1.0.0.user.js
 ├─ linkex_downloader_v1.0.0.zip
+├─ tests/linkex-downloader.test.js
 ├─ README.md
 ├─ DEVELOPMENT.md
 ├─ CHANGELOG.md
 └─ docs/
    ├─ ARCHITECTURE.md
    ├─ RELEASE.md
-   └─ TROUBLESHOOTING.md
+   ├─ TROUBLESHOOTING.md
+   └─ releases/v1.1.0.md
 ```
 
-`linkex-downloader.user.js` とリポジトリ直下の `linkex_downloader_v1.0.0.user.js` は現在同じGit blob内容です。前者を最新ソース、後者をv1.0.0固定配布物として扱います。
+`linkex-downloader.user.js` とリポジトリ直下の `linkex_downloader_v1.1.0.user.js` はv1.1.0 release時点でbyte-identicalです。v1.0.0固定配布物は過去Releaseの再現用として変更せず保持します。
 
 GitHub Releaseにはversion固定 `.user.js` とZIPの2つをAssetとして添付しています。公開後の最終確認で、両AssetのSHA-256はRelease Notes記載値と一致しています。
 
@@ -152,7 +153,7 @@ Downloader独自のtoken設定欄はありません。
 
 ## 利用API
 
-現行v1.0.0で確認できる範囲です。
+現行v1.1.0で確認できる範囲です。
 
 | 用途 | Method | Path | 認証 | 書込 |
 |---|---|---|---|---|
@@ -287,7 +288,8 @@ metadata sizeをlocal verify基準へ戻さないでください。
 - `beforeIds` が存在
 - `confirmedDest.id` が `beforeIds` に含まれない
 - `download.destId === confirmedDest.id`
-- `downloadedBytes === expectedCdnBytes > 0`
+- `downloadedBytes === expectedCdnBytes >= 0`
+- 新規transactionでは `download.sizeVerified === true`
 - `verifiedAt` が存在
 
 その後 `ensureDeleted()` が削除直前にcurrent own fileを再取得し、`sameOwnedIdentity()` で:

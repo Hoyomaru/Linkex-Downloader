@@ -1,0 +1,52 @@
+name: Publish v1.1.0
+
+on:
+  workflow_run:
+    workflows: ["CI"]
+    branches: [main]
+    types: [completed]
+
+permissions:
+  contents: write
+
+jobs:
+  publish:
+    if: ${{ github.event.workflow_run.conclusion == 'success' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+          fetch-depth: 0
+
+      - name: Verify release commit and artifacts
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "${{ github.event.workflow_run.head_sha }}"
+          grep -Fq '// @version      1.1.0' linkex-downloader.user.js
+          grep -Fq "const VERSION = '1.1.0';" linkex-downloader.user.js
+          cmp linkex-downloader.user.js linkex_downloader_v1.1.0.user.js
+          unzip -p linkex_downloader_v1.1.0.zip linkex_downloader_v1.1.0.user.js > /tmp/release.user.js
+          cmp /tmp/release.user.js linkex_downloader_v1.1.0.user.js
+          test "$(sha256sum linkex_downloader_v1.1.0.user.js | awk '{print $1}')" = "f3d22381b3601508143784af83feb8a96be200f0966f93fa9998c930164168e4"
+          test "$(sha256sum linkex_downloader_v1.1.0.zip | awk '{print $1}')" = "b510266933e84155acebd3a7ff25ebda8e2088d86a9499ec9d45c6a3541866e9"
+          node --check linkex-downloader.user.js
+          node --test tests/*.test.js
+
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if gh release view v1.1.0 >/dev/null 2>&1; then
+            echo 'v1.1.0 already exists; nothing to publish.'
+            exit 0
+          fi
+          gh release create v1.1.0 \
+            linkex_downloader_v1.1.0.user.js \
+            linkex_downloader_v1.1.0.zip \
+            --target "${{ github.event.workflow_run.head_sha }}" \
+            --title "Linkex Downloader v1.1.0 — 選択Queue・安全性強化" \
+            --notes-file docs/releases/v1.1.0.md
