@@ -10,6 +10,7 @@ permissions:
 
 jobs:
   prepare:
+    if: github.event.head_commit.message == 'chore: fix v1.1.0 release preparation workflow'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
@@ -28,10 +29,8 @@ jobs:
       - name: Verify v1.0.0 fixed artifacts remain unchanged
         run: git diff --exit-code origin/main -- linkex_downloader_v1.0.0.user.js linkex_downloader_v1.0.0.zip
 
-      - name: Remove temporary release-preparation machinery
-        run: |
-          rm -f tools/prepare_v1_1_0.py .github/workflows/prepare-v1.1.0.yml
-          rmdir tools 2>/dev/null || true
+      - name: Keep workflow changes out of the generated commit
+        run: rm -f .github/workflows/publish-v1.1.0.yml
 
       - name: Commit prepared release
         run: |
