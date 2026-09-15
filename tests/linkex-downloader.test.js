@@ -10,7 +10,7 @@ const {TextEncoder} = require('node:util');
 const SOURCE_PATH = 'linkex-downloader.user.js';
 const SOURCE = fs.readFileSync(SOURCE_PATH, 'utf8');
 const STARTUP = "  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', createPanel, {once:true});\n  else createPanel();\n})();";
-const EXPOSE = "  globalThis.__linkexTest = {allocateLocalPaths, assertDeleteGuards, downloadOwnedFile, sameOwnedIdentity};\n})();";
+const EXPOSE = "  globalThis.__linkexTest = {allocateLocalPaths, assertDeleteGuards, downloadOwnedFile, sameOwnedIdentity, LinkexApi, compactDoneTx};\n})();";
 
 function loadRuntime() {
   assert.ok(SOURCE.includes(STARTUP), 'test harness could not find userscript startup block');
@@ -199,4 +199,71 @@ test('runJob itself no longer acquires or releases the lease', () => {
   assert.doesNotMatch(block, /await acquireLease\(\)/);
   assert.doesNotMatch(block, /releaseLease\(\)/);
   assert.match(block, /assertLease\(\)/);
+});
+
+test('read-only GET retries HTTP 429 and honors an immediate Retry-After', async () => {
+  const {api, context} = loadRuntime();
+  let calls = 0;
+  context.GM_xmlhttpRequest = options => {
+    calls += 1;
+    if (calls === 1) {
+      options.onload({status: 429, response: {code: 429, message: 'rate limited'}, responseHeaders: 'Retry-After: 0\r\n'});
+    } else {
+      options.onload({status: 200, response: {code: 0, data: {ok: true}}, responseHeaders: ''});
+    }
+  };
+  const client = new api.LinkexApi({lang: 'en'});
+  const result = await client.getShare('abcde');
+  assert.equal(calls, 2);
+  assert.equal(result.ok, true);
+});
+
+test('write request is never automatically retried on 5xx', async () => {
+  const {api, context} = loadRuntime();
+  let calls = 0;
+  context.GM_xmlhttpRequest = options => {
+    calls += 1;
+    options.onload({status: 503, response: {code: 503, message: 'unavailable'}, responseHeaders: ''});
+  };
+  const client = new api.LinkexApi({token: 'token', lang: 'en'});
+  await assert.rejects(() => client.copySharedFile({shareToken: 'abcde', sourceId: 'source-1'}), error => error?.status === 503);
+  assert.equal(calls, 1);
+});
+
+test('DONE transaction compaction drops reconciliation snapshots and signed URL data', () => {
+  const {api} = loadRuntime();
+  const compact = api.compactDoneTx({
+    schemaVersion: 1,
+    operationId: 'op-1',
+    state: 'DONE',
+    source: {sourceId: 's1', name: 'file.bin', size: 10},
+    beforeIds: ['old-1', 'old-2'],
+    candidates: [{id: 'other'}],
+    copyResponse: {task_id: 'task'},
+    confirmedDest: {id: 'd1', name: 'file.bin', size: 10, url: 'https://signed.example/?token=secret'},
+    download: {destId: 'd1', downloadedBytes: 10, expectedCdnBytes: 10, sizeVerified: true, verifiedAt: 123, localName: 'file.bin'},
+    delete: {destId: 'd1', confirmedAbsentAt: 456, response: {large: true}},
+    startedAt: 1,
+    reconciledAt: 2,
+    queueJobId: 'job-1',
+    queueIndex: 0,
+  });
+  assert.equal(compact.state, 'DONE');
+  assert.equal(compact.confirmedDest.id, 'd1');
+  assert.equal(compact.confirmedDest.url, undefined);
+  assert.equal(compact.beforeIds, undefined);
+  assert.equal(compact.candidates, undefined);
+  assert.equal(compact.copyResponse, undefined);
+  assert.equal(compact.delete.response, undefined);
+  assert.equal(compact.download.sizeVerified, true);
+});
+
+test('safe Queue discard is local-state-only and never calls Linkex delete', () => {
+  const helperAt = SOURCE.indexOf('async function abandonQueueJob(job)');
+  const nextAt = SOURCE.indexOf('function resetRetryableSkips(job)', helperAt);
+  assert.ok(helperAt > 0 && nextAt > helperAt);
+  const helper = SOURCE.slice(helperAt, nextAt);
+  assert.doesNotMatch(helper, /deleteSingleFile|\/file\/delete|LinkexApi/);
+  assert.match(helper, /GM_setValue\(QUEUE_KEY, null\)/);
+  assert.match(SOURCE, /id="lf-abandon"/);
 });
