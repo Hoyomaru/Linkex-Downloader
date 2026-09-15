@@ -19,6 +19,18 @@ jobs:
         with:
           ref: feat/file-selection-queue
           fetch-depth: 0
+      - name: Relax start-handler replacement
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('tools/apply-file-selection.py')
+          s = p.read_text(encoding='utf-8')
+          old = "rep(old_start, new_start, 'refactor start handlers')"
+          new = """pattern = r\"    startBtn\\.addEventListener\\('click', async \\(\\) => \\{.*?(?=    resumeBtn\\.addEventListener\\('click')\"\nmatch = __import__('re').search(pattern, s, flags=__import__('re').S)\nif not match:\n    raise SystemExit('refactor start handlers: range not found')\ns = s[:match.start()] + new_start + '\\n' + s[match.end():]"""
+          if s.count(old) != 1:
+              raise SystemExit('could not find strict start-handler replacement')
+          p.write_text(s.replace(old, new, 1), encoding='utf-8', newline='\n')
+          PY
       - name: Apply selective queue patches
         run: python3 tools/apply-file-selection.py
       - name: Syntax check
