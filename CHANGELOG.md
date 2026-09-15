@@ -4,7 +4,11 @@
 
 ## [Unreleased]
 
+## [1.2.0] - 2026-09-15
+
 ### Added
+
+- MIT Licenseを付与し、利用・改変・再配布条件を明確化
 
 - `l2e.click/d/...` 共有ページ上から現在の共有を直接解析・Queue開始できる Share Page Mode
 - `disk.linkex.io` で検出したaccess tokenだけを短時間GM storageへ橋渡しし、別originの共有ページから安全に認証済みQueueを実行するcredential bridge
@@ -13,6 +17,8 @@
 - 新規Queue用の保存先DirectoryHandleを記憶し、権限が残っている場合は次回以降の保存先選択を省略
 
 ### Changed
+
+- version固定 `.user.js` / `.zip` をGit管理せず、Release作成時に `tools/build_release_assets.py` で生成する配布方針へ変更
 
 - 初期UIを「すべてダウンロード」「ファイルを選ぶ」中心に整理し、診断・再試行・安全破棄等を `詳細` へ集約
 - 常時表示していた詳細ログを `詳細 → ログを表示` へ折りたたみ、通常時は進捗バー＋1行状態表示だけに簡素化。エラー時はログを自動展開

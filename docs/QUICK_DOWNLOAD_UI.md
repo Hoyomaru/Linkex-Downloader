@@ -196,4 +196,4 @@ Queue実行中のページ遷移でも、実行中QueueのshareToken / queueRoot
 
 ## リリース方針
 
-v1.1.0固定配布物は変更しない。main userscript上で機能を検証し、実機確認後に次回minor release候補としてまとめる。
+Quick Download / compact UI / collapsed verbose logはv1.2.0 release candidateへ含める。`linkex-downloader.user.js` を正本とし、version固定 `.user.js` / `.zip` はrelease対象commitから `tools/build_release_assets.py` で生成してGitHub Releaseにだけ添付する。リポジトリ直下へ固定配布物を蓄積しない。

@@ -1,8 +1,9 @@
 // ==UserScript==
 // @name         Linkex Downloader
 // @namespace    openai-linkex-helper
-// @version      1.1.0
-// @description  Linkex共有を1ファイルずつ安全に一時コピー→ローカル保存→検証→確定IDだけ削除。再開・容量スキップ・競合防止・診断ログ付き。
+// @version      1.2.0
+// @description  Linkex共有ページからワンクリックで安全にQueue保存。選択DL・再開・検証・所有ID限定削除・診断付き。
+// @license      MIT
 // @match        https://disk.linkex.io/*
 // @match        https://l2e.click/d/*
 // @match        https://www.l2e.click/d/*
@@ -18,7 +19,7 @@
 (() => {
   'use strict';
 
-  const VERSION = '1.1.0';
+  const VERSION = '1.2.0';
   const API_BASE = 'https://prod.linksvc.xyz';
   const SIGNED_HEADER_PREFIX = 'x-linkinflu-';
   const SIGNATURE_HEADER = 'x-linkinflu-sign';

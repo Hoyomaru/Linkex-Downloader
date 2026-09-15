@@ -149,7 +149,8 @@ Linkex metadata の `size` は実CDNサイズと一致しないケースが確�
 - `confirmedDest.id` が存在
 - `destId` がコピー前ID集合に含まれていない
 - ダウンロード対象IDと所有権確定IDが一致
-- `downloadedBytes === expectedCdnBytes > 0`
+- `download.sizeVerified === true`
+- `downloadedBytes === expectedCdnBytes >= 0`（明示検証済み0 byteを含む）
 - `verifiedAt` が存在
 - 削除直前の name / Linkex metadata size が所有権確定時と一致
 

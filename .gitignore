@@ -4,3 +4,6 @@ Thumbs.db
 *.bak
 *.old
 *.log
+dist/
+linkex_downloader_v*.user.js
+linkex_downloader_v*.zip
