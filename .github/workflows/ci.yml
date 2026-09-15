@@ -6,6 +6,7 @@ on:
       - main
       - 'fix/**'
       - 'feat/**'
+      - 'release/**'
   pull_request:
 
 permissions:
@@ -16,9 +17,15 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
-      - name: Show Node version
-        run: node --version
+      - name: Show runtime versions
+        run: |
+          node --version
+          python --version
       - name: Syntax check userscript
         run: node --check linkex-downloader.user.js
       - name: Run regression tests
         run: node --test tests/*.test.js
+      - name: Check repository consistency
+        run: python tools/check_repo_consistency.py
+      - name: Build and verify release assets
+        run: python tools/build_release_assets.py --output-dir "$RUNNER_TEMP/linkex-release"
