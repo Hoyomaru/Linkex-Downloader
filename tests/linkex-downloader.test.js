@@ -440,6 +440,23 @@ test('compact first screen centers quick all-download and file selection while a
   }
 });
 
+test('verbose status log is collapsed under details while one-line state stays visible and errors reveal the log', () => {
+  const progressAt = SOURCE.indexOf('id="lf-progress-bar"');
+  const stateAt = SOURCE.indexOf('id="lf-state-line"');
+  const moreAt = SOURCE.indexOf('<details id="lf-more" class="more">');
+  const logAt = SOURCE.indexOf('<details id="lf-log-details" class="log">');
+  const statusAt = SOURCE.indexOf('id="lf-status" class="status"');
+  assert.ok(progressAt > 0 && stateAt > progressAt && moreAt > stateAt && logAt > moreAt && statusAt > logAt);
+
+  const writeAt = SOURCE.indexOf("const write = (text, cls='') => {");
+  const manifestAt = SOURCE.indexOf('let manifest = null;', writeAt);
+  assert.ok(writeAt > 0 && manifestAt > writeAt);
+  const writeBlock = SOURCE.slice(writeAt, manifestAt);
+  assert.match(writeBlock, /stateLine\.textContent =/);
+  assert.match(writeBlock, /stateLine\.className = `state-line \$\{cls\}`;/);
+  assert.match(writeBlock, /if \(cls === 'err'\) \{\s*moreDetails\.open = true;\s*logDetails\.open = true;\s*\}/);
+});
+
 test('preferred download directory is separate from Queue-specific handles and is preloaded before quick actions enable', () => {
   assert.match(SOURCE, /const PREFERRED_DIR_HANDLE_KEY = 'preferred-download-root:v1';/);
   assert.match(SOURCE, /const QUEUE_HANDLE_PREFIX = 'queue-full:';/);

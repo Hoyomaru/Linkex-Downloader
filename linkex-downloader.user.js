@@ -1615,7 +1615,12 @@
         #linkex-full-queue .progress-meta { display:flex; justify-content:space-between; gap:8px; font-size:11px; color:#cbd5e1; margin-bottom:4px; }
         #linkex-full-queue .progress { height:7px; border-radius:999px; background:#1f2937; overflow:hidden; border:1px solid #374151; }
         #linkex-full-queue .progress > i { display:block; height:100%; width:0%; background:#2563eb; transition:width .2s ease; }
-        #linkex-full-queue .status { white-space:pre-wrap; overflow-wrap:anywhere; font:12px/1.45 ui-monospace,SFMono-Regular,Consolas,monospace; background:#0b1220; border:1px solid #374151; border-radius:8px; padding:10px; max-height:350px; overflow:auto; }
+        #linkex-full-queue .state-line { font-size:11px; color:#cbd5e1; margin:-2px 0 8px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+        #linkex-full-queue .state-line.ok { color:#bbf7d0; }
+        #linkex-full-queue .state-line.err { color:#fecaca; }
+        #linkex-full-queue details.log { margin-top:8px; }
+        #linkex-full-queue details.log > summary { cursor:pointer; color:#9ca3af; font-size:11px; font-weight:700; user-select:none; padding:4px 1px; }
+        #linkex-full-queue .status { white-space:pre-wrap; overflow-wrap:anywhere; font:12px/1.45 ui-monospace,SFMono-Regular,Consolas,monospace; background:#0b1220; border:1px solid #374151; border-radius:8px; padding:10px; margin-top:6px; max-height:350px; overflow:auto; }
         #linkex-full-queue .ok { border-color:#166534; color:#bbf7d0; }
         #linkex-full-queue .err { border-color:#991b1b; color:#fecaca; }
         #linkex-full-queue .notice { font-size:11px; color:#9ca3af; margin-top:8px; line-height:1.45; }
@@ -1658,7 +1663,7 @@
             <div class="progress-meta"><span id="lf-progress-text">Queueなし</span><span id="lf-progress-pct">0%</span></div>
             <div class="progress"><i id="lf-progress-bar"></i></div>
           </div>
-          <div id="lf-status" class="status">共有ページでは「すべてダウンロード」だけで解析からQueue開始まで進めます。\n安全処理は1ファイルずつ COPY → DL → VERIFY → 所有destIdだけDELETE します。</div>
+          <div id="lf-state-line" class="state-line">待機中</div>
           <details id="lf-more" class="more">
             <summary>詳細</summary>
             <div class="more-body">
@@ -1666,6 +1671,10 @@
               <div class="row"><button id="lf-selftest" class="secondary">署名テスト</button><button id="lf-export" class="secondary">診断ログを保存</button></div>
               <div class="row"><button id="lf-refresh" class="secondary">状態を再表示</button><button id="lf-retry" class="secondary" disabled>容量スキップを再試行</button></div>
               <div class="row" style="margin-bottom:0"><button id="lf-abandon" class="secondary" disabled>Queueを安全に破棄</button></div>
+              <details id="lf-log-details" class="log">
+                <summary>ログを表示</summary>
+                <div id="lf-status" class="status">共有ページでは「すべてダウンロード」だけで解析からQueue開始まで進めます。\n安全処理は1ファイルずつ COPY → DL → VERIFY → 所有destIdだけDELETE します。</div>
+              </details>
             </div>
           </details>
           <div class="notice">安全規則: copy/delete応答不明時は盲目的に再送しません。削除はLOCAL_COMMITTEDかつ所有権確定済みdestId 1件だけ。実行中は別端末からLinkexを変更しないでください。診断ログはtoken・署名付きURLを伏せて書き出します。</div>
@@ -1676,6 +1685,9 @@
     const input = root.querySelector('#lf-url');
     const shareContextEl = root.querySelector('#lf-share-context');
     const status = root.querySelector('#lf-status');
+    const stateLine = root.querySelector('#lf-state-line');
+    const moreDetails = root.querySelector('#lf-more');
+    const logDetails = root.querySelector('#lf-log-details');
     const analyzeBtn = root.querySelector('#lf-analyze');
     const startBtn = root.querySelector('#lf-start');
     const selectModeBtn = root.querySelector('#lf-select-mode');
@@ -1705,14 +1717,23 @@
     let lastUiEventText = '';
     let lastUiEventAt = 0;
     const write = (text, cls='') => {
+      const message = String(text ?? '');
       status.className = `status ${cls}`;
-      status.textContent = text;
+      status.textContent = message;
+      const firstLine = message.split('\n').find(line => line.trim())?.trim() || '待機中';
+      stateLine.textContent = firstLine.length > 110 ? `${firstLine.slice(0, 107)}…` : firstLine;
+      stateLine.title = firstLine;
+      stateLine.className = `state-line ${cls}`;
+      if (cls === 'err') {
+        moreDetails.open = true;
+        logDetails.open = true;
+      }
       const now = Date.now();
       // Download progress can update frequently; avoid flooding persistent diagnostics.
-      const isProgress = /^DOWNLOADING\b/.test(text);
-      if (text !== lastUiEventText && (!isProgress || now - lastUiEventAt >= 5000)) {
-        recordEvent(cls === 'err' ? 'error' : 'info', 'ui', text);
-        lastUiEventText = text;
+      const isProgress = /^DOWNLOADING\b/.test(message);
+      if (message !== lastUiEventText && (!isProgress || now - lastUiEventAt >= 5000)) {
+        recordEvent(cls === 'err' ? 'error' : 'info', 'ui', message);
+        lastUiEventText = message;
         lastUiEventAt = now;
       }
       refreshProgress();
