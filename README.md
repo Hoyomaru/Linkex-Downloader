@@ -33,11 +33,11 @@ Linkex 自領域へ一時コピー
 
 ## Version / 配布状態
 
-- `main` source: **v1.2.0**（release preparation / 実機確認済み）
-- 最新公開安定版: **v1.1.0**
-- 最新公開tag: **`v1.1.0`**
-- GitHub Release: **v1.1.0 公開済み（2026-09-15）**
-- v1.2.0: **公開準備中**（tag / GitHub Releaseは未作成）
+- `main` source: **v1.2.0**（公開済み / 実機確認済み）
+- 最新公開安定版: **v1.2.0**
+- 最新公開tag: **`v1.2.0`**
+- GitHub Release: **v1.2.0 公開済み（2026-09-15）**
+- Release commit: `8bb478fbd320eaed2388427d3e03d1b91769bfc2`
 - 現行CI: **GitHub Actions (`.github/workflows/ci.yml`)** — userscript構文、回帰テスト、repository整合性、Release Asset生成を検証
 - License: **MIT**
 
@@ -75,7 +75,7 @@ Linkex 自領域へ一時コピー
 
 ## 実機確認状況
 
-v1.1.0 までの開発過程で、以下が実機確認済みとして記録されています。
+v1.2.0 までの開発過程で、以下が実機確認済みとして記録されています。
 
 - 共有リンク解析
 - 再帰的な全ファイル列挙
@@ -94,6 +94,11 @@ v1.1.0 までの開発過程で、以下が実機確認済みとして記録さ�
 - 選択ファイルQueueの実行
 - 実行中の安全停止 → Queue再開
 - 画面高さを超える場合のパネル内部スクロール
+- `l2e.click/d/...` 共有ページからの直接操作
+- 初回保存先picker後の自動Full Queue開始
+- preferred保存先を再利用した1クリック開始
+- Share A → B遷移時のstale manifest防止
+- コンパクト初期UI / 詳細ログ折りたたみ / error時自動展開
 
 ブラウザ/Linkex側の仕様は変わり得るため、将来の動作を保証するものではありません。
 
@@ -127,15 +132,15 @@ Node.js / Python等の外部ランタイムは不要です。
 ### GitHub Releaseから導入する場合（推奨）
 
 1. Chrome / Edge に Tampermonkey をインストールします。
-2. GitHub Releases から最新の公開安定版を開きます。v1.2.0公開前の現行安定版は **v1.1.0** です。
-3. Release Assets の `linkex_downloader_vX.Y.Z.user.js` を取得します。
+2. GitHub Releases から最新の公開安定版 **v1.2.0** を開きます。
+3. v1.2.0では Release Assets の `linkex-downloader_v1.2.0.user.js` を取得します。
 4. Tampermonkeyで新規スクリプトを作成し、userscript全文を貼り付けて保存します。
 5. Linkexへログインした状態で `https://disk.linkex.io/` を一度開きます。
 6. 共有ページ `https://l2e.click/d/...` を開き、右下にLinkex Downloaderパネルが表示されれば導入完了です。
 
-ZIP Assetは同じuserscriptを含む補助配布物です。リポジトリ直下のversion固定コピーは今後作成しません。
+ZIP Asset `linkex_downloader_v1.2.0.zip` は同じuserscriptを1ファイルだけ含む補助配布物です。リポジトリ直下のversion固定コピーは今後作成しません。
 
-v1.2.0公開前に最新mainを試す場合だけ、リポジトリ直下の `linkex-downloader.user.js` を利用してください。mainは公開安定版より先行する場合があります。
+`linkex-downloader.user.js` は `main` の正本です。現在はv1.2.0 Releaseと同じversionですが、今後の開発では公開安定版より先行する場合があります。
 
 ## 更新
 

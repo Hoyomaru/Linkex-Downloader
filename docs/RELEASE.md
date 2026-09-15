@@ -8,12 +8,26 @@
 
 2026-09-15 時点:
 
-- `main` source: **v1.2.0**（release preparation）
-- 最新公開Stable: **v1.1.0**
-- 最新公開tag: **`v1.1.0`**
-- v1.2.0: 実機確認済み、tag / GitHub Releaseは未作成
+- `main` source: **v1.2.0**（公開済み / 実機確認済み）
+- 最新公開Stable: **v1.2.0**
+- 最新公開tag: **`v1.2.0`**
+- v1.2.0: GitHub Release公開済み
+- Release commit: `8bb478fbd320eaed2388427d3e03d1b91769bfc2`
 - License: **MIT**
 - CI: `.github/workflows/ci.yml`
+
+## v1.2.0 公開実績
+
+GitHub Release `v1.2.0` は2026-09-15に公開済みです。tagは `8bb478fbd320eaed2388427d3e03d1b91769bfc2` を指します。
+
+公開Asset:
+
+```text
+linkex-downloader_v1.2.0.user.js  113381 bytes  sha256:6104fc053400c61eed5c90a602fe3515f1921a66519862eaa9fa6d60640e49fc
+linkex_downloader_v1.2.0.zip        29796 bytes  sha256:d0d1256db911be5319313fa9e8cf0fc3fe091efa4d480332a76aa4e28c53fa25
+```
+
+ZIPは `tools/build_release_assets.py` のdeterministic出力と一致しています。standalone userscriptはrelease commitの `linkex-downloader.user.js` とbyte-identicalです。v1.2.0ではstandalone Assetのアップロード名だけがbuilder既定名（underscore）ではなくhyphen表記です。今後はbuilderが生成したAsset名をそのまま使うことを推奨します。
 
 ## 配布物ポリシー
 
