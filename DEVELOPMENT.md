@@ -10,43 +10,45 @@ READMEは利用者向け、CHANGELOGは変更履歴、`docs/ARCHITECTURE.md` は
 
 2026-09-15 時点で確認した状態です。
 
-- Stable: **v1.1.0**
-- userscript metadata `@version`: **1.1.0**
-- `const VERSION`: **1.1.0**
-- Git tag: **`v1.1.0`**
-- GitHub Release: **v1.1.0 公開済み**
-- Release title: **Linkex Downloader v1.1.0 — 選択Queue・安全性強化**
-- Release URL: `https://github.com/Hoyomaru/Linkex-Downloader/releases/tag/v1.1.0`
-- 現行 GitHub Actions: **CIあり**（userscript構文チェック + Node標準回帰テスト）
+- `main` source: **v1.2.0**（release preparation / 実機確認済み）
+- 最新公開Stable: **v1.1.0**
+- userscript metadata `@version`: **1.2.0**
+- `const VERSION`: **1.2.0**
+- 最新公開Git tag: **`v1.1.0`**
+- GitHub Release: **v1.1.0 公開済み / v1.2.0 公開準備中**
+- 現行 GitHub Actions: **CIあり**（userscript構文 + Node回帰テスト + repository整合性 + Release Asset生成検証）
 - Runtime: Tampermonkey userscript
 - Targets: `https://disk.linkex.io/*`, `https://l2e.click/d/*`, `https://www.l2e.click/d/*`
 - Share Page Mode design: [`docs/SHARE_PAGE_MODE.md`](docs/SHARE_PAGE_MODE.md)
+- Quick Download design: [`docs/QUICK_DOWNLOAD_UI.md`](docs/QUICK_DOWNLOAD_UI.md)
 - Main API origin: `https://prod.linksvc.xyz`
 - 実機確認ブラウザ: Chromium系（Chrome / Edge）
-- License: **未設定**
+- License: **MIT**
+
 ### リポジトリ直下
 
 ```text
 Linkex-Downloader/
 ├─ linkex-downloader.user.js
-├─ linkex_downloader_v1.1.0.user.js
-├─ linkex_downloader_v1.1.0.zip
-├─ linkex_downloader_v1.0.0.user.js
-├─ linkex_downloader_v1.0.0.zip
+├─ LICENSE
 ├─ tests/linkex-downloader.test.js
+├─ tools/build_release_assets.py
+├─ tools/check_repo_consistency.py
 ├─ README.md
 ├─ DEVELOPMENT.md
 ├─ CHANGELOG.md
 └─ docs/
    ├─ ARCHITECTURE.md
+   ├─ QUICK_DOWNLOAD_UI.md
+   ├─ SHARE_PAGE_MODE.md
    ├─ RELEASE.md
    ├─ TROUBLESHOOTING.md
-   └─ releases/v1.1.0.md
+   └─ releases/
+      ├─ v1.1.0.md
+      └─ v1.2.0.md
 ```
 
-`linkex-downloader.user.js` とリポジトリ直下の `linkex_downloader_v1.1.0.user.js` はv1.1.0 release時点でbyte-identicalです。v1.0.0固定配布物は過去Releaseの再現用として変更せず保持します。
-
-GitHub Releaseにはversion固定 `.user.js` とZIPの2つをAssetとして添付しています。公開後の最終確認で、両AssetのSHA-256はRelease Notes記載値と一致しています。
+`linkex-downloader.user.js` が唯一のtracked userscript正本です。version固定 `.user.js` / `.zip` はGit管理せず、release対象commitから `tools/build_release_assets.py` で生成してGitHub Releaseへ添付します。過去のv1.0.0 / v1.1.0配布物は各GitHub Release Assetとして保持し、リポジトリ直下からは削除します。
 
 ## プロジェクトの目的
 
@@ -164,7 +166,7 @@ Share Page Modeでは `l2e.click` が別originのためdisk Local Storageを直�
 
 ## 利用API
 
-現行v1.1.0で確認できる範囲です。
+現行main（v1.2.0 release candidate）で確認できる範囲です。
 
 | 用途 | Method | Path | 認証 | 書込 |
 |---|---|---|---|---|

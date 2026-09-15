@@ -21,13 +21,13 @@
 
 **症状**
 
-`disk.linkex.io` を開いても右下に Linkex Downloader が出ない。
+`disk.linkex.io` または対応する `l2e.click/d/...` 共有ページを開いても右下に Linkex Downloader が出ない。
 
 **原因候補**
 
 - Tampermonkeyでuserscriptが無効
 - userscriptのインストール失敗
-- 実行対象URLが `https://disk.linkex.io/*` ではない
+- 実行対象URLが `https://disk.linkex.io/*` / `https://l2e.click/d/*` / `https://www.l2e.click/d/*` のいずれでもない
 - JavaScript構文エラー
 - Linkexページ側の大きな変更
 
@@ -35,7 +35,7 @@
 
 - Tampermonkey管理画面でスクリプトが有効か確認する
 - `linkex-downloader.user.js` をもう一度保存する
-- `https://disk.linkex.io/` を再読み込みする
+- 対応ページを再読み込みする
 - DevTools Console に `[Linkex ...]` 由来のエラーがないか確認する
 
 ## 「Linkexログイン情報を検出できません」
@@ -55,7 +55,7 @@
 1. `disk.linkex.io` で一度ログアウト/ログイン状態を確認する
 2. Linkex画面を再読み込みする
 3. **署名テスト** を実行する
-4. 改善しない場合は診断ログを保存し、開発者側で credential discovery の互換性を確認する
+4. 改善しない場合は必要なら **詳細 → ログを表示** を開き、診断ログを保存し、開発者側で credential discovery の互換性を確認する
 
 認証tokenを手作業でコードへ貼り付けないでください。
 
@@ -74,7 +74,7 @@
 1. `https://disk.linkex.io/` をログイン済み状態で一度開く
 2. 数秒待ってから共有ページへ戻る
 3. 共有ページを再フォーカスするか再読み込みする
-4. **この共有を解析** → Queue開始を再実行する
+4. **すべてダウンロード** または **ファイルを選ぶ** をもう一度実行する
 
 bridgeはrefresh tokenを保存せず、最大12時間またはJWT expiryの早い方で失効します。期限切れの場合は同じ手順で再準備してください。
 

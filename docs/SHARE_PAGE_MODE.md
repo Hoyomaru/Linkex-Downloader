@@ -23,9 +23,10 @@ Behavior:
 
 - Detect the share token from the current top-level URL.
 - Hide the manual URL field while a valid share-page context is present.
-- Show a page-context summary and label the analyze action `この共有を解析`.
-- Analyze only after explicit user action; merely opening a share page does not recursively enumerate the share.
-- After analysis, reuse the existing all-files / selected-files Queue flow.
+- Show a page-context summary.
+- Keep analysis lazy: merely opening a share page does not recursively enumerate the share.
+- `すべてダウンロード` resolves the destination first, then analyzes the current share as needed and starts a Full Queue without an extra confirmation click.
+- `ファイルを選ぶ` analyzes as needed and only then expands the selection UI. Explicit re-analysis remains under `詳細 → 共有を再解析`.
 
 ### 2. Storage/manual mode
 
@@ -36,7 +37,7 @@ Matched page:
 Behavior remains backward compatible:
 
 - Keep the manual share URL field.
-- Keep `共有リンクを解析`.
+- Keep the manual URL field. `すべてダウンロード` / `ファイルを選ぶ` analyze the supplied URL as needed; explicit re-analysis lives under `詳細`.
 - A manually supplied `https://l2e.click/d/...` URL or bare token is accepted as before.
 - While on this origin, synchronize the currently logged-in access token into the userscript-private credential bridge described below.
 
@@ -101,22 +102,18 @@ This prevents a navigation from share A to share B from causing share B UI to st
 
 ## UI state
 
-New page-context element:
+Page-context element:
 
-- Share page: `このページの共有: <short token>`
-- Storage/manual page: hidden.
+- Share page: `このページの共有: <short token>` plus credential / preferred destination summary.
+- Storage/manual page: share-page context is hidden and the manual URL field is shown.
 
-Analyze button:
+Primary actions:
 
-- Share page: `この共有を解析`
-- Storage/manual page: `共有リンクを解析`
+- `すべてダウンロード` — preferred destination permission/picker → lazy analysis → Full Queue.
+- `ファイルを選ぶ` — lazy analysis → selection UI.
+- `Queueを再開` / `現在ファイル後に停止` — only when Queue state requires them.
 
-URL field:
-
-- Share page with a valid token: hidden; source is current page URL.
-- Other supported pages: shown as today.
-
-Queue controls are unchanged.
+Low-frequency controls, explicit re-analysis, diagnostics, safe abandon, and verbose logs live under `詳細`. The verbose log is collapsed during normal operation and opens automatically on an error.
 
 ## Safety invariants
 
@@ -129,7 +126,7 @@ This feature must preserve all existing invariants:
 5. DELETE remains exactly one owned `destId` with `select_all:false`.
 6. Route/page changes never rewrite `job.shareToken` of an existing Queue.
 7. A missing/stale authenticated credential fails closed; it never falls back to an unauthenticated write.
-8. v1.1.0 fixed release artifacts remain byte-for-byte unchanged.
+8. Release packaging changes must not alter the transaction core; version-fixed distribution files are generated from the exact release commit and are not tracked in the repository.
 
 ## Tests
 
@@ -148,4 +145,4 @@ Add regression coverage for:
 
 ## Release scope
 
-Develop on `feat/share-page-mode`. Keep the current source version at v1.1.0 during feature development; version metadata and fixed v1.2.0 release artifacts are created only during a later release-preparation step.
+Share Page Mode, Quick Download, preferred destination reuse, compact UI, and collapsed verbose logs are included in the v1.2.0 release candidate. The source of truth remains `linkex-downloader.user.js`; version-fixed `.user.js` / `.zip` files are generated only during release publication and are not committed to the repository.

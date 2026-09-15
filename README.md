@@ -33,22 +33,20 @@ Linkex 自領域へ一時コピー
 
 ## Version / 配布状態
 
-- 現行Version: **v1.1.0**
-- Git tag: **`v1.1.0`**
+- `main` source: **v1.2.0**（release preparation / 実機確認済み）
+- 最新公開安定版: **v1.1.0**
+- 最新公開tag: **`v1.1.0`**
 - GitHub Release: **v1.1.0 公開済み（2026-09-15）**
-- Release title: **Linkex Downloader v1.1.0 — 選択Queue・安全性強化**
-- 現行CI: **GitHub Actions (`.github/workflows/ci.yml`)** — userscript構文チェックと回帰テスト
+- v1.2.0: **公開準備中**（tag / GitHub Releaseは未作成）
+- 現行CI: **GitHub Actions (`.github/workflows/ci.yml`)** — userscript構文、回帰テスト、repository整合性、Release Asset生成を検証
+- License: **MIT**
 
-正式配布先:
+最新の正式配布先は GitHub Releases です。
 
-- https://github.com/Hoyomaru/Linkex-Downloader/releases/tag/v1.1.0
+- https://github.com/Hoyomaru/Linkex-Downloader/releases
 
-Release Assets:
+安定版を利用する場合は最新公開Releaseのversion固定 `.user.js` Assetを使用してください。リポジトリ直下にはversion固定配布物を置かず、`linkex-downloader.user.js` だけを最新ソースの正本として維持します。version固定 `.user.js` / `.zip` はRelease対象commitから生成し、GitHub Releaseにだけ添付します。
 
-- `linkex_downloader_v1.1.0.user.js` — **推奨。v1.1.0 固定userscript**
-- `linkex_downloader_v1.1.0.zip` — 同じuserscriptを含む補助配布ZIP
-
-リポジトリ直下の `linkex-downloader.user.js` は最新ソースです。Release Assetとしてはversion固定 `.user.js` を第一選択とし、ZIPは保存・展開用の代替として扱います。
 ## 主な機能
 
 - `https://l2e.click/d/...` 共有ページ上からURLコピー不要で操作
@@ -129,21 +127,21 @@ Node.js / Python等の外部ランタイムは不要です。
 ### GitHub Releaseから導入する場合（推奨）
 
 1. Chrome / Edge に Tampermonkey をインストールします。
-2. GitHub Releases の **v1.1.0** を開きます。
-3. Release Assets から **`linkex_downloader_v1.1.0.user.js`** をダウンロードします。
-4. Tampermonkeyで新規スクリプトを作成します。
-5. 新規スクリプトの内容をすべて削除し、userscript全文を貼り付けて保存します。
-6. Linkexへログインした状態で `https://disk.linkex.io/` を開きます。
-7. 右下に **Linkex Downloader v1.1.0** パネルが表示されれば導入完了です。
+2. GitHub Releases から最新の公開安定版を開きます。v1.2.0公開前の現行安定版は **v1.1.0** です。
+3. Release Assets の `linkex_downloader_vX.Y.Z.user.js` を取得します。
+4. Tampermonkeyで新規スクリプトを作成し、userscript全文を貼り付けて保存します。
+5. Linkexへログインした状態で `https://disk.linkex.io/` を一度開きます。
+6. 共有ページ `https://l2e.click/d/...` を開き、右下にLinkex Downloaderパネルが表示されれば導入完了です。
 
-`linkex_downloader_v1.1.0.zip` は同じuserscriptを含む補助配布物です。ZIPを使用する場合は展開し、`linkex_downloader_v1.1.0.user.js` を取り出して同じ手順で導入してください。
+ZIP Assetは同じuserscriptを含む補助配布物です。リポジトリ直下のversion固定コピーは今後作成しません。
 
-Release Assetsを利用できない場合は、リポジトリ直下のversion固定 `linkex_downloader_v1.1.0.user.js` も利用できます。
+v1.2.0公開前に最新mainを試す場合だけ、リポジトリ直下の `linkex-downloader.user.js` を利用してください。mainは公開安定版より先行する場合があります。
+
 ## 更新
 
-新Versionへ更新する場合は、Tampermonkey内のスクリプト本文を新しいversion固定 `.user.js` または `linkex-downloader.user.js` で置き換えます。
+新Versionへ更新する場合は、Tampermonkey内のスクリプト本文をGitHub Releaseの新しいversion固定 `.user.js` で置き換えます。
 
-安定版を利用する場合は、GitHub Releaseのversion固定 `.user.js` を優先してください。`linkex-downloader.user.js` は `main` の最新ソースです。
+安定版ではGitHub Release Assetを優先してください。`linkex-downloader.user.js` は `main` の最新ソースで、公開安定版より先行する場合があります。version固定配布物はリポジトリにはコミットしません。
 
 更新前に未完了Queueがある場合は注意してください。GM storage / IndexedDB schemaが将来変わる場合、既存Queueとの互換性が必要になります。
 
@@ -175,7 +173,7 @@ v1.1.0 はv1.0.0の通常Queueとの互換性をできる限り維持してい�
 
 ### 自ストレージページから使う（従来互換）
 
-`https://disk.linkex.io/` 上では従来どおりURL入力欄が表示されます。`https://l2e.click/d/...` を貼り付けて **共有リンクを解析** を押す方式も引き続き利用できます。
+`https://disk.linkex.io/` 上ではURL入力欄を残しています。`https://l2e.click/d/...` を貼り付けて **すべてダウンロード** または **ファイルを選ぶ** を押すと、必要な解析を自動実行します。明示的な再解析は **詳細 → 共有を再解析** から行えます。
 
 保存先には次のようなジョブ専用フォルダが作成されます。
 
@@ -196,7 +194,7 @@ Linkex_<共有名>_<日時>_<job-id末尾>/
 | **選択をダウンロード** | チェック済みファイルだけでQueue開始 |
 | **Queueを再開** | 保存済み未完了Queueを実状態照合から再開（未完了時のみ表示） |
 | **現在ファイル後に停止** | 現在ファイルの安全な処理境界後に停止予約（実行中のみ表示） |
-| **詳細** | 保存先変更、再解析、署名テスト、診断ログ、状態再表示、容量skip再試行、安全破棄を格納 |
+| **詳細** | 保存先変更、再解析、署名テスト、診断ログ保存、状態再表示、容量skip再試行、安全破棄、折りたたみログ表示を格納 |
 | **− / +** | パネルを最小化/展開 |
 
 ## 停止について
@@ -310,7 +308,7 @@ Queue状態は永続化されます。
 | GM storage | `linkexDownloaderUiPrefsV1` | UI最小化状態 |
 | GM storage | `lastShareUrl` | 最後に入力した共有URL |
 
-秘密情報そのものを独自設定として保存する設計ではなく、認証tokenはLinkex WebのLocal Storageから検出します。
+`disk.linkex.io` のLocal Storageから検出したaccess tokenだけを、Share Page Mode用にuserscript-privateなGM storageへ短時間橋渡しします。refresh tokenは保存せず、bridgeはJWT expiryまたは最大12時間の早い方で失効します。
 
 ## 認証・外部通信
 
@@ -324,7 +322,13 @@ userscript metadata:
 
 ```text
 @match   https://disk.linkex.io/*
+@match   https://l2e.click/d/*
+@match   https://www.l2e.click/d/*
 @connect prod.linksvc.xyz
+@grant   GM_xmlhttpRequest
+@grant   GM_getValue
+@grant   GM_setValue
+@grant   unsafeWindow
 ```
 
 認証付きAPIでは Linkex Web と同系統の署名方式を再現し、`Authorization: Bearer ...` を使用します。
@@ -367,9 +371,9 @@ UIの **診断ログを保存** から次のようなJSONを書き出せます�
 - File System Access APIが必要です。
 - Firefox等は未確認です。
 - Linkex API / Web / CDN仕様変更で動作しなくなる可能性があります。
-- GitHub Releaseは現在、自動化されておらず手動公開です。
+- GitHub Releaseの配布Assetはrelease時に生成し、version固定ファイルはリポジトリへコミットしません。
 - 自動更新機能はありません。
-- Licenseは未設定です。
+- 本プロジェクトはMIT Licenseです。
 
 ## トラブルシューティング
 
@@ -398,16 +402,24 @@ Queue実行中にLinkex側へ別のファイル追加が発生していないか
 ```text
 Linkex-Downloader/
 ├─ linkex-downloader.user.js            # 現在の正本・最新userscript
-├─ linkex_downloader_v1.0.0.user.js     # v1.0.0固定配布物 / 推奨Release Asset
-├─ linkex_downloader_v1.0.0.zip         # v1.0.0補助配布ZIP
-├─ README.md                             # 利用者向け主要資料
-├─ DEVELOPMENT.md                        # 開発・安全設計・引き継ぎ
-├─ CHANGELOG.md                          # Version履歴
+├─ LICENSE                              # MIT License
+├─ README.md                            # 利用者向け主要資料
+├─ DEVELOPMENT.md                       # 開発・安全設計・引き継ぎ
+├─ CHANGELOG.md                         # Version履歴
+├─ tools/
+│  ├─ build_release_assets.py           # Release用 .user.js / .zip 生成・hash検証
+│  └─ check_repo_consistency.py         # Version / docs / packaging整合性検査
+├─ tests/linkex-downloader.test.js
 └─ docs/
-   ├─ ARCHITECTURE.md                    # 構造・データフロー・状態遷移
-   ├─ RELEASE.md                         # リリース手順
-   └─ TROUBLESHOOTING.md                 # 詳細な問題解決
+   ├─ ARCHITECTURE.md
+   ├─ QUICK_DOWNLOAD_UI.md
+   ├─ SHARE_PAGE_MODE.md
+   ├─ RELEASE.md
+   ├─ TROUBLESHOOTING.md
+   └─ releases/
 ```
+
+version固定 `linkex_downloader_vX.Y.Z.user.js` / `.zip` はGit管理しません。必要時に `tools/build_release_assets.py` で `dist/` へ生成し、GitHub Release Assetとして公開します。過去版は各GitHub Releaseから取得できます。
 
 ## 開発者向け資料
 
@@ -424,6 +436,6 @@ Linkex-Downloader/
 
 ## License
 
-ライセンスは現在 **未設定** です。
+[MIT License](LICENSE) です。
 
-ライセンスが追加されるまで、README側で第三者への利用・改変・再配布条件を勝手に定義しません。
+Copyright (c) 2026 Hoyomaru
