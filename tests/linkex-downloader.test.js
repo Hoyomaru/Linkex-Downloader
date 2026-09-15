@@ -10,7 +10,7 @@ const {TextEncoder} = require('node:util');
 const SOURCE_PATH = 'linkex-downloader.user.js';
 const SOURCE = fs.readFileSync(SOURCE_PATH, 'utf8');
 const STARTUP = "  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', createPanel, {once:true});\n  else createPanel();\n})();";
-const EXPOSE = "  globalThis.__linkexTest = {allocateLocalPaths, assertDeleteGuards, downloadOwnedFile, sameOwnedIdentity, LinkexApi, compactDoneTx};\n})();";
+const EXPOSE = "  globalThis.__linkexTest = {allocateLocalPaths, assertDeleteGuards, downloadOwnedFile, sameOwnedIdentity, LinkexApi, compactDoneTx, createQueueFromManifest};\n})();";
 
 function loadRuntime() {
   assert.ok(SOURCE.includes(STARTUP), 'test harness could not find userscript startup block');
@@ -177,9 +177,9 @@ test('download refuses a destId whose identity changed after ownership confirmat
 });
 
 test('queue start and resume acquire the lease before shared Queue mutations', () => {
-  const startAt = SOURCE.indexOf("startBtn.addEventListener('click'");
-  const resumeAt = SOURCE.indexOf("resumeBtn.addEventListener('click'");
-  const pauseAt = SOURCE.indexOf("pauseBtn.addEventListener('click'");
+  const startAt = SOURCE.indexOf('async function startManifestQueue(selection = null)');
+  const resumeAt = SOURCE.indexOf("resumeBtn.addEventListener('click'", startAt);
+  const pauseAt = SOURCE.indexOf("pauseBtn.addEventListener('click'", resumeAt);
   assert.ok(startAt > 0 && resumeAt > startAt && pauseAt > resumeAt);
 
   const startBlock = SOURCE.slice(startAt, resumeAt);
@@ -194,7 +194,7 @@ test('queue start and resume acquire the lease before shared Queue mutations', (
 
 test('runJob itself no longer acquires or releases the lease', () => {
   const runAt = SOURCE.indexOf('async function runJob(job, queueRoot, resume=false)');
-  const startAt = SOURCE.indexOf("startBtn.addEventListener('click'", runAt);
+  const startAt = SOURCE.indexOf('async function startManifestQueue(selection = null)', runAt);
   const block = SOURCE.slice(runAt, startAt);
   assert.doesNotMatch(block, /await acquireLease\(\)/);
   assert.doesNotMatch(block, /releaseLease\(\)/);
@@ -266,4 +266,36 @@ test('safe Queue discard is local-state-only and never calls Linkex delete', () 
   assert.doesNotMatch(helper, /deleteSingleFile|\/file\/delete|LinkexApi/);
   assert.match(helper, /GM_setValue\(QUEUE_KEY, null\)/);
   assert.match(SOURCE, /id="lf-abandon"/);
+});
+
+test('selected Queue contains only requested manifest indexes and recalculates total bytes', () => {
+  const {api} = loadRuntime();
+  const manifest = {
+    shareToken: 'share-token',
+    shareName: 'sample',
+    totalBytes: 60,
+    files: [
+      {sourceId: 'a', name: 'a.bin', size: 10, remotePath: 'a.bin'},
+      {sourceId: 'b', name: 'b.bin', size: 20, remotePath: 'folder/b.bin'},
+      {sourceId: 'c', name: 'c.bin', size: 30, remotePath: 'c.bin'},
+    ],
+  };
+  const selected = api.createQueueFromManifest(manifest, [1]);
+  assert.equal(selected.selectionMode, 'selected');
+  assert.equal(selected.sourceOriginalCount, 3);
+  assert.equal(selected.items.length, 1);
+  assert.equal(selected.items[0].manifestIndex, 1);
+  assert.equal(selected.items[0].source.sourceId, 'b');
+  assert.equal(selected.sourceTotalBytes, 20);
+
+  const all = api.createQueueFromManifest(manifest);
+  assert.equal(all.selectionMode, 'all');
+  assert.equal(all.items.length, 3);
+  assert.equal(all.sourceTotalBytes, 60);
+});
+
+test('selected Queue rejects an empty selection', () => {
+  const {api} = loadRuntime();
+  const manifest = {shareToken:'share-token', shareName:'sample', totalBytes:10, files:[{sourceId:'a', name:'a.bin', size:10, remotePath:'a.bin'}]};
+  assert.throws(() => api.createQueueFromManifest(manifest, []), error => error?.kind === 'selection');
 });

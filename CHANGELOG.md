@@ -18,6 +18,7 @@
 - read-only GETのHTTP 429/5xx retry（COPY/DELETE等のwrite requestは従来どおり自動retry禁止）
 - DONE transactionのcompact化と完了QueueのIndexedDB DirectoryHandle cleanup
 - Node標準回帰テストとGitHub Actions CI
+- 共有解析後の検索・チェックによる選択ファイルQueue（全ファイルQueueと併用可能）
 
 ### Documentation
 
