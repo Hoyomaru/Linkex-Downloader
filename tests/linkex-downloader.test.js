@@ -407,3 +407,22 @@ test('share-page mode keeps runtime transaction core and invalidates stale manif
   assert.match(SOURCE, /const creds = resolveCredentials\(\);/);
   assert.match(SOURCE, /await ensureCopyOwned\(api, job, i, onStatus\);[\s\S]*await ensureDownloaded\(api, job, i, queueRoot, onStatus\);[\s\S]*await ensureDeleted\(api, job, i, onStatus\);/);
 });
+
+
+test('share-page start rechecks the current token and Queue completion resynchronizes stale page context', () => {
+  const startAt = SOURCE.indexOf('async function startManifestQueue(selection = null)');
+  const resumeAt = SOURCE.indexOf("resumeBtn.addEventListener('click'", startAt);
+  const pauseAt = SOURCE.indexOf("pauseBtn.addEventListener('click'", resumeAt);
+  assert.ok(startAt > 0 && resumeAt > startAt && pauseAt > resumeAt);
+  const startBlock = SOURCE.slice(startAt, resumeAt);
+  assert.match(startBlock, /currentPageTarget\.shareToken !== manifest\.shareToken/);
+  assert.match(startBlock, /共有ページが解析時点から変わっています/);
+  assert.match(startBlock, /finally \{ running = false; releaseLease\(\); syncSharePageContext\(\{initial:true\}\); refreshQueueUi\(\); \}/);
+  const resumeBlock = SOURCE.slice(resumeAt, pauseAt);
+  assert.match(resumeBlock, /finally \{ running = false; releaseLease\(\); syncSharePageContext\(\{initial:true\}\); refreshQueueUi\(\); \}/);
+});
+
+test('disk credential bridge refreshes on focus and periodically clears a logged-out session', () => {
+  assert.match(SOURCE, /setInterval\(\(\) => syncCredentialBridgeFromDisk\(\{clearIfMissing:true\}\), 60000\)/);
+  assert.match(SOURCE, /addEventListener\?\.\('focus',[\s\S]*syncCredentialBridgeFromDisk\(\);[\s\S]*syncSharePageContext/);
+});

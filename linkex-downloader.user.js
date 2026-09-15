@@ -1950,6 +1950,17 @@
       const selected = selection == null ? null : Array.from(selection).sort((a,b) => a - b);
       const chosenFiles = selected == null ? manifest.files : selected.map(index => manifest.files[index]).filter(Boolean);
       if (!chosenFiles.length) { write('処理するファイルが選択されていません。', 'err'); return; }
+      const currentHref = String(globalThis.location?.href || '');
+      const currentPageTarget = detectSharePageTarget(currentHref);
+      if (isSharePageHost(currentHref) && (!currentPageTarget || currentPageTarget.shareToken !== manifest.shareToken)) {
+        manifest = null;
+        selectedIndexes.clear();
+        fileFilter.value = '';
+        renderSelection();
+        write('共有ページが解析時点から変わっています。現在の共有をもう一度解析してください。', 'err');
+        syncSharePageContext({initial:true});
+        return;
+      }
       if (!resolveCredentials()) { write(credentialBootstrapMessage(), 'err'); syncSharePageContext({initial:true}); return; }
       const totalBytes = chosenFiles.reduce((sum, file) => sum + Number(file?.size || 0), 0);
       const modeText = selected == null ? '全ファイル' : '選択ファイル';
@@ -1987,7 +1998,7 @@ ${job.items.length}ファイルを順次処理します。`, 'ok');
 ${queueSummary(job)}
 
 危険な状態では安全側で停止します。「Queueを再開」はcopy/delete POSTを盲目的に再送しません。`, 'err');
-      } finally { running = false; releaseLease(); refreshQueueUi(); }
+      } finally { running = false; releaseLease(); syncSharePageContext({initial:true}); refreshQueueUi(); }
     }
 
     startBtn.addEventListener('click', () => startManifestQueue(null));
@@ -2014,7 +2025,7 @@ ${queueSummary(job)}
       } catch (e) {
         console.error('[Linkex Resume]', e);
         write(`Queue再開停止: ${e?.message || e}\n\n${queueSummary(loadQueueJob())}`, 'err');
-      } finally { running = false; releaseLease(); refreshQueueUi(); }
+      } finally { running = false; releaseLease(); syncSharePageContext({initial:true}); refreshQueueUi(); }
     });
 
     pauseBtn.addEventListener('click', () => {
@@ -2094,6 +2105,7 @@ ${queueSummary(job)}
     if (isDiskStoragePage()) {
       syncCredentialBridgeFromDisk();
       setTimeout(() => syncCredentialBridgeFromDisk({clearIfMissing:true}), 4000);
+      setInterval(() => syncCredentialBridgeFromDisk({clearIfMissing:true}), 60000);
     }
     syncSharePageContext({initial:true});
     let observedPageHref = String(globalThis.location?.href || '');
@@ -2103,7 +2115,10 @@ ${queueSummary(job)}
       observedPageHref = currentHref;
       syncSharePageContext();
     }, 750);
-    globalThis.addEventListener?.('focus', () => syncSharePageContext({initial:true}));
+    globalThis.addEventListener?.('focus', () => {
+      if (isDiskStoragePage()) syncCredentialBridgeFromDisk();
+      syncSharePageContext({initial:true});
+    });
 
     const existing = refreshQueueUi();
     if (existing) {
