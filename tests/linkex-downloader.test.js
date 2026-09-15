@@ -10,11 +10,17 @@ const {TextEncoder} = require('node:util');
 const SOURCE_PATH = 'linkex-downloader.user.js';
 const SOURCE = fs.readFileSync(SOURCE_PATH, 'utf8');
 const STARTUP = "  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', createPanel, {once:true});\n  else createPanel();\n})();";
-const EXPOSE = "  globalThis.__linkexTest = {allocateLocalPaths, assertDeleteGuards, downloadOwnedFile, sameOwnedIdentity, LinkexApi, compactDoneTx, createQueueFromManifest};\n})();";
+const EXPOSE = "  globalThis.__linkexTest = {allocateLocalPaths, assertDeleteGuards, downloadOwnedFile, sameOwnedIdentity, LinkexApi, compactDoneTx, createQueueFromManifest, parseShareToken, detectSharePageTarget, isSharePageHost, readCredentialBridge, syncCredentialBridgeFromDisk, resolveCredentials};\n})();";
 
-function loadRuntime() {
+function loadRuntime({href = 'https://disk.linkex.io/', localStorageEntries = {}} = {}) {
   assert.ok(SOURCE.includes(STARTUP), 'test harness could not find userscript startup block');
   const storage = new Map();
+  const localValues = new Map(Object.entries(localStorageEntries));
+  const localStorage = {
+    get length() { return localValues.size; },
+    key(index) { return Array.from(localValues.keys())[index] ?? null; },
+    getItem(key) { return localValues.has(key) ? localValues.get(key) : null; },
+  };
   const context = {
     console,
     TextEncoder,
@@ -27,7 +33,9 @@ function loadRuntime() {
     clearInterval,
     crypto: webcrypto,
     navigator: {language: 'ja-JP'},
-    localStorage: {length: 0, key: () => null, getItem: () => null},
+    location: new URL(href),
+    localStorage,
+    atob(value) { return Buffer.from(String(value), 'base64').toString('binary'); },
     window: {},
     unsafeWindow: {},
     document: {readyState: 'loading', addEventListener() {}},
@@ -334,3 +342,87 @@ test('safe pause controls the active in-memory Queue and is enabled while runJob
   assert.doesNotMatch(pauseBlock, /const job = loadQueueJob\(\);/);
 });
 
+
+
+function makeJwt(expSeconds = Math.floor(Date.now() / 1000) + 3600) {
+  const enc = value => Buffer.from(JSON.stringify(value)).toString('base64url');
+  return `${enc({alg:'none',typ:'JWT'})}.${enc({exp:expSeconds,sub:'test-user'})}.test-signature`;
+}
+
+test('share-page target detection is restricted to l2e /d/ pages while manual parsing stays compatible', () => {
+  const {api} = loadRuntime({href:'https://l2e.click/d/AbCd_123?from=test'});
+  const target = api.detectSharePageTarget('https://l2e.click/d/AbCd_123?from=test');
+  assert.equal(target.shareToken, 'AbCd_123');
+  assert.equal(api.detectSharePageTarget('https://www.l2e.click/d/token-99').shareToken, 'token-99');
+  assert.equal(api.detectSharePageTarget('https://evil.example/d/AbCd_123'), null);
+  assert.equal(api.detectSharePageTarget('https://l2e.click/other/AbCd_123'), null);
+  assert.equal(api.parseShareToken('https://l2e.click/d/AbCd_123'), 'AbCd_123');
+  assert.equal(api.parseShareToken('AbCd_123'), 'AbCd_123');
+});
+
+test('credential bridge is written only from disk origin and l2e ignores its own localStorage credentials', () => {
+  const trustedToken = makeJwt();
+  const untrustedToken = makeJwt(Math.floor(Date.now() / 1000) + 7200);
+  const disk = loadRuntime({
+    href:'https://disk.linkex.io/',
+    localStorageEntries:{credential:JSON.stringify({credential:{token:trustedToken}})},
+  });
+  const local = disk.api.resolveCredentials();
+  assert.equal(local.token, trustedToken);
+  assert.equal(local.source, 'disk-localStorage');
+  const bridge = disk.storage.get('linkexCredentialBridgeV1');
+  assert.equal(bridge.token, trustedToken);
+  assert.equal(bridge.sourceOrigin, 'https://disk.linkex.io');
+
+  const share = loadRuntime({
+    href:'https://l2e.click/d/share123',
+    localStorageEntries:{credential:JSON.stringify({credential:{token:untrustedToken}})},
+  });
+  assert.equal(share.api.resolveCredentials(), null, 'l2e localStorage must never be trusted for account auth');
+  share.storage.set('linkexCredentialBridgeV1', bridge);
+  const bridged = share.api.resolveCredentials();
+  assert.equal(bridged.token, trustedToken);
+  assert.equal(bridged.source, 'gm-bridge');
+});
+
+test('expired credential bridge fails closed and clears itself', () => {
+  const {api, storage} = loadRuntime({href:'https://l2e.click/d/share123'});
+  storage.set('linkexCredentialBridgeV1', {
+    schemaVersion:1,
+    token:makeJwt(Math.floor(Date.now() / 1000) - 60),
+    cachedAt:Date.now() - 10000,
+    expiresAt:Date.now() - 1,
+    sourceOrigin:'https://disk.linkex.io',
+  });
+  assert.equal(api.readCredentialBridge(), null);
+  assert.equal(storage.get('linkexCredentialBridgeV1'), null);
+});
+
+test('share-page mode keeps runtime transaction core and invalidates stale manifest only outside a running Queue', () => {
+  assert.match(SOURCE, /@match\s+https:\/\/l2e\.click\/d\/\*/);
+  assert.match(SOURCE, /@match\s+https:\/\/www\.l2e\.click\/d\/\*/);
+  assert.match(SOURCE, /analyzeBtn\.textContent = 'この共有を解析'/);
+  assert.match(SOURCE, /if \(onShareHost && !running && manifest && manifest\.shareToken !== nextToken\)/);
+  assert.match(SOURCE, /Queue実行中に共有ページURLが変わりました。実行中Queueは作成時のshareTokenを維持します。/);
+  assert.match(SOURCE, /const creds = resolveCredentials\(\);/);
+  assert.match(SOURCE, /await ensureCopyOwned\(api, job, i, onStatus\);[\s\S]*await ensureDownloaded\(api, job, i, queueRoot, onStatus\);[\s\S]*await ensureDeleted\(api, job, i, onStatus\);/);
+});
+
+
+test('share-page start rechecks the current token and Queue completion resynchronizes stale page context', () => {
+  const startAt = SOURCE.indexOf('async function startManifestQueue(selection = null)');
+  const resumeAt = SOURCE.indexOf("resumeBtn.addEventListener('click'", startAt);
+  const pauseAt = SOURCE.indexOf("pauseBtn.addEventListener('click'", resumeAt);
+  assert.ok(startAt > 0 && resumeAt > startAt && pauseAt > resumeAt);
+  const startBlock = SOURCE.slice(startAt, resumeAt);
+  assert.match(startBlock, /currentPageTarget\.shareToken !== manifest\.shareToken/);
+  assert.match(startBlock, /共有ページが解析時点から変わっています/);
+  assert.match(startBlock, /finally \{ running = false; releaseLease\(\); syncSharePageContext\(\{initial:true\}\); refreshQueueUi\(\); \}/);
+  const resumeBlock = SOURCE.slice(resumeAt, pauseAt);
+  assert.match(resumeBlock, /finally \{ running = false; releaseLease\(\); syncSharePageContext\(\{initial:true\}\); refreshQueueUi\(\); \}/);
+});
+
+test('disk credential bridge refreshes on focus and periodically clears a logged-out session', () => {
+  assert.match(SOURCE, /setInterval\(\(\) => syncCredentialBridgeFromDisk\(\{clearIfMissing:true\}\), 60000\)/);
+  assert.match(SOURCE, /addEventListener\?\.\('focus',[\s\S]*syncCredentialBridgeFromDisk\(\);[\s\S]*syncSharePageContext/);
+});

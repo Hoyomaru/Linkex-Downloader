@@ -19,7 +19,8 @@ READMEは利用者向け、CHANGELOGは変更履歴、`docs/ARCHITECTURE.md` は
 - Release URL: `https://github.com/Hoyomaru/Linkex-Downloader/releases/tag/v1.1.0`
 - 現行 GitHub Actions: **CIあり**（userscript構文チェック + Node標準回帰テスト）
 - Runtime: Tampermonkey userscript
-- Target: `https://disk.linkex.io/*`
+- Targets: `https://disk.linkex.io/*`, `https://l2e.click/d/*`, `https://www.l2e.click/d/*`
+- Share Page Mode design: [`docs/SHARE_PAGE_MODE.md`](docs/SHARE_PAGE_MODE.md)
 - Main API origin: `https://prod.linksvc.xyz`
 - 実機確認ブラウザ: Chromium系（Chrome / Edge）
 - License: **未設定**
@@ -80,6 +81,9 @@ shared file
 11. 削除直前の `destId` のname / Linkex metadata sizeが所有権確定時と一致しない場合は削除拒否。
 12. leaseを失った場合は処理を停止する。
 13. 危険な曖昧状態は「失敗して止まる」側を選ぶ。誤削除より停止を優先する。
+14. 共有ページのURL変更で既存Queueの `job.shareToken` を書き換えない。Queueは作成時の共有へ固定する。
+15. `l2e.click` 側のLocal StorageをLinkexアカウント認証として信用しない。認証bridgeは `disk.linkex.io` で検出したtokenだけを書き込む。
+16. credential bridgeへrefresh tokenを保存しない。access tokenもJWT expiryまたは12時間の早い方で失効させる。
 
 **「便利だから」「復旧しやすいから」という理由で、上記ガードを外したり自動再送へ置き換えないこと。**
 
@@ -93,7 +97,8 @@ shared file
 |---|---|---|
 | 署名 | MD5、header/body hash、Linkex互換sign | `md5()`, `signRequest()`, `runSignatureSelfTest()` |
 | API | Linkex API要求 | `LinkexApi` |
-| 認証検出 | Local Storageからcredential候補検出 | `discoverCredentials()` |
+| 認証検出/bridge | disk Local Storageからcredential候補検出、access tokenだけGM bridgeへ同期 | `discoverCredentials()`, `syncCredentialBridgeFromDisk()`, `resolveCredentials()` |
+| Page context | share pageの現在token検出、URL変更時のmanifest guard | `detectSharePageTarget()`, `syncSharePageContext()` |
 | 共有解析 | URL解析、再帰manifest | `parseShareToken()`, `buildManifest()` |
 | Ownership | copy前後ID差分、候補検証 | `reconcileCopy()`, `isPlausibleCopy()` |
 | Download | signed URL、Range、checkpoint、verify | `downloadOwnedFile()` |
@@ -109,6 +114,8 @@ shared file
 
 ```text
 @match   https://disk.linkex.io/*
+@match   https://l2e.click/d/*
+@match   https://www.l2e.click/d/*
 @connect prod.linksvc.xyz
 @grant   GM_xmlhttpRequest
 @grant   GM_getValue
@@ -125,7 +132,11 @@ CDN downloadはpage-origin `fetch()` を使うためCDN向け `@connect` は設�
 
 Downloader独自のtoken設定欄はありません。
 
-`discoverCredentials()` が `localStorage` 内のJSONを走査し、JWTらしい `token` / `accessToken` / `diskToken` 等を候補化して、パス名等からscoreを付けて選択します。
+`discoverCredentials()` が `disk.linkex.io` の `localStorage` 内JSONを走査し、JWTらしい `token` / `accessToken` / `diskToken` 等を候補化して、パス名等からscoreを付けて選択します。
+
+Share Page Modeでは `l2e.click` が別originのためdisk Local Storageを直接読めません。`syncCredentialBridgeFromDisk()` が **access tokenだけ**を `linkexCredentialBridgeV1` へ保存し、`resolveCredentials()` が共有ページ側でそれを利用します。refresh tokenはbridgeへ保存しません。bridgeはJWT expiryまたは12時間の早い方で失効し、disk側ログアウトを検出した場合はclearします。
+
+`l2e.click` 側のLocal Storageにtokenらしき値があっても、Linkexアカウント認証には使わないでください。このorigin境界は安全条件です。
 
 実tokenをソース・ドキュメント・Issue・診断ログへ貼らないでください。
 

@@ -4,6 +4,8 @@
 // @version      1.1.0
 // @description  Linkex共有を1ファイルずつ安全に一時コピー→ローカル保存→検証→確定IDだけ削除。再開・容量スキップ・競合防止・診断ログ付き。
 // @match        https://disk.linkex.io/*
+// @match        https://l2e.click/d/*
+// @match        https://www.l2e.click/d/*
 // @connect      prod.linksvc.xyz
 // CDNはpage-origin fetchで取得するため @connect 不要
 // @grant        GM_xmlhttpRequest
@@ -205,6 +207,80 @@
     return candidates[0] ?? null;
   }
 
+
+  const CREDENTIAL_BRIDGE_KEY = 'linkexCredentialBridgeV1';
+  const CREDENTIAL_BRIDGE_FALLBACK_TTL_MS = 12 * 60 * 60 * 1000;
+
+  function currentPageUrl(input = null) {
+    try { return new URL(input == null ? String(globalThis.location?.href || '') : String(input)); }
+    catch { return null; }
+  }
+
+  function isDiskStoragePage(input = null) {
+    const url = currentPageUrl(input);
+    return !!url && url.protocol === 'https:' && url.hostname.toLowerCase() === 'disk.linkex.io';
+  }
+
+  function jwtExpiryMs(token) {
+    if (!isJwtLike(token) || typeof atob !== 'function') return null;
+    try {
+      let payload = String(token).split('.')[1].replace(/-/g, '+').replace(/_/g, '/');
+      payload += '='.repeat((4 - payload.length % 4) % 4);
+      const parsed = JSON.parse(atob(payload));
+      const exp = Number(parsed?.exp);
+      return Number.isFinite(exp) && exp > 0 ? exp * 1000 : null;
+    } catch { return null; }
+  }
+
+  function writeCredentialBridge(credential) {
+    if (!credential?.token || !isDiskStoragePage()) return null;
+    const cachedAt = Date.now();
+    const jwtExpiry = jwtExpiryMs(credential.token);
+    if (jwtExpiry !== null && jwtExpiry <= cachedAt) {
+      GM_setValue(CREDENTIAL_BRIDGE_KEY, null);
+      return null;
+    }
+    const expiresAt = Math.min(jwtExpiry ?? Number.POSITIVE_INFINITY, cachedAt + CREDENTIAL_BRIDGE_FALLBACK_TTL_MS);
+    const value = {schemaVersion:1, token:credential.token, cachedAt, expiresAt, sourceOrigin:'https://disk.linkex.io'};
+    GM_setValue(CREDENTIAL_BRIDGE_KEY, value);
+    return value;
+  }
+
+  function readCredentialBridge(now = Date.now()) {
+    const value = GM_getValue(CREDENTIAL_BRIDGE_KEY, null);
+    if (!value || typeof value !== 'object' || !isJwtLike(value.token)) return null;
+    const expiresAt = Number(value.expiresAt || 0);
+    if (!Number.isFinite(expiresAt) || expiresAt <= now) {
+      GM_setValue(CREDENTIAL_BRIDGE_KEY, null);
+      return null;
+    }
+    return {token:value.token, refreshToken:null, source:'gm-bridge', cachedAt:Number(value.cachedAt || 0), expiresAt};
+  }
+
+  function syncCredentialBridgeFromDisk({clearIfMissing = false} = {}) {
+    if (!isDiskStoragePage()) return null;
+    const credential = discoverCredentials();
+    if (credential?.token) {
+      writeCredentialBridge(credential);
+      return {...credential, source:'disk-localStorage'};
+    }
+    if (clearIfMissing) GM_setValue(CREDENTIAL_BRIDGE_KEY, null);
+    return null;
+  }
+
+  function resolveCredentials() {
+    if (isDiskStoragePage()) {
+      const local = syncCredentialBridgeFromDisk();
+      if (local?.token) return local;
+    }
+    return readCredentialBridge();
+  }
+
+  function credentialBootstrapMessage() {
+    if (isDiskStoragePage()) return 'Linkexログイン情報を検出できませんでした。disk.linkex.ioでログイン後にページを再読み込みしてください。';
+    return 'Linkexログイン情報を利用できません。disk.linkex.ioへログインした状態で一度ページを開き、この共有ページへ戻ってください。';
+  }
+
   function getNativePageWindow() {
     try {
       if (typeof unsafeWindow !== 'undefined' && unsafeWindow) return unsafeWindow;
@@ -356,6 +432,21 @@
     const match = url.pathname.match(/\/d\/([A-Za-z0-9_-]+)/);
     if (!match) throw new LinkexError('l2e.click/d/... 形式の共有URLではありません。');
     return match[1];
+  }
+
+  function isSharePageHost(input = null) {
+    const url = currentPageUrl(input);
+    if (!url || url.protocol !== 'https:') return false;
+    const host = url.hostname.toLowerCase();
+    return host === 'l2e.click' || host === 'www.l2e.click';
+  }
+
+  function detectSharePageTarget(input = null) {
+    const url = currentPageUrl(input);
+    if (!url || !isSharePageHost(url.href)) return null;
+    const match = url.pathname.match(/^\/d\/([A-Za-z0-9_-]+)(?:\/|$)/);
+    if (!match) return null;
+    return {shareToken:match[1], href:url.href, hostname:url.hostname.toLowerCase()};
   }
 
   async function buildManifest(api, shareToken, onProgress = () => {}) {
@@ -1304,8 +1395,8 @@
   async function processQueue(job, queueRoot, onStatus) {
     if (!job || !queueRoot) throw new LinkexError('Queueまたは保存先がありません。');
     await ensureHandlePermission(queueRoot);
-    const creds = discoverCredentials();
-    if (!creds) throw new LinkexError('Linkexログイン情報を検出できません。');
+    const creds = resolveCredentials();
+    if (!creds) throw new LinkexError(credentialBootstrapMessage(), {kind:'auth'});
     const api = new LinkexApi({token:creds.token});
     job.state = 'RUNNING';
     job.lastError = null;
@@ -1520,6 +1611,8 @@
         #linkex-full-queue .ok { border-color:#166534; color:#bbf7d0; }
         #linkex-full-queue .err { border-color:#991b1b; color:#fecaca; }
         #linkex-full-queue .notice { font-size:11px; color:#9ca3af; margin-top:8px; line-height:1.45; }
+        #linkex-full-queue .share-context { margin:0 0 8px; padding:8px 10px; border:1px solid #1d4ed8; border-radius:8px; background:#0b1b38; color:#bfdbfe; font-size:11px; line-height:1.45; overflow-wrap:anywhere; }
+        #linkex-full-queue .share-context[hidden] { display:none; }
         #linkex-full-queue .selection { margin:0 0 9px; padding:8px; border:1px solid #374151; border-radius:8px; background:#0b1220; }
         #linkex-full-queue .selection[hidden] { display:none; }
         #linkex-full-queue .selection-meta { font-size:11px; color:#cbd5e1; margin-bottom:6px; }
@@ -1538,6 +1631,7 @@
           <button id="lf-collapse" class="mini" title="最小化/展開">−</button>
         </div>
         <div class="body">
+          <div id="lf-share-context" class="share-context" hidden></div>
           <input id="lf-url" placeholder="https://l2e.click/d/xxxxxxxx" />
           <div class="row"><button id="lf-analyze" class="primary">共有リンクを解析</button><button id="lf-selftest" class="secondary">署名テスト</button></div>
           <div class="row"><button id="lf-start" class="warn" disabled>全ファイル開始</button><button id="lf-start-selected" class="primary" disabled>選択ファイル開始</button></div>
@@ -1562,6 +1656,7 @@
     document.body.appendChild(root);
 
     const input = root.querySelector('#lf-url');
+    const shareContextEl = root.querySelector('#lf-share-context');
     const status = root.querySelector('#lf-status');
     const analyzeBtn = root.querySelector('#lf-analyze');
     const startBtn = root.querySelector('#lf-start');
@@ -1606,6 +1701,7 @@
     let running = false;
     let activeRunJob = null;
     let selectedIndexes = new Set();
+    let pageShareTarget = null;
     input.value = GM_getValue(LAST_URL_KEY, '') || '';
 
     const prefs = loadUiPrefs();
@@ -1613,6 +1709,46 @@
     collapseBtn.textContent = prefs.collapsed ? '+' : '−';
 
     function isTerminal(job) { return job && ['DONE','DONE_WITH_SKIPS'].includes(job.state); }
+
+    function shortShareToken(token) {
+      const value = String(token || '');
+      return value.length <= 14 ? value : `${value.slice(0, 7)}…${value.slice(-4)}`;
+    }
+
+    function syncSharePageContext({initial = false} = {}) {
+      const next = detectSharePageTarget(globalThis.location?.href || '');
+      const previousToken = pageShareTarget?.shareToken || null;
+      const nextToken = next?.shareToken || null;
+      const changed = previousToken !== nextToken;
+      const onShareHost = isSharePageHost(globalThis.location?.href || '');
+      pageShareTarget = next;
+
+      if (next) {
+        input.value = next.href;
+        input.hidden = true;
+        shareContextEl.hidden = false;
+        const authReady = !!readCredentialBridge();
+        shareContextEl.textContent = `このページの共有: ${shortShareToken(next.shareToken)} · Linkex認証連携: ${authReady ? '準備済み' : '未準備（初回はdisk.linkex.ioを開いてください）'}`;
+        analyzeBtn.textContent = 'この共有を解析';
+      } else {
+        input.hidden = false;
+        shareContextEl.hidden = true;
+        shareContextEl.textContent = '';
+        analyzeBtn.textContent = '共有リンクを解析';
+      }
+
+      if (onShareHost && !running && manifest && manifest.shareToken !== nextToken) {
+        manifest = null;
+        selectedIndexes.clear();
+        fileFilter.value = '';
+        renderSelection();
+        if (!initial) write('共有ページが変わりました。現在の共有を解析してください。');
+      } else if (changed && running) {
+        recordEvent('warn', 'share-page-change-during-run', 'Queue実行中に共有ページURLが変わりました。実行中Queueは作成時のshareTokenを維持します。', {jobId:activeRunJob?.jobId || null});
+      }
+      refreshQueueUi();
+      return next;
+    }
 
     function visibleManifestIndexes() {
       if (!manifest?.files?.length) return [];
@@ -1742,11 +1878,18 @@
     analyzeBtn.addEventListener('click', async () => {
       analyzeBtn.disabled = true;
       try {
-        const token = parseShareToken(input.value);
-        GM_setValue(LAST_URL_KEY, input.value.trim());
+        const pageTargetAtStart = detectSharePageTarget(globalThis.location?.href || '');
+        const sourceInput = pageTargetAtStart?.href || input.value;
+        const token = pageTargetAtStart?.shareToken || parseShareToken(sourceInput);
+        GM_setValue(LAST_URL_KEY, String(sourceInput || '').trim());
         const api = new LinkexApi({token:null});
         write('共有manifestを読み取り中…');
-        manifest = await buildManifest(api, token, x => write(`共有manifestを読み取り中…\nfiles: ${x.files}\n${x.path || ''}`));
+        const nextManifest = await buildManifest(api, token, x => write(`共有manifestを読み取り中…\nfiles: ${x.files}\n${x.path || ''}`));
+        if (pageTargetAtStart) {
+          const currentTarget = detectSharePageTarget(globalThis.location?.href || '');
+          if (currentTarget?.shareToken !== token) throw new LinkexError('解析中に共有ページが変わりました。現在の共有をもう一度解析してください。', {kind:'share_context_changed'});
+        }
+        manifest = nextManifest;
         selectedIndexes = new Set(manifest.files.map((_, i) => i));
         fileFilter.value = '';
         renderSelection();
@@ -1807,6 +1950,18 @@
       const selected = selection == null ? null : Array.from(selection).sort((a,b) => a - b);
       const chosenFiles = selected == null ? manifest.files : selected.map(index => manifest.files[index]).filter(Boolean);
       if (!chosenFiles.length) { write('処理するファイルが選択されていません。', 'err'); return; }
+      const currentHref = String(globalThis.location?.href || '');
+      const currentPageTarget = detectSharePageTarget(currentHref);
+      if (isSharePageHost(currentHref) && (!currentPageTarget || currentPageTarget.shareToken !== manifest.shareToken)) {
+        manifest = null;
+        selectedIndexes.clear();
+        fileFilter.value = '';
+        renderSelection();
+        write('共有ページが解析時点から変わっています。現在の共有をもう一度解析してください。', 'err');
+        syncSharePageContext({initial:true});
+        return;
+      }
+      if (!resolveCredentials()) { write(credentialBootstrapMessage(), 'err'); syncSharePageContext({initial:true}); return; }
       const totalBytes = chosenFiles.reduce((sum, file) => sum + Number(file?.size || 0), 0);
       const modeText = selected == null ? '全ファイル' : '選択ファイル';
       const pageWindow = getNativePageWindow();
@@ -1843,7 +1998,7 @@ ${job.items.length}ファイルを順次処理します。`, 'ok');
 ${queueSummary(job)}
 
 危険な状態では安全側で停止します。「Queueを再開」はcopy/delete POSTを盲目的に再送しません。`, 'err');
-      } finally { running = false; releaseLease(); refreshQueueUi(); }
+      } finally { running = false; releaseLease(); syncSharePageContext({initial:true}); refreshQueueUi(); }
     }
 
     startBtn.addEventListener('click', () => startManifestQueue(null));
@@ -1853,6 +2008,7 @@ ${queueSummary(job)}
       if (running) return;
       const snapshot = loadQueueJob();
       if (!snapshot || isTerminal(snapshot)) { refreshQueueUi(); return; }
+      if (!resolveCredentials()) { write(credentialBootstrapMessage(), 'err'); syncSharePageContext({initial:true}); return; }
       running = true;
       try {
         await acquireLease();
@@ -1869,7 +2025,7 @@ ${queueSummary(job)}
       } catch (e) {
         console.error('[Linkex Resume]', e);
         write(`Queue再開停止: ${e?.message || e}\n\n${queueSummary(loadQueueJob())}`, 'err');
-      } finally { running = false; releaseLease(); refreshQueueUi(); }
+      } finally { running = false; releaseLease(); syncSharePageContext({initial:true}); refreshQueueUi(); }
     });
 
     pauseBtn.addEventListener('click', () => {
@@ -1944,6 +2100,24 @@ ${queueSummary(job)}
       else if (job.state === 'DONE') write(`前回Queueは完了済みです。\n\n${queueSummary(job, {detail:true})}`, 'ok');
       else if (job.state === 'DONE_WITH_SKIPS') write(`前回Queueはスキップありで走査完了しています。\n\n${queueSummary(job, {detail:true})}`, 'ok');
       else write(`未完了Queueがあります。\n\n${queueSummary(job)}\n\n「Queueを再開」で状態照合から続けられます。`);
+    });
+
+    if (isDiskStoragePage()) {
+      syncCredentialBridgeFromDisk();
+      setTimeout(() => syncCredentialBridgeFromDisk({clearIfMissing:true}), 4000);
+      setInterval(() => syncCredentialBridgeFromDisk({clearIfMissing:true}), 60000);
+    }
+    syncSharePageContext({initial:true});
+    let observedPageHref = String(globalThis.location?.href || '');
+    setInterval(() => {
+      const currentHref = String(globalThis.location?.href || '');
+      if (currentHref === observedPageHref) return;
+      observedPageHref = currentHref;
+      syncSharePageContext();
+    }, 750);
+    globalThis.addEventListener?.('focus', () => {
+      if (isDiskStoragePage()) syncCredentialBridgeFromDisk();
+      syncSharePageContext({initial:true});
     });
 
     const existing = refreshQueueUi();
