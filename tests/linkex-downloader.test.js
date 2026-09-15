@@ -299,3 +299,38 @@ test('selected Queue rejects an empty selection', () => {
   const manifest = {shareToken:'share-token', shareName:'sample', totalBytes:10, files:[{sourceId:'a', name:'a.bin', size:10, remotePath:'a.bin'}]};
   assert.throws(() => api.createQueueFromManifest(manifest, []), error => error?.kind === 'selection');
 });
+
+test('panel is constrained to the viewport and its body scrolls instead of escaping the screen', () => {
+  assert.match(SOURCE, /width:min\(540px, calc\(100vw - 24px\)\)/);
+  assert.match(SOURCE, /max-height:calc\(100dvh - 24px\)/);
+  assert.match(SOURCE, /#linkex-full-queue \.box \{[^\n]*display:flex; flex-direction:column;/);
+  assert.match(SOURCE, /#linkex-full-queue \.body \{[^\n]*overflow-y:auto;[^\n]*min-height:0;/);
+});
+
+test('safe pause controls the active in-memory Queue and is enabled while runJob is active', () => {
+  assert.match(SOURCE, /let activeRunJob = null;/);
+
+  const refreshAt = SOURCE.indexOf('function refreshQueueUi()');
+  const collapseAt = SOURCE.indexOf("collapseBtn.addEventListener('click'", refreshAt);
+  assert.ok(refreshAt > 0 && collapseAt > refreshAt);
+  const refreshBlock = SOURCE.slice(refreshAt, collapseAt);
+  assert.match(refreshBlock, /pauseBtn\.disabled = !running \|\| !activeRunJob \|\| !!activeRunJob\.stopRequested;/);
+
+  const runAt = SOURCE.indexOf('async function runJob(job, queueRoot, resume=false)');
+  const startAt = SOURCE.indexOf('async function startManifestQueue(selection = null)', runAt);
+  assert.ok(runAt > 0 && startAt > runAt);
+  const runBlock = SOURCE.slice(runAt, startAt);
+  assert.ok(runBlock.indexOf('activeRunJob = job;') >= 0);
+  assert.ok(runBlock.indexOf('activeRunJob = job;') < runBlock.indexOf('await processQueue('));
+  assert.ok(runBlock.indexOf('refreshQueueUi();') < runBlock.indexOf('await processQueue('));
+  assert.match(runBlock, /finally \{\s*activeRunJob = null;\s*refreshQueueUi\(\);\s*\}/);
+
+  const pauseAt = SOURCE.indexOf("pauseBtn.addEventListener('click'", startAt);
+  const retryAt = SOURCE.indexOf("retryBtn.addEventListener('click'", pauseAt);
+  assert.ok(pauseAt > startAt && retryAt > pauseAt);
+  const pauseBlock = SOURCE.slice(pauseAt, retryAt);
+  assert.match(pauseBlock, /const job = activeRunJob;/);
+  assert.match(pauseBlock, /job\.stopRequested = true;/);
+  assert.doesNotMatch(pauseBlock, /const job = loadQueueJob\(\);/);
+});
+

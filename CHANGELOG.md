@@ -6,6 +6,8 @@
 
 ### Fixed
 
+- Downloaderパネルをviewport内に制限し、縦に収まらない場合はパネル本文をスクロール可能に修正
+- 実行中の「現在ファイル後に停止」を有効化し、停止予約を実行中Queueへ確実に反映するよう修正
 - Queue stateを書き換える前にtab leaseを取得し、別tabの古いsnapshotによるstate巻き戻しを防止
 - Range 416でローカル完成済みの場合も `LOCAL_COMMITTED` を永続化して復旧可能に修正
 - `Content-Length` 不明と0 byteを区別し、明示的size verificationで0 byte fileを安全に完了可能に修正
@@ -37,7 +39,7 @@
 - 公開後のAsset digest照合をリリースチェックへ追加
 - standalone `.user.js` Release Assetをリポジトリ固定版とbyte-identicalなファイルへ差し替え、Release Notes記載SHA-256との一致を確認
 
-> このUnreleasedセクションはドキュメント整備のみです。`linkex-downloader.user.js` の実行ロジックおよびVersionは変更していません。
+> このUnreleasedセクションにはv1.0.0以降の未リリース変更を記録しています。正式リリースまでは `linkex-downloader.user.js` のVersionは1.0.0のままです。
 
 ## [1.0.0] - 2026-09-14
 
