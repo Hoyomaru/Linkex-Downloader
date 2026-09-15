@@ -212,17 +212,6 @@
     return window;
   }
 
-  async function invokeSaveFilePicker(options) {
-    const pageWindow = getNativePageWindow();
-    const picker = pageWindow?.showSaveFilePicker;
-    if (typeof picker !== 'function') {
-      throw new LinkexError('このブラウザではFile System Access APIが利用できません。Edge/Chromeの通常ウィンドウで実行してください。');
-    }
-    // Tampermonkey sandbox 経由の Window メソッドは `this` が userscript 側 Window になると
-    // Chromium が Illegal invocation を返す。必ずページ本体 Window を receiver に固定する。
-    return await Reflect.apply(picker, pageWindow, [options]);
-  }
-
   function gmRequest({ method = 'GET', url, headers = {}, data, timeout = 90000 }) {
     return new Promise((resolve, reject) => {
       GM_xmlhttpRequest({
@@ -234,6 +223,20 @@
         onabort: () => reject(new LinkexError('Request aborted', {kind:'network', url}))
       });
     });
+  }
+
+  function parseRetryAfterMs(responseHeaders) {
+    const line = String(responseHeaders || '').split(/\r?\n/).find(x => /^retry-after\s*:/i.test(x));
+    if (!line) return null;
+    const value = line.slice(line.indexOf(':') + 1).trim();
+    if (/^\d+(?:\.\d+)?$/.test(value)) return Math.max(0, Math.round(Number(value) * 1000));
+    const when = Date.parse(value);
+    return Number.isFinite(when) ? Math.max(0, when - Date.now()) : null;
+  }
+
+  function isRetryableReadStatus(status) {
+    const n = Number(status || 0);
+    return n === 429 || (n >= 500 && n <= 599);
   }
 
   class LinkexApi {
@@ -252,16 +255,27 @@
         'X-LinkInflu-App': 'linkex',
         'X-LinkInflu-App-Lang': this.lang
       };
-      const signed = signRequest({method, path, headers: baseHeaders, body: bodyText});
-      const headers = {
-        ...baseHeaders,
-        'X-LinkInflu-Ts': signed.timestamp,
-        'X-LinkInflu-Sign': signed.signature
-      };
-      if (auth && this.token) headers.Authorization = `Bearer ${this.token}`;
+      const upperMethod = String(method || 'GET').toUpperCase();
+      const maxAttempts = upperMethod === 'GET' ? 4 : 1;
+      let res = null;
+      for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+        // Retryごとにtimestamp/signatureを作り直す。POST/PUT/PATCHは絶対に自動retryしない。
+        const signed = signRequest({method:upperMethod, path, headers:baseHeaders, body:bodyText});
+        const headers = {
+          ...baseHeaders,
+          'X-LinkInflu-Ts': signed.timestamp,
+          'X-LinkInflu-Sign': signed.signature
+        };
+        if (auth && this.token) headers.Authorization = `Bearer ${this.token}`;
+        res = await gmRequest({method:upperMethod, url:API_BASE + path, headers, data:body === undefined ? undefined : bodyText});
+        if (res.status >= 200 && res.status < 300) break;
+        if (attempt >= maxAttempts || !isRetryableReadStatus(res.status)) break;
+        const retryAfter = parseRetryAfterMs(res.responseHeaders);
+        const backoff = retryAfter ?? Math.min(1000 * (2 ** (attempt - 1)), 8000);
+        await sleep(backoff);
+      }
 
-      const res = await gmRequest({method, url: API_BASE + path, headers, data: body === undefined ? undefined : bodyText});
-      let payload = res.response;
+      let payload = res?.response;
       if (typeof payload === 'string') {
         try { payload = JSON.parse(payload); } catch { /* leave string */ }
       }
@@ -410,11 +424,6 @@
     return `${(n / 1024 ** i).toFixed(i >= 3 ? 2 : 1)} ${units[i]}`;
   };
 
-  function redactToken(s) {
-    if (!s) return null;
-    return `${s.slice(0, 8)}…${s.slice(-6)}`;
-  }
-
   const PROBE_KEY = 'linkexCopyProbeStateV1';
   const LAST_URL_KEY = 'lastShareUrl';
   const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
@@ -560,6 +569,20 @@
     } finally { db.close(); }
   }
 
+  async function idbDeleteHandle(operationId) {
+    if (!operationId) return;
+    const db = await openDownloadDb();
+    try {
+      await new Promise((resolve, reject) => {
+        const tx = db.transaction(DOWNLOAD_STORE, 'readwrite');
+        tx.objectStore(DOWNLOAD_STORE).delete(operationId);
+        tx.oncomplete = () => resolve();
+        tx.onerror = () => reject(tx.error || new Error('IndexedDB delete failed'));
+        tx.onabort = () => reject(tx.error || new Error('IndexedDB delete aborted'));
+      });
+    } finally { db.close(); }
+  }
+
   async function ensureHandlePermission(handle) {
     if (!handle) throw new LinkexError('保存先ファイルハンドルがありません。', {kind:'filesystem'});
     if (handle.queryPermission) {
@@ -595,12 +618,23 @@
     const ctl = new AbortController();
     try {
       const res = await fetch(url, {method:'GET', cache:'no-store', credentials:'omit', signal:ctl.signal});
-      const len = Number(res.headers.get('Content-Length') || 0);
+      const rawLength = res.headers.get('Content-Length');
+      const len = rawLength === null ? null : Number(rawLength);
       try { await res.body?.cancel(); } catch {}
       if (!res.ok) throw new LinkexError(`CDN probe HTTP ${res.status}`, {kind:'cdn', status:res.status});
-      if (!Number.isFinite(len) || len <= 0) throw new LinkexError('CDN Content-Lengthを取得できません。', {kind:'protocol'});
+      if (len === null || !Number.isFinite(len) || len < 0) throw new LinkexError('CDN Content-Lengthを取得できません。', {kind:'protocol'});
       return len;
     } finally { ctl.abort(); }
+  }
+
+  function commitVerifiedDownload(state, {destId, downloadedBytes, expectedCdnBytes, localName}) {
+    const downloaded = Number(downloadedBytes);
+    const expected = Number(expectedCdnBytes);
+    if (!Number.isFinite(downloaded) || !Number.isFinite(expected) || downloaded < 0 || expected < 0 || downloaded !== expected) {
+      throw new LinkexError(`サイズ検証失敗: local=${downloadedBytes} / CDN=${expectedCdnBytes}`, {kind:'verify', actual:downloadedBytes, expectedTotal:expectedCdnBytes});
+    }
+    const current = loadProbeState() || state;
+    return saveProbeState({...current, state:'LOCAL_COMMITTED', download:{...(current.download||{}), destId, downloadedBytes:downloaded, expectedCdnBytes:expected, sizeVerified:true, sourceMetaSize:Number(state.source?.size || 0), verifiedAt:Date.now(), localName}});
   }
 
   async function downloadOwnedFile({api, state, handle, onProgress = () => {}}) {
@@ -611,6 +645,7 @@
     let localFile = await handle.getFile();
     let offset = localFile.size;
     let owned = await refreshOwnedFileUrl(api, destId);
+    if (!sameOwnedIdentity(owned, state)) throw new LinkexError('確定済みdestIdのidentityが所有権確定時から変化しました。自動処理を停止します。', {kind:'ownership_lost', destId});
     let url = owned.url;
     let retried403 = false;
 
@@ -620,6 +655,7 @@
       if (res.status === 403 && !retried403) {
         try { await res.body?.cancel(); } catch {}
         owned = await refreshOwnedFileUrl(api, destId);
+        if (!sameOwnedIdentity(owned, state)) throw new LinkexError('URL再取得時にdestIdのidentity変化を検出しました。自動処理を停止します。', {kind:'ownership_lost', destId});
         url = owned.url;
         retried403 = true;
         continue;
@@ -630,7 +666,8 @@
         const total = await probeCdnTotalSize(url);
         localFile = await handle.getFile();
         if (localFile.size === total) {
-          return {verified:true, resumed:true, totalBytes:total, localBytes:localFile.size, status:'ALREADY_COMPLETE'};
+          const done = commitVerifiedDownload(state, {destId, downloadedBytes:localFile.size, expectedCdnBytes:total, localName:localFile.name});
+          return {verified:true, resumed:true, totalBytes:total, localBytes:localFile.size, status:'ALREADY_COMPLETE', state:done};
         }
         if (localFile.size > total) {
           const w = await handle.createWritable({keepExistingData:false});
@@ -648,7 +685,12 @@
       }
       if (!res.body) throw new LinkexError('CDN response bodyがストリームではありません。', {kind:'protocol'});
 
-      const remaining = Number(res.headers.get('Content-Length') || 0);
+      const rawRemaining = res.headers.get('Content-Length');
+      const remaining = rawRemaining === null ? null : Number(rawRemaining);
+      if (remaining === null || !Number.isFinite(remaining) || remaining < 0) {
+        try { await res.body?.cancel(); } catch {}
+        throw new LinkexError('CDN Content-Lengthを取得できないため、完全性を検証できません。', {kind:'protocol'});
+      }
       let resumed = offset > 0 && res.status === 206;
       let base = resumed ? offset : 0;
 
@@ -659,7 +701,7 @@
         offset = 0;
       }
 
-      const expectedTotal = remaining > 0 ? base + remaining : null;
+      const expectedTotal = base + remaining;
       const writable = await handle.createWritable({keepExistingData: resumed});
       if (resumed) await writable.seek(base);
       else await writable.truncate(0);
@@ -698,15 +740,14 @@
 
       const finalFile = await handle.getFile();
       const actual = finalFile.size;
-      if (expectedTotal != null && actual !== expectedTotal) {
+      if (actual !== expectedTotal) {
         const current = loadProbeState() || state;
-        saveProbeState({...current, state:'VERIFY_FAILED', download:{...(current.download||{}), destId, downloadedBytes:actual, expectedCdnBytes:expectedTotal, updatedAt:Date.now()}});
+        saveProbeState({...current, state:'VERIFY_FAILED', download:{...(current.download||{}), destId, downloadedBytes:actual, expectedCdnBytes:expectedTotal, sizeVerified:false, updatedAt:Date.now()}});
         throw new LinkexError(`サイズ検証失敗: local=${actual} / CDN=${expectedTotal}`, {kind:'verify', actual, expectedTotal});
       }
 
-      const current = loadProbeState() || state;
-      const done = saveProbeState({...current, state:'LOCAL_COMMITTED', download:{...(current.download||{}), destId, downloadedBytes:actual, expectedCdnBytes:expectedTotal ?? actual, sourceMetaSize:Number(state.source?.size || 0), verifiedAt:Date.now(), localName:finalFile.name}});
-      return {verified:true, resumed, totalBytes:expectedTotal ?? actual, localBytes:actual, finalFile, state:done, metadataSize:Number(state.source?.size || 0)};
+      const done = commitVerifiedDownload(state, {destId, downloadedBytes:actual, expectedCdnBytes:expectedTotal, localName:finalFile.name});
+      return {verified:true, resumed, totalBytes:expectedTotal, localBytes:actual, finalFile, state:done, metadataSize:Number(state.source?.size || 0)};
     }
   }
 
@@ -725,9 +766,13 @@
     if (String(state.download?.destId || '') !== destId) {
       throw new LinkexError('削除拒否: ダウンロード検証IDとコピー所有IDが一致しません。', {kind:'delete_guard'});
     }
-    const downloaded = Number(state.download?.downloadedBytes || 0);
-    const expected = Number(state.download?.expectedCdnBytes || 0);
-    if (!(downloaded > 0 && expected > 0 && downloaded === expected)) {
+    const downloaded = Number(state.download?.downloadedBytes);
+    const expected = Number(state.download?.expectedCdnBytes);
+    const explicitSizeVerified = state.download?.sizeVerified === true;
+    // v1.0.0で既にLOCAL_COMMITTEDになった正サイズ(>0) Queueは互換維持する。
+    // 0 byteは新実装の明示的sizeVerifiedがある場合だけ許可する。
+    const legacySizeVerified = state.download?.sizeVerified == null && downloaded > 0 && expected > 0 && downloaded === expected;
+    if (!(explicitSizeVerified || legacySizeVerified) || !Number.isFinite(downloaded) || !Number.isFinite(expected) || downloaded < 0 || expected < 0 || downloaded !== expected) {
       throw new LinkexError(`削除拒否: ローカル検証サイズが確定していません (${downloaded}/${expected})。`, {kind:'delete_guard'});
     }
     if (!Number(state.download?.verifiedAt || 0)) {
@@ -819,11 +864,14 @@
     return h.toString(16).padStart(8, '0');
   }
 
-  function addLeafSuffix(name, suffix) {
+  function addLeafSuffix(name, suffix, maxLength = 140) {
     const s = String(name || 'file.bin');
     const dot = s.lastIndexOf('.');
-    if (dot > 0 && s.length - dot <= 20) return `${s.slice(0,dot)}${suffix}${s.slice(dot)}`;
-    return `${s}${suffix}`;
+    const hasShortExt = dot > 0 && s.length - dot <= 20;
+    const ext = hasShortExt ? s.slice(dot) : '';
+    const stem = hasShortExt ? s.slice(0, dot) : s;
+    const room = Math.max(1, maxLength - String(suffix).length - ext.length);
+    return `${stem.slice(0, room)}${suffix}${ext}`;
   }
 
   function allocateLocalPaths(files, shareName) {
@@ -981,6 +1029,55 @@
     return job.items[index].tx;
   }
 
+  function compactDoneTx(tx) {
+    if (!tx || tx.state !== 'DONE') return tx;
+    const confirmed = tx.confirmedDest ? {
+      id:tx.confirmedDest.id,
+      name:tx.confirmedDest.name,
+      size:Number(tx.confirmedDest.size || 0),
+      created_at:tx.confirmedDest.created_at ?? null,
+      createdAt:tx.confirmedDest.createdAt ?? null
+    } : null;
+    const download = tx.download ? {
+      destId:tx.download.destId,
+      downloadedBytes:Number(tx.download.downloadedBytes ?? 0),
+      expectedCdnBytes:Number(tx.download.expectedCdnBytes ?? 0),
+      sizeVerified:tx.download.sizeVerified ?? null,
+      sourceMetaSize:Number(tx.download.sourceMetaSize ?? tx.source?.size ?? 0),
+      verifiedAt:tx.download.verifiedAt ?? null,
+      localName:tx.download.localName ?? null
+    } : null;
+    const deletion = tx.delete ? {
+      destId:tx.delete.destId ?? confirmed?.id ?? null,
+      confirmedAbsentAt:tx.delete.confirmedAbsentAt ?? null,
+      alreadyAbsent:!!tx.delete.alreadyAbsent,
+      requestCompletedAt:tx.delete.requestCompletedAt ?? null
+    } : null;
+    return {
+      schemaVersion:tx.schemaVersion ?? 1,
+      operationId:tx.operationId,
+      state:'DONE',
+      source:tx.source,
+      confirmedDest:confirmed,
+      download,
+      delete:deletion,
+      startedAt:tx.startedAt ?? null,
+      reconciledAt:tx.reconciledAt ?? null,
+      queueJobId:tx.queueJobId ?? null,
+      queueIndex:tx.queueIndex ?? null
+    };
+  }
+
+  function compactCompletedItem(job, item) {
+    if (!item?.tx || item.tx.state !== 'DONE') return false;
+    item.tx = compactDoneTx(item.tx);
+    item.state = 'DONE';
+    item.lastError = null;
+    const probe = loadProbeState();
+    if (probe?.operationId === item.tx.operationId) saveProbeState(item.tx);
+    return true;
+  }
+
   async function acquireLease() {
     const now = Date.now();
     const current = GM_getValue(LEASE_KEY, null);
@@ -1115,8 +1212,10 @@
     const handle = await getLocalFileHandle(queueRoot, item);
     await ensureHandlePermission(handle);
     const owned = await refreshOwnedFileUrl(api, tx.confirmedDest.id);
+    if (!sameOwnedIdentity(owned, tx)) throw new LinkexError('ダウンロード開始前にdestIdのidentity変化を検出しました。自動処理を停止します。', {kind:'ownership_lost', destId:tx.confirmedDest.id});
     const local = await handle.getFile();
-    tx = {...tx, state:'DOWNLOAD_READY', confirmedDest:{...tx.confirmedDest, ...owned}, download:{...(tx.download||{}), destId:tx.confirmedDest.id, localName:local.name, downloadedBytes:local.size, startedAt:tx.download?.startedAt || Date.now(), updatedAt:Date.now()}};
+    // confirmedDestはownership確定時のimmutable snapshotとして維持し、signed URL等の現在metadataは永続化しない。
+    tx = {...tx, state:'DOWNLOAD_READY', download:{...(tx.download||{}), destId:tx.confirmedDest.id, localName:local.name, downloadedBytes:local.size, startedAt:tx.download?.startedAt || Date.now(), updatedAt:Date.now()}};
     persistItemTx(job, index, tx, 'DOWNLOADING');
 
     let lastErr = null;
@@ -1209,14 +1308,17 @@
       job.currentIndex = i;
       saveQueueJob(job);
       const item = job.items[i];
-      if (item.state === 'DONE' || item.tx?.state === 'DONE') { item.state = 'DONE'; continue; }
+      if (item.state === 'DONE' || item.tx?.state === 'DONE') {
+        compactCompletedItem(job, item);
+        saveQueueJob(job);
+        continue;
+      }
       if (['SKIPPED_CAPACITY','UNFITTABLE'].includes(item.state)) continue;
       try {
         await ensureCopyOwned(api, job, i, onStatus);
         await ensureDownloaded(api, job, i, queueRoot, onStatus);
         await ensureDeleted(api, job, i, onStatus);
-        item.state = 'DONE';
-        item.lastError = null;
+        compactCompletedItem(job, item);
         saveQueueJob(job);
         onStatus?.(`完了 [${i+1}/${job.items.length}]\n${item.source.remotePath}\nLinkex一時コピー削除確認済み`);
       } catch (e) {
@@ -1251,7 +1353,25 @@
     job.state = (c.skippedCapacity || c.unfittable || c.blocked) ? 'DONE_WITH_SKIPS' : 'DONE';
     job.completedAt = Date.now();
     saveQueueJob(job);
+    if (job.state === 'DONE') {
+      try {
+        await idbDeleteHandle(`${QUEUE_HANDLE_PREFIX}${job.jobId}`);
+      } catch (e) {
+        recordEvent('warn', 'handle-cleanup', `完了Queueの保存先Handle整理に失敗: ${e?.message || e}`, {jobId:job.jobId});
+      }
+    }
     return job;
+  }
+
+  async function abandonQueueJob(job) {
+    if (!job?.jobId) return {cleared:false, handleCleanupError:null};
+    let handleCleanupError = null;
+    try { await idbDeleteHandle(`${QUEUE_HANDLE_PREFIX}${job.jobId}`); }
+    catch (e) { handleCleanupError = e?.message || String(e); }
+    const probe = loadProbeState();
+    GM_setValue(QUEUE_KEY, null);
+    if (!probe || probe.queueJobId === job.jobId) GM_setValue(PROBE_KEY, null);
+    return {cleared:true, handleCleanupError};
   }
 
   function resetRetryableSkips(job) {
@@ -1403,7 +1523,8 @@
           <div class="row"><button id="lf-analyze" class="primary">共有リンクを解析</button><button id="lf-selftest" class="secondary">署名テスト</button></div>
           <div class="row"><button id="lf-start" class="warn" disabled>全ファイル開始</button><button id="lf-resume" class="primary" disabled>Queueを再開</button></div>
           <div class="row"><button id="lf-pause" class="secondary" disabled>現在ファイル後に停止</button><button id="lf-retry" class="secondary" disabled>容量スキップを再試行</button></div>
-          <div class="row"><button id="lf-export" class="secondary">診断ログを保存</button><button id="lf-refresh" class="secondary">状態を再表示</button></div>
+          <div class="row"><button id="lf-abandon" class="secondary" disabled>Queueを安全に破棄</button><button id="lf-export" class="secondary">診断ログを保存</button></div>
+          <div class="row"><button id="lf-refresh" class="secondary">状態を再表示</button></div>
           <div class="progress-wrap">
             <div class="progress-meta"><span id="lf-progress-text">Queueなし</span><span id="lf-progress-pct">0%</span></div>
             <div class="progress"><i id="lf-progress-bar"></i></div>
@@ -1421,6 +1542,7 @@
     const resumeBtn = root.querySelector('#lf-resume');
     const pauseBtn = root.querySelector('#lf-pause');
     const retryBtn = root.querySelector('#lf-retry');
+    const abandonBtn = root.querySelector('#lf-abandon');
     const exportBtn = root.querySelector('#lf-export');
     const refreshBtn = root.querySelector('#lf-refresh');
     const collapseBtn = root.querySelector('#lf-collapse');
@@ -1478,6 +1600,7 @@
       pauseBtn.disabled = !running || !job || !!job.stopRequested;
       const c = queueCounts(job);
       retryBtn.disabled = running || !job || !(c.skippedCapacity || c.unfittable) || !isTerminal(job);
+      abandonBtn.disabled = running || !active;
       analyzeBtn.disabled = running;
       refreshProgress();
       return job;
@@ -1526,7 +1649,8 @@
     });
 
     async function runJob(job, queueRoot, resume=false) {
-      await acquireLease();
+      // 呼び出し側がleaseを取得済みであること。Queue stateのmutationより先に排他を確立する。
+      assertLease();
       recordEvent('info', resume ? 'queue-resume' : 'queue-start', `${resume ? 'Queue再開' : 'Queue開始'}: ${job.jobId}`, {jobId:job.jobId, items:job.items?.length, folderName:job.folderName});
       try {
         const result = await processQueue(job, queueRoot, t => write(`${t}\n\n${queueSummary(loadQueueJob())}`));
@@ -1544,8 +1668,6 @@
       } catch (e) {
         recordEvent('error', 'queue-stop', `Queue停止: ${e?.message || e}`, {jobId:job?.jobId, kind:e?.kind || null});
         throw e;
-      } finally {
-        releaseLease();
       }
     }
 
@@ -1559,6 +1681,9 @@
       catch (e) { if (e?.name !== 'AbortError') write(`保存先選択失敗: ${e?.message || e}`, 'err'); return; }
       running = true;
       try {
+        await acquireLease();
+        const activeJob = loadQueueJob();
+        if (activeJob && !isTerminal(activeJob)) throw new LinkexError('別の未完了Queueを検出しました。状態を再表示してから再開または整理してください。', {kind:'queue_conflict'});
         await ensureHandlePermission(baseDir);
         const job = createQueueFromManifest(manifest);
         const queueRoot = await baseDir.getDirectoryHandle(job.folderName, {create:true});
@@ -1576,10 +1701,14 @@
 
     resumeBtn.addEventListener('click', async () => {
       if (running) return;
-      const job = loadQueueJob();
-      if (!job || isTerminal(job)) { refreshQueueUi(); return; }
+      const snapshot = loadQueueJob();
+      if (!snapshot || isTerminal(snapshot)) { refreshQueueUi(); return; }
       running = true;
       try {
+        await acquireLease();
+        // lease取得後に最新stateを読み直し、別tabの古いsnapshotを書き戻さない。
+        const job = loadQueueJob();
+        if (!job || isTerminal(job)) { refreshQueueUi(); return; }
         const queueRoot = await getQueueRootHandle(job);
         if (!queueRoot) throw new LinkexError('保存先DirectoryHandleが見つかりません。開始時と同じTampermonkeyスクリプトを使用してください。', {kind:'filesystem'});
         await ensureHandlePermission(queueRoot);
@@ -1612,6 +1741,42 @@
       recordEvent('info', 'retry-skips', `${n}件を再試行待ちへ戻しました`, {jobId:job.jobId, count:n});
       write(`${n}件の容量/サイズスキップを再試行待ちに戻しました。\n\n${queueSummary(job)}\n\n「Queueを再開」を押してください。`, 'ok');
       refreshQueueUi();
+    });
+
+    abandonBtn.addEventListener('click', async () => {
+      if (running) return;
+      const snapshot = loadQueueJob();
+      if (!snapshot || isTerminal(snapshot)) { refreshQueueUi(); return; }
+      const pageWindow = getNativePageWindow();
+      const warning = [
+        'この未完了Queueのローカル状態だけを破棄します。',
+        '',
+        'Linkex上のファイルは一切削除しません。',
+        'COPY/DELETE結果が不明なQueueでは一時コピーがLinkex上に残っている可能性があります。',
+        '必要なら先に「診断ログを保存」し、Linkex側を手動確認してください。',
+        '',
+        `job: ${snapshot.jobId}`,
+        `state: ${snapshot.state}`,
+        '',
+        'Queueを破棄しますか？'
+      ].join('\n');
+      if (!Reflect.apply(pageWindow.confirm, pageWindow, [warning])) return;
+      running = true;
+      try {
+        await acquireLease();
+        const job = loadQueueJob();
+        if (!job || isTerminal(job)) { write('破棄対象の未完了Queueはありません。'); return; }
+        if (job.jobId !== snapshot.jobId) throw new LinkexError('確認後にQueueが変更されました。状態を再表示してからやり直してください。', {kind:'queue_conflict'});
+        recordEvent('warn', 'queue-abandon', `Queue stateを手動破棄: ${job.jobId}`, {jobId:job.jobId, state:job.state, lastError:job.lastError || null});
+        const result = await abandonQueueJob(job);
+        write(`Queue stateを破棄しました。\nLinkex上のファイルは削除していません。未確定の一時コピーがないかLinkex側を確認してください。${result.handleCleanupError ? `\n\n保存先Handle整理警告: ${result.handleCleanupError}` : ''}`, 'ok');
+      } catch (e) {
+        write(`Queue破棄失敗: ${e?.message || e}`, 'err');
+      } finally {
+        running = false;
+        releaseLease();
+        refreshQueueUi();
+      }
     });
 
     exportBtn.addEventListener('click', () => {

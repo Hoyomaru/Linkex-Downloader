@@ -17,7 +17,7 @@ READMEは利用者向け、CHANGELOGは変更履歴、`docs/ARCHITECTURE.md` は
 - GitHub Release: **v1.0.0 公開済み（1件）**
 - Release title: **Linkex Downloader v1.0.0 — 初回安定版**
 - Release URL: `https://github.com/Hoyomaru/Linkex-Downloader/releases/tag/v1.0.0`
-- 現行 GitHub Actions / CI/CD: **なし**
+- 現行 GitHub Actions: **CIあり**（userscript構文チェック + Node標準回帰テスト）
 - Issue: **なし**
 - Pull Request: **なし**
 - Runtime: Tampermonkey userscript

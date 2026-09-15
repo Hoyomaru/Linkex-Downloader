@@ -455,3 +455,14 @@ DELETE request送信後に通信が切れ、成功/失敗を確定できない�
 - 別tab/別端末で同時にLinkexを操作していたか
 
 共有URLそのものやtoken等を公開Issueへそのまま貼らないでください。
+
+## 未完了Queueを破棄したい
+
+`AMBIGUOUS_COPY` / `UNCERTAIN_NO_EVIDENCE` などで安全停止し、実状態を確認したうえでそのQueueを継続しないと判断した場合は **Queueを安全に破棄** を使用できます。
+
+- Queue/transactionのローカル保存状態だけを消します。
+- Linkex APIのDELETEは呼びません。
+- ローカルへ保存済みのファイルも削除しません。
+- COPY結果が不明なケースではLinkex上に一時コピーが残っている可能性があります。
+
+破棄前に必要なら **診断ログを保存** し、破棄後はLinkex側の直近ファイルを手動確認してください。
