@@ -9,6 +9,12 @@
 - `l2e.click/d/...` 共有ページ上から現在の共有を直接解析・Queue開始できる Share Page Mode
 - `disk.linkex.io` で検出したaccess tokenだけを短時間GM storageへ橋渡しし、別originの共有ページから安全に認証済みQueueを実行するcredential bridge
 - 共有ページのSPA/URL変更を検知し、実行中Queueの `shareToken` は固定したまま古いmanifestだけを安全に無効化するpage-context guard
+- 共有ページの「すべてダウンロード」1操作で保存先準備 → 自動解析 → Full Queue開始まで進むQuick Download
+- 新規Queue用の保存先DirectoryHandleを記憶し、権限が残っている場合は次回以降の保存先選択を省略
+
+### Changed
+
+- 初期UIを「すべてダウンロード」「ファイルを選ぶ」中心に整理し、診断・再試行・安全破棄等を `詳細` へ集約
 
 ## [1.1.0] - 2026-09-15
 

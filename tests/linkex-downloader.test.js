@@ -185,7 +185,7 @@ test('download refuses a destId whose identity changed after ownership confirmat
 });
 
 test('queue start and resume acquire the lease before shared Queue mutations', () => {
-  const startAt = SOURCE.indexOf('async function startManifestQueue(selection = null)');
+  const startAt = SOURCE.indexOf('async function startManifestQueue(');
   const resumeAt = SOURCE.indexOf("resumeBtn.addEventListener('click'", startAt);
   const pauseAt = SOURCE.indexOf("pauseBtn.addEventListener('click'", resumeAt);
   assert.ok(startAt > 0 && resumeAt > startAt && pauseAt > resumeAt);
@@ -202,7 +202,7 @@ test('queue start and resume acquire the lease before shared Queue mutations', (
 
 test('runJob itself no longer acquires or releases the lease', () => {
   const runAt = SOURCE.indexOf('async function runJob(job, queueRoot, resume=false)');
-  const startAt = SOURCE.indexOf('async function startManifestQueue(selection = null)', runAt);
+  const startAt = SOURCE.indexOf('async function startManifestQueue(', runAt);
   const block = SOURCE.slice(runAt, startAt);
   assert.doesNotMatch(block, /await acquireLease\(\)/);
   assert.doesNotMatch(block, /releaseLease\(\)/);
@@ -325,7 +325,7 @@ test('safe pause controls the active in-memory Queue and is enabled while runJob
   assert.match(refreshBlock, /pauseBtn\.disabled = !running \|\| !activeRunJob \|\| !!activeRunJob\.stopRequested;/);
 
   const runAt = SOURCE.indexOf('async function runJob(job, queueRoot, resume=false)');
-  const startAt = SOURCE.indexOf('async function startManifestQueue(selection = null)', runAt);
+  const startAt = SOURCE.indexOf('async function startManifestQueue(', runAt);
   assert.ok(runAt > 0 && startAt > runAt);
   const runBlock = SOURCE.slice(runAt, startAt);
   assert.ok(runBlock.indexOf('activeRunJob = job;') >= 0);
@@ -401,8 +401,8 @@ test('expired credential bridge fails closed and clears itself', () => {
 test('share-page mode keeps runtime transaction core and invalidates stale manifest only outside a running Queue', () => {
   assert.match(SOURCE, /@match\s+https:\/\/l2e\.click\/d\/\*/);
   assert.match(SOURCE, /@match\s+https:\/\/www\.l2e\.click\/d\/\*/);
-  assert.match(SOURCE, /analyzeBtn\.textContent = 'この共有を解析'/);
-  assert.match(SOURCE, /if \(onShareHost && !running && manifest && manifest\.shareToken !== nextToken\)/);
+  assert.match(SOURCE, /analyzeBtn\.textContent = 'この共有を再解析'/);
+  assert.match(SOURCE, /if \(onShareHost && !running && !preparing && manifest && manifest\.shareToken !== nextToken\)/);
   assert.match(SOURCE, /Queue実行中に共有ページURLが変わりました。実行中Queueは作成時のshareTokenを維持します。/);
   assert.match(SOURCE, /const creds = resolveCredentials\(\);/);
   assert.match(SOURCE, /await ensureCopyOwned\(api, job, i, onStatus\);[\s\S]*await ensureDownloaded\(api, job, i, queueRoot, onStatus\);[\s\S]*await ensureDeleted\(api, job, i, onStatus\);/);
@@ -410,7 +410,7 @@ test('share-page mode keeps runtime transaction core and invalidates stale manif
 
 
 test('share-page start rechecks the current token and Queue completion resynchronizes stale page context', () => {
-  const startAt = SOURCE.indexOf('async function startManifestQueue(selection = null)');
+  const startAt = SOURCE.indexOf('async function startManifestQueue(');
   const resumeAt = SOURCE.indexOf("resumeBtn.addEventListener('click'", startAt);
   const pauseAt = SOURCE.indexOf("pauseBtn.addEventListener('click'", resumeAt);
   assert.ok(startAt > 0 && resumeAt > startAt && pauseAt > resumeAt);
@@ -425,4 +425,68 @@ test('share-page start rechecks the current token and Queue completion resynchro
 test('disk credential bridge refreshes on focus and periodically clears a logged-out session', () => {
   assert.match(SOURCE, /setInterval\(\(\) => syncCredentialBridgeFromDisk\(\{clearIfMissing:true\}\), 60000\)/);
   assert.match(SOURCE, /addEventListener\?\.\('focus',[\s\S]*syncCredentialBridgeFromDisk\(\);[\s\S]*syncSharePageContext/);
+});
+
+
+test('compact first screen centers quick all-download and file selection while advanced controls live under details', () => {
+  assert.match(SOURCE, /id="lf-start" class="primary action-main" disabled>すべてダウンロード<\/button>/);
+  assert.match(SOURCE, /id="lf-select-mode" class="secondary action-secondary" disabled>ファイルを選ぶ<\/button>/);
+  const detailsAt = SOURCE.indexOf('<details id="lf-more" class="more">');
+  const detailsEnd = SOURCE.indexOf('</details>', detailsAt);
+  assert.ok(detailsAt > 0 && detailsEnd > detailsAt);
+  const detailsBlock = SOURCE.slice(detailsAt, detailsEnd);
+  for (const id of ['lf-destination', 'lf-analyze', 'lf-selftest', 'lf-export', 'lf-refresh', 'lf-retry', 'lf-abandon']) {
+    assert.match(detailsBlock, new RegExp(`id="${id}"`));
+  }
+});
+
+test('preferred download directory is separate from Queue-specific handles and is preloaded before quick actions enable', () => {
+  assert.match(SOURCE, /const PREFERRED_DIR_HANDLE_KEY = 'preferred-download-root:v1';/);
+  assert.match(SOURCE, /const QUEUE_HANDLE_PREFIX = 'queue-full:';/);
+  assert.match(SOURCE, /idbPutHandle\(PREFERRED_DIR_HANDLE_KEY, handle\)/);
+  assert.match(SOURCE, /void refreshPreferredDirectoryState\(\{reloadHandle:true\}\)/);
+  const refreshAt = SOURCE.indexOf('function refreshQueueUi()');
+  const collapseAt = SOURCE.indexOf("collapseBtn.addEventListener('click'", refreshAt);
+  const block = SOURCE.slice(refreshAt, collapseAt);
+  assert.match(block, /startBtn\.disabled = busy \|\| !!active \|\| !hasShareInput \|\| !preferredHandleReady;/);
+});
+
+test('quick all-download resolves directory permission before network manifest analysis and starts without confirm', () => {
+  const quickAt = SOURCE.indexOf("startBtn.addEventListener('click', async () => {");
+  const selectAt = SOURCE.indexOf("selectModeBtn.addEventListener('click'", quickAt);
+  assert.ok(quickAt > 0 && selectAt > quickAt);
+  const block = SOURCE.slice(quickAt, selectAt);
+  const dirAt = block.indexOf('await acquirePreferredBaseDirFromGesture()');
+  const analyzeAt = block.indexOf('await analyzeCurrentShare({announceSuccess:false})');
+  const startAt = block.indexOf('await startManifestQueue(null, {baseDir, skipConfirm:true})');
+  assert.ok(dirAt >= 0 && analyzeAt > dirAt && startAt > analyzeAt);
+  assert.doesNotMatch(block, /confirm\(/);
+});
+
+test('preferred directory picker branch has no network or IndexedDB await before showDirectoryPicker', () => {
+  const helperAt = SOURCE.indexOf('async function acquirePreferredBaseDirFromGesture');
+  const nextAt = SOURCE.indexOf('function shortShareToken', helperAt);
+  assert.ok(helperAt > 0 && nextAt > helperAt);
+  const block = SOURCE.slice(helperAt, nextAt);
+  const pickerAt = block.indexOf("await invokeDirectoryPicker({mode:'readwrite'})");
+  assert.ok(pickerAt > 0);
+  const beforePicker = block.slice(0, pickerAt);
+  assert.doesNotMatch(beforePicker, /buildManifest|idbGetHandle|GM_xmlhttpRequest|LinkexApi/);
+});
+
+test('selection UI stays collapsed after analysis until explicit file-selection mode', () => {
+  assert.match(SOURCE, /let selectionExpanded = false;/);
+  assert.match(SOURCE, /selectionPanel\.hidden = !hasManifest \|\| !selectionExpanded;/);
+  const selectAt = SOURCE.indexOf("selectModeBtn.addEventListener('click'");
+  const selectedStartAt = SOURCE.indexOf("selectedStartBtn.addEventListener('click'", selectAt);
+  const block = SOURCE.slice(selectAt, selectedStartAt);
+  assert.match(block, /selectionExpanded = true;/);
+});
+
+test('Queue resume remains bound to its Queue-specific directory handle, never the preferred new-Queue destination', () => {
+  const resumeAt = SOURCE.indexOf("resumeBtn.addEventListener('click'");
+  const pauseAt = SOURCE.indexOf("pauseBtn.addEventListener('click'", resumeAt);
+  const block = SOURCE.slice(resumeAt, pauseAt);
+  assert.match(block, /const queueRoot = await getQueueRootHandle\(job\);/);
+  assert.doesNotMatch(block, /PREFERRED_DIR_HANDLE_KEY|preferredBaseDirHandle/);
 });

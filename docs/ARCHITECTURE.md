@@ -253,3 +253,10 @@ Queue開始/再開時に lease を取得します。
 - lease
 - GM storage / IndexedDB migration
 - diagnostics redaction
+
+
+## Quick Download / preferred保存先
+
+新規Queue用のbase directoryは `preferred-download-root:v1` として既存IndexedDB `handles` storeへDirectoryHandleを保存できます。これは新規Queueの利便性専用で、未完了Queueのresume先には使用しません。resumeは常に従来どおり `queue-full:<jobId>` のQueue固有DirectoryHandleを使います。
+
+共有ページの `すべてダウンロード` は、File System Access APIのuser-gesture制約を守るため、保存先permission/pickerを先に確定してから共有manifestのnetwork解析へ進みます。詳細は [`QUICK_DOWNLOAD_UI.md`](QUICK_DOWNLOAD_UI.md) を参照してください。
