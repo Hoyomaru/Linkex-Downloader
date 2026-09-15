@@ -1496,14 +1496,14 @@
     root.id = 'linkex-full-queue';
     root.innerHTML = `
       <style>
-        #linkex-full-queue { position:fixed; right:18px; bottom:18px; width:540px; z-index:2147483647; font-family:system-ui,-apple-system,"Segoe UI",sans-serif; color:#eef2ff; }
-        #linkex-full-queue .box { background:#111827; border:1px solid #374151; border-radius:14px; box-shadow:0 18px 45px rgba(0,0,0,.4); overflow:hidden; }
-        #linkex-full-queue .hd { padding:11px 12px 11px 14px; display:flex; align-items:center; justify-content:space-between; gap:10px; background:#0b1220; border-bottom:1px solid #374151; }
+        #linkex-full-queue { position:fixed; right:12px; bottom:12px; width:min(540px, calc(100vw - 24px)); max-width:calc(100vw - 24px); z-index:2147483647; font-family:system-ui,-apple-system,"Segoe UI",sans-serif; color:#eef2ff; }
+        #linkex-full-queue .box { background:#111827; border:1px solid #374151; border-radius:14px; box-shadow:0 18px 45px rgba(0,0,0,.4); overflow:hidden; max-height:calc(100vh - 24px); max-height:calc(100dvh - 24px); display:flex; flex-direction:column; }
+        #linkex-full-queue .hd { padding:11px 12px 11px 14px; display:flex; align-items:center; justify-content:space-between; gap:10px; background:#0b1220; border-bottom:1px solid #374151; flex:0 0 auto; }
         #linkex-full-queue .hd-left { display:flex; align-items:center; gap:8px; min-width:0; }
         #linkex-full-queue .title { font-weight:750; font-size:14px; white-space:nowrap; }
         #linkex-full-queue .badge { font-size:10px; padding:3px 7px; border-radius:999px; background:#14532d; color:#bbf7d0; white-space:nowrap; }
         #linkex-full-queue .mini { flex:0 0 auto; width:auto; padding:5px 9px; font-size:12px; background:#374151; color:#fff; }
-        #linkex-full-queue .body { padding:12px; }
+        #linkex-full-queue .body { padding:12px; overflow-y:auto; overscroll-behavior:contain; min-height:0; scrollbar-gutter:stable; }
         #linkex-full-queue.collapsed .body { display:none; }
         #linkex-full-queue input { width:100%; box-sizing:border-box; background:#0b1220; border:1px solid #4b5563; color:#fff; border-radius:8px; padding:9px 10px; margin-bottom:8px; }
         #linkex-full-queue .row { display:flex; gap:8px; margin-bottom:8px; }
@@ -1604,6 +1604,7 @@
 
     let manifest = null;
     let running = false;
+    let activeRunJob = null;
     let selectedIndexes = new Set();
     input.value = GM_getValue(LAST_URL_KEY, '') || '';
 
@@ -1715,7 +1716,7 @@
       resumeBtn.disabled = running || !active;
       startBtn.disabled = running || !manifest?.files?.length || !!active;
       selectedStartBtn.disabled = running || !manifest?.files?.length || selectedIndexes.size === 0 || !!active;
-      pauseBtn.disabled = !running || !job || !!job.stopRequested;
+      pauseBtn.disabled = !running || !activeRunJob || !!activeRunJob.stopRequested;
       const c = queueCounts(job);
       retryBtn.disabled = running || !job || !(c.skippedCapacity || c.unfittable) || !isTerminal(job);
       abandonBtn.disabled = running || !active;
@@ -1774,6 +1775,10 @@
     async function runJob(job, queueRoot, resume=false) {
       // 呼び出し側がleaseを取得済みであること。Queue stateのmutationより先に排他を確立する。
       assertLease();
+      // 停止ボタンは実行中の同一job objectを直接更新する。GM storageの別snapshot経由だと
+      // 後続saveQueueJob(job)で停止予約が巻き戻る可能性があるため、in-memory参照を保持する。
+      activeRunJob = job;
+      refreshQueueUi();
       recordEvent('info', resume ? 'queue-resume' : 'queue-start', `${resume ? 'Queue再開' : 'Queue開始'}: ${job.jobId}`, {jobId:job.jobId, items:job.items?.length, folderName:job.folderName});
       try {
         const result = await processQueue(job, queueRoot, t => write(`${t}\n\n${queueSummary(loadQueueJob())}`));
@@ -1791,6 +1796,9 @@
       } catch (e) {
         recordEvent('error', 'queue-stop', `Queue停止: ${e?.message || e}`, {jobId:job?.jobId, kind:e?.kind || null});
         throw e;
+      } finally {
+        activeRunJob = null;
+        refreshQueueUi();
       }
     }
 
@@ -1865,7 +1873,7 @@ ${queueSummary(job)}
     });
 
     pauseBtn.addEventListener('click', () => {
-      const job = loadQueueJob();
+      const job = activeRunJob;
       if (!job || !running) return;
       job.stopRequested = true;
       saveQueueJob(job);
