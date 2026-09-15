@@ -1,0 +1,178 @@
+name: Apply v1.2.0 post-release docs
+
+on:
+  push:
+    branches:
+      - fix/v1.2.0-release-docs
+
+permissions:
+  contents: write
+
+jobs:
+  update-docs:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: fix/v1.2.0-release-docs
+          fetch-depth: 0
+
+      - name: Update post-release documentation
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          def replace_one(path, old, new):
+              p = Path(path)
+              text = p.read_text(encoding='utf-8')
+              count = text.count(old)
+              if count != 1:
+                  raise SystemExit(f'{path}: expected 1 occurrence, found {count}: {old!r}')
+              p.write_text(text.replace(old, new, 1), encoding='utf-8')
+
+          # README: published state + current release asset names + v1.2.0 real-device coverage.
+          replace_one(
+              'README.md',
+              '''- `main` source: **v1.2.0**（release preparation / 実機確認済み）
+          - 最新公開安定版: **v1.1.0**
+          - 最新公開tag: **`v1.1.0`**
+          - GitHub Release: **v1.1.0 公開済み（2026-09-15）**
+          - v1.2.0: **公開準備中**（tag / GitHub Releaseは未作成）''',
+              '''- `main` source: **v1.2.0**（公開済み / 実機確認済み）
+          - 最新公開安定版: **v1.2.0**
+          - 最新公開tag: **`v1.2.0`**
+          - GitHub Release: **v1.2.0 公開済み（2026-09-15）**
+          - Release commit: `8bb478fbd320eaed2388427d3e03d1b91769bfc2`'''
+          )
+          replace_one(
+              'README.md',
+              'v1.1.0 までの開発過程で、以下が実機確認済みとして記録されています。',
+              'v1.2.0 までの開発過程で、以下が実機確認済みとして記録されています。'
+          )
+          replace_one(
+              'README.md',
+              '- 画面高さを超える場合のパネル内部スクロール',
+              '''- 画面高さを超える場合のパネル内部スクロール
+          - `l2e.click/d/...` 共有ページからの直接操作
+          - 初回保存先picker後の自動Full Queue開始
+          - preferred保存先を再利用した1クリック開始
+          - Share A → B遷移時のstale manifest防止
+          - コンパクト初期UI / 詳細ログ折りたたみ / error時自動展開'''
+          )
+          replace_one(
+              'README.md',
+              '2. GitHub Releases から最新の公開安定版を開きます。v1.2.0公開前の現行安定版は **v1.1.0** です。',
+              '2. GitHub Releases から最新の公開安定版 **v1.2.0** を開きます。'
+          )
+          replace_one(
+              'README.md',
+              '3. Release Assets の `linkex_downloader_vX.Y.Z.user.js` を取得します。',
+              '3. v1.2.0では Release Assets の `linkex-downloader_v1.2.0.user.js` を取得します。'
+          )
+          replace_one(
+              'README.md',
+              'ZIP Assetは同じuserscriptを含む補助配布物です。リポジトリ直下のversion固定コピーは今後作成しません。',
+              'ZIP Asset `linkex_downloader_v1.2.0.zip` は同じuserscriptを1ファイルだけ含む補助配布物です。リポジトリ直下のversion固定コピーは今後作成しません。'
+          )
+          replace_one(
+              'README.md',
+              'v1.2.0公開前に最新mainを試す場合だけ、リポジトリ直下の `linkex-downloader.user.js` を利用してください。mainは公開安定版より先行する場合があります。',
+              '`linkex-downloader.user.js` は `main` の正本です。現在はv1.2.0 Releaseと同じversionですが、今後の開発では公開安定版より先行する場合があります。'
+          )
+
+          # DEVELOPMENT: latest published release state.
+          replace_one(
+              'DEVELOPMENT.md',
+              '''- `main` source: **v1.2.0**（release preparation / 実機確認済み）
+          - 最新公開Stable: **v1.1.0**
+          - userscript metadata `@version`: **1.2.0**
+          - `const VERSION`: **1.2.0**
+          - 最新公開Git tag: **`v1.1.0`**
+          - GitHub Release: **v1.1.0 公開済み / v1.2.0 公開準備中**''',
+              '''- `main` source: **v1.2.0**（公開済み / 実機確認済み）
+          - 最新公開Stable: **v1.2.0**
+          - userscript metadata `@version`: **1.2.0**
+          - `const VERSION`: **1.2.0**
+          - 最新公開Git tag: **`v1.2.0`**
+          - GitHub Release: **v1.2.0 公開済み**
+          - Release commit: `8bb478fbd320eaed2388427d3e03d1b91769bfc2`'''
+          )
+
+          # RELEASE guide: post-release state and verified assets.
+          replace_one(
+              'docs/RELEASE.md',
+              '''- `main` source: **v1.2.0**（release preparation）
+          - 最新公開Stable: **v1.1.0**
+          - 最新公開tag: **`v1.1.0`**
+          - v1.2.0: 実機確認済み、tag / GitHub Releaseは未作成''',
+              '''- `main` source: **v1.2.0**（公開済み / 実機確認済み）
+          - 最新公開Stable: **v1.2.0**
+          - 最新公開tag: **`v1.2.0`**
+          - v1.2.0: GitHub Release公開済み
+          - Release commit: `8bb478fbd320eaed2388427d3e03d1b91769bfc2`'''
+          )
+          replace_one(
+              'docs/RELEASE.md',
+              '## 配布物ポリシー',
+              '''## v1.2.0 公開実績
+
+          GitHub Release `v1.2.0` は2026-09-15に公開済みです。tagは `8bb478fbd320eaed2388427d3e03d1b91769bfc2` を指します。
+
+          公開Asset:
+
+          ```text
+          linkex-downloader_v1.2.0.user.js  113381 bytes  sha256:6104fc053400c61eed5c90a602fe3515f1921a66519862eaa9fa6d60640e49fc
+          linkex_downloader_v1.2.0.zip        29796 bytes  sha256:d0d1256db911be5319313fa9e8cf0fc3fe091efa4d480332a76aa4e28c53fa25
+          ```
+
+          ZIPは `tools/build_release_assets.py` のdeterministic出力と一致しています。standalone userscriptはrelease commitの `linkex-downloader.user.js` とbyte-identicalです。v1.2.0ではstandalone Assetのアップロード名だけがbuilder既定名（underscore）ではなくhyphen表記です。今後はbuilderが生成したAsset名をそのまま使うことを推奨します。
+
+          ## 配布物ポリシー'''
+          )
+
+          # Version-specific notes: published/verified wording and actual uploaded asset names.
+          replace_one(
+              'docs/releases/v1.2.0.md',
+              '公開後は `linkex_downloader_v1.2.0.user.js` を推奨Assetとします。ZIPは同じuserscriptを含む補助Assetです。',
+              '公開済みReleaseでは `linkex-downloader_v1.2.0.user.js` を推奨Assetとします。`linkex_downloader_v1.2.0.zip` は同じuserscriptを1ファイルだけ含む補助Assetです。'
+          )
+          replace_one(
+              'docs/releases/v1.2.0.md',
+              '`tools/build_release_assets.py` でv1.2.0 sourceからdeterministic生成したrelease候補値です。公開時はtag対象commitから再生成し、GitHub Release APIのAsset digestと再照合します。',
+              '`v1.2.0` tag対象commitから生成・公開したAssetをGitHub Release APIのdigestと照合済みです。ZIPはdeterministic生成値と一致し、standalone userscriptもrelease commitのsourceとbyte-identicalです。'
+          )
+          replace_one(
+              'docs/releases/v1.2.0.md',
+              '''linkex_downloader_v1.2.0.user.js
+          6104fc053400c61eed5c90a602fe3515f1921a66519862eaa9fa6d60640e49fc
+          113381 bytes''',
+              '''linkex-downloader_v1.2.0.user.js
+          6104fc053400c61eed5c90a602fe3515f1921a66519862eaa9fa6d60640e49fc
+          113381 bytes'''
+          )
+          PY
+
+      - name: Verify no stale pre-release markers remain
+        shell: bash
+        run: |
+          ! grep -nE 'v1\.2\.0.*公開準備中|v1\.2\.0.*未作成|v1\.2\.0公開前|最新公開(安定版|Stable|tag): \*\*`?v1\.1\.0' README.md DEVELOPMENT.md docs/RELEASE.md docs/releases/v1.2.0.md
+
+      - name: Run repository checks
+        shell: bash
+        run: |
+          node --check linkex-downloader.user.js
+          node --test tests/*.test.js
+          python tools/check_repo_consistency.py
+          python tools/build_release_assets.py --output-dir "$RUNNER_TEMP/linkex-release"
+
+      - name: Commit documentation update and remove temporary workflow
+        shell: bash
+        run: |
+          rm .github/workflows/apply-v1.2.0-release-docs.yml
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add README.md DEVELOPMENT.md docs/RELEASE.md docs/releases/v1.2.0.md .github/workflows/apply-v1.2.0-release-docs.yml
+          git diff --cached --check
+          git commit -m "docs: finalize v1.2.0 published state"
+          git push origin HEAD:fix/v1.2.0-release-docs
