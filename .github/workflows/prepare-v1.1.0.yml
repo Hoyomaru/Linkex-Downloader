@@ -4,13 +4,14 @@ on:
   push:
     branches:
       - release/v1.1.0
+    paths:
+      - '.github/workflows/prepare-v1.1.0.yml'
 
 permissions:
   contents: write
 
 jobs:
   prepare:
-    if: github.event.head_commit.message == 'chore: fix v1.1.0 release preparation workflow'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
