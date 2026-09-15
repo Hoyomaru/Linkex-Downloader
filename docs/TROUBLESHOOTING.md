@@ -9,7 +9,7 @@
 問題が起きたら次を確認してください。
 
 1. `https://disk.linkex.io/` にログインしているか
-2. Tampermonkeyで Linkex Downloader v1.0.0 が有効か
+2. Tampermonkeyで Linkex Downloader が有効か
 3. 右下のパネルが表示されているか
 4. **署名テスト** がPASSするか
 5. **状態を再表示** で未完了Queueがないか
@@ -58,6 +58,25 @@
 4. 改善しない場合は診断ログを保存し、開発者側で credential discovery の互換性を確認する
 
 認証tokenを手作業でコードへ貼り付けないでください。
+
+## 共有ページで「Linkex認証連携: 未準備」になる
+
+**症状**
+
+`https://l2e.click/d/...` 上で共有解析はできるが、Queue開始前に認証連携が未準備と表示される。
+
+**原因**
+
+共有ページと自ストレージページは別originです。Downloaderは安全のため `l2e.click` のLocal Storageをアカウント認証として信用せず、`disk.linkex.io` で検出したaccess tokenだけをTampermonkey GM storage経由で短時間橋渡しします。
+
+**対処**
+
+1. `https://disk.linkex.io/` をログイン済み状態で一度開く
+2. 数秒待ってから共有ページへ戻る
+3. 共有ページを再フォーカスするか再読み込みする
+4. **この共有を解析** → Queue開始を再実行する
+
+bridgeはrefresh tokenを保存せず、最大12時間またはJWT expiryの早い方で失効します。期限切れの場合は同じ手順で再準備してください。
 
 ## 「このブラウザでは showDirectoryPicker が利用できません」
 

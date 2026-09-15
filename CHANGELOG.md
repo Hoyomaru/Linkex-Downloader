@@ -4,7 +4,11 @@
 
 ## [Unreleased]
 
-次回リリース向けの変更はここへ追記します。
+### Added
+
+- `l2e.click/d/...` 共有ページ上から現在の共有を直接解析・Queue開始できる Share Page Mode
+- `disk.linkex.io` で検出したaccess tokenだけを短時間GM storageへ橋渡しし、別originの共有ページから安全に認証済みQueueを実行するcredential bridge
+- 共有ページのSPA/URL変更を検知し、実行中Queueの `shareToken` は固定したまま古いmanifestだけを安全に無効化するpage-context guard
 
 ## [1.1.0] - 2026-09-15
 

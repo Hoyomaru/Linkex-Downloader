@@ -6,7 +6,7 @@
 
 ## 全体像
 
-Linkex Downloader は、`https://disk.linkex.io/*` 上で動作する Tampermonkey userscript です。
+Linkex Downloader は、`https://disk.linkex.io/*` と `https://l2e.click/d/*`（`www`含む）上で動作する Tampermonkey userscript です。共有ページでは現在URLからshare tokenを自動検出し、自ストレージページでは従来の手入力導線も維持します。
 
 共有リンク内のファイルを直接 CDN から取得するのではなく、各ファイルを一度自分の Linkex ストレージへコピーし、そのコピー先 ID の所有権を確認した後にダウンロードします。ローカル保存を検証できた場合だけ、自分で作成したと証明できる一時コピーを削除します。
 
@@ -38,7 +38,8 @@ flowchart TD
 | 層 | 主な責務 | 主な実装 |
 |---|---|---|
 | 署名・通信 | Linkex API と同じ署名生成、HTTP要求 | `md5()`, `signRequest()`, `LinkexApi` |
-| 認証検出 | Linkex Web が Local Storage に保持する資格情報候補を検出 | `discoverCredentials()` |
+| 認証検出/橋渡し | `disk.linkex.io` Local Storageの資格情報候補を検出し、access tokenのみ短時間GM bridgeへ同期 | `discoverCredentials()`, `syncCredentialBridgeFromDisk()`, `resolveCredentials()` |
+| Page context | `l2e.click/d/...` の現在share token検出、SPA URL変更時のmanifest guard | `detectSharePageTarget()`, `syncSharePageContext()` |
 | 共有解析 | 共有URL解析、フォルダ再帰、manifest生成 | `parseShareToken()`, `buildManifest()` |
 | 所有権確定 | コピー前後の root ID 差分から `destId` を確定 | `reconcileCopy()`, `isPlausibleCopy()` |
 | ダウンロード | signed URL、Range resume、checkpoint、サイズ検証 | `downloadOwnedFile()` |
@@ -70,6 +71,21 @@ flowchart LR
 - Linkex にログインしたブラウザ状態を利用します。
 - Local Storage から Linkex Web の認証情報候補を検出します。
 - ファイル/ディレクトリ選択にはページ本体 Window の File System Access API を使用します。
+
+### `l2e.click`
+
+- Share Page Mode の操作起点。
+- `/d/<shareToken>` を現在共有として自動検出します。
+- 別originのため `disk.linkex.io` Local Storageは直接読めません。認証済みwriteにはuserscript-privateなGM credential bridgeを使います。
+- URL変更中でも既存Queueの `job.shareToken` は変更しません。
+
+### Credential bridge
+
+- 保存先: GM storage `linkexCredentialBridgeV1`。
+- `disk.linkex.io` で検出したaccess tokenのみ保存し、refresh tokenは保存しません。
+- JWT expiryが利用できる場合はそれ以前、利用できない場合も最大12時間で失効させます。
+- `l2e.click` 側のLocal Storageにあるtokenらしき値はアカウント認証として信用しません。
+- diskページでログアウト状態が確定した場合はbridgeをclearします。
 
 ### `prod.linksvc.xyz`
 
@@ -199,7 +215,8 @@ item側には `PENDING`, `COPYING`, `COPIED`, `DOWNLOADING`, `LOCAL_COMMITTED`, 
 | IndexedDB | `linkexDownloaderProbeV1` / `handles` | File System Access API handle |
 | GM storage | `linkexDownloaderEventLogV1` | 診断イベント（最大800件） |
 | GM storage | `linkexDownloaderUiPrefsV1` | UI折りたたみ状態 |
-| GM storage | `lastShareUrl` | 最後に入力した共有URL |
+| GM storage | `lastShareUrl` | 最後に入力/検出した共有URL |
+| GM storage | `linkexCredentialBridgeV1` | `disk.linkex.io` から共有ページへ短時間橋渡しするaccess token（refresh tokenは保存しない） |
 
 QueueのDirectoryHandleは `queue-full:<jobId>` を `operationId` として IndexedDB に保存します。
 
