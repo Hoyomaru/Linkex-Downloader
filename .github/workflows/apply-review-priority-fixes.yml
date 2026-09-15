@@ -1,0 +1,40 @@
+name: Apply priority review fixes
+
+on:
+  push:
+    branches:
+      - fix/review-priority-1-6
+    paths:
+      - tools/apply-review-priority-fixes.py
+      - .github/workflows/apply-review-priority-fixes.yml
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: fix/review-priority-1-6
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Apply exact source patches
+        run: python3 tools/apply-review-priority-fixes.py
+      - name: Syntax check
+        run: node --check linkex-downloader.user.js
+      - name: Remove one-off patch machinery
+        run: |
+          rm -f tools/apply-review-priority-fixes.py
+          rm -f .github/workflows/apply-review-priority-fixes.yml
+          rmdir tools 2>/dev/null || true
+      - name: Commit patched source
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -m "fix: harden queue recovery and download verification"
+          git push origin HEAD:fix/review-priority-1-6
