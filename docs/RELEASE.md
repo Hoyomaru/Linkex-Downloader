@@ -6,19 +6,37 @@
 
 ## 現在のリリース状態
 
-2026-09-14 時点:
+2026-09-15 時点:
 
-- 現行Version: **v1.0.0**
-- Git tag: **`v1.0.0`**
+- 現行Version: **v1.1.0**
+- Git tag: **`v1.1.0`**
 - GitHub Release: **公開済み**
-- Release title: **Linkex Downloader v1.0.0 — 初回安定版**
+- Release title: **Linkex Downloader v1.1.0 — 選択Queue・安全性強化**
 - Draft: **false**
 - Prerelease: **false**
-- Published: **2026-09-14T13:56:48Z**
-- Release URL: `https://github.com/Hoyomaru/Linkex-Downloader/releases/tag/v1.0.0`
+- Release URL: `https://github.com/Hoyomaru/Linkex-Downloader/releases/tag/v1.1.0`
 - 現行 GitHub Actions: **CIあり**（`.github/workflows/ci.yml`）
 
-v1.0.0 作成時には一時的な GitHub Actions workflow が使われましたが、そのworkflowは `chore: remove one-off release workflow` で削除済みです。現在のrelease工程は手動です。
+v1.1.0 はrelease準備commitの `main` CI成功後に一時publish workflowでtag / GitHub Releaseを作成し、公開Asset digestの照合後にそのworkflowを削除する手順を採用します。本体のCOPY / DOWNLOAD / VERIFY / DELETEロジックはrelease準備では変更しません。
+
+## v1.1.0 Release Assets
+
+| Asset | 位置づけ | 推奨度 |
+|---|---|---|
+| `linkex_downloader_v1.1.0.user.js` | Tampermonkeyへ導入するversion固定userscript | **推奨 / 第一選択** |
+| `linkex_downloader_v1.1.0.zip` | version固定userscriptを含む補助配布物 | 任意 / 代替 |
+
+### v1.1.0 SHA-256
+
+```text
+linkex_downloader_v1.1.0.user.js
+f3d22381b3601508143784af83feb8a96be200f0966f93fa9998c930164168e4
+
+linkex_downloader_v1.1.0.zip
+b510266933e84155acebd3a7ff25ebda8e2088d86a9499ec9d45c6a3541866e9
+```
+
+`linkex_downloader_v1.1.0.user.js` は `linkex-downloader.user.js` とbyte-identicalな **95,286 bytes** です。ZIPは **25,923 bytes** で、内部の `linkex_downloader_v1.1.0.user.js` もbyte-identicalであることを生成時に検証します。公開後はGitHub Release APIが返すAsset `digest` と上記SHA-256を再照合します。
 
 ## v1.0.0 Release Assets
 

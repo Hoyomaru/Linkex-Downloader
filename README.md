@@ -33,23 +33,22 @@ Linkex 自領域へ一時コピー
 
 ## Version / 配布状態
 
-- 現行Version: **v1.0.0**
-- Git tag: **`v1.0.0` あり**
-- GitHub Release: **v1.0.0 公開済み（2026-09-14）**
-- Release title: **Linkex Downloader v1.0.0 — 初回安定版**
+- 現行Version: **v1.1.0**
+- Git tag: **`v1.1.0`**
+- GitHub Release: **v1.1.0 公開済み（2026-09-15）**
+- Release title: **Linkex Downloader v1.1.0 — 選択Queue・安全性強化**
 - 現行CI: **GitHub Actions (`.github/workflows/ci.yml`)** — userscript構文チェックと回帰テスト
 
 正式配布先:
 
-- https://github.com/Hoyomaru/Linkex-Downloader/releases/tag/v1.0.0
+- https://github.com/Hoyomaru/Linkex-Downloader/releases/tag/v1.1.0
 
 Release Assets:
 
-- `linkex_downloader_v1.0.0.user.js` — **推奨。v1.0.0 固定userscript**
-- `linkex_downloader_v1.0.0.zip` — 同じuserscriptを含む補助配布ZIP
+- `linkex_downloader_v1.1.0.user.js` — **推奨。v1.1.0 固定userscript**
+- `linkex_downloader_v1.1.0.zip` — 同じuserscriptを含む補助配布ZIP
 
 リポジトリ直下の `linkex-downloader.user.js` は最新ソースです。Release Assetとしてはversion固定 `.user.js` を第一選択とし、ZIPは保存・展開用の代替として扱います。
-
 ## 主な機能
 
 - `https://l2e.click/d/...` 共有URLの解析
@@ -75,7 +74,7 @@ Release Assets:
 
 ## 実機確認状況
 
-v1.0.0 までの開発過程で、以下が実機確認済みとして記録されています。
+v1.1.0 までの開発過程で、以下が実機確認済みとして記録されています。
 
 - 共有リンク解析
 - 再帰的な全ファイル列挙
@@ -91,6 +90,9 @@ v1.0.0 までの開発過程で、以下が実機確認済みとして記録さ�
 - 全ファイル連続処理
 - 容量不足ファイルの安全なskip
 - 診断ログ出力
+- 選択ファイルQueueの実行
+- 実行中の安全停止 → Queue再開
+- 画面高さを超える場合のパネル内部スクロール
 
 ブラウザ/Linkex側の仕様は変わり得るため、将来の動作を保証するものではありません。
 
@@ -123,17 +125,16 @@ Node.js / Python等の外部ランタイムは不要です。
 ### GitHub Releaseから導入する場合（推奨）
 
 1. Chrome / Edge に Tampermonkey をインストールします。
-2. GitHub Releases の **v1.0.0** を開きます。
-3. Release Assets から **`linkex_downloader_v1.0.0.user.js`** をダウンロードします。
+2. GitHub Releases の **v1.1.0** を開きます。
+3. Release Assets から **`linkex_downloader_v1.1.0.user.js`** をダウンロードします。
 4. Tampermonkeyで新規スクリプトを作成します。
 5. 新規スクリプトの内容をすべて削除し、userscript全文を貼り付けて保存します。
 6. Linkexへログインした状態で `https://disk.linkex.io/` を開きます。
-7. 右下に **Linkex Downloader v1.0.0** パネルが表示されれば導入完了です。
+7. 右下に **Linkex Downloader v1.1.0** パネルが表示されれば導入完了です。
 
-`linkex_downloader_v1.0.0.zip` は同じuserscriptを含む補助配布物です。ZIPを使用する場合は展開し、`linkex_downloader_v1.0.0.user.js` を取り出して同じ手順で導入してください。
+`linkex_downloader_v1.1.0.zip` は同じuserscriptを含む補助配布物です。ZIPを使用する場合は展開し、`linkex_downloader_v1.1.0.user.js` を取り出して同じ手順で導入してください。
 
-Release Assetsを利用できない場合は、リポジトリ直下のversion固定 `linkex_downloader_v1.0.0.user.js` も利用できます。
-
+Release Assetsを利用できない場合は、リポジトリ直下のversion固定 `linkex_downloader_v1.1.0.user.js` も利用できます。
 ## 更新
 
 新Versionへ更新する場合は、Tampermonkey内のスクリプト本文を新しいversion固定 `.user.js` または `linkex-downloader.user.js` で置き換えます。
@@ -142,7 +143,7 @@ Release Assetsを利用できない場合は、リポジトリ直下のversion�
 
 更新前に未完了Queueがある場合は注意してください。GM storage / IndexedDB schemaが将来変わる場合、既存Queueとの互換性が必要になります。
 
-現行v1.0.0では、同じv1.0.0内での置き換えを除き、将来Versionへのmigrationは **未確認**です。
+v1.1.0 はv1.0.0の通常Queueとの互換性をできる限り維持していますが、未完了QueueをVersion跨ぎで再開する全パターンは実機網羅していません。更新前に可能ならQueueを完了または安全停止してください。
 
 ## アンインストール
 
