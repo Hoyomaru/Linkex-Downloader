@@ -16,7 +16,7 @@
 - Prerelease: **false**
 - Published: **2026-09-14T13:56:48Z**
 - Release URL: `https://github.com/Hoyomaru/Linkex-Downloader/releases/tag/v1.0.0`
-- 現行 GitHub Actions / CI/CD: **なし**
+- 現行 GitHub Actions: **CIあり**（`.github/workflows/ci.yml`）
 
 v1.0.0 作成時には一時的な GitHub Actions workflow が使われましたが、そのworkflowは `chore: remove one-off release workflow` で削除済みです。現在のrelease工程は手動です。
 
@@ -316,7 +316,12 @@ GitHub上で次を確認します。
 
 ## CI/CD
 
-現在、継続的なGitHub Actions / CI/CDはありません。
+`.github/workflows/ci.yml` で継続的CIを実行します。
+
+- `node --check linkex-downloader.user.js`
+- `node --test tests/*.test.js`
+
+Release前にはCI PASSに加えて、実機の署名テスト・共有解析・Queue smoke/recovery testも引き続き実施してください。
 
 v1.0.0作成時に一時的に使われた `publish-v1.0.0.yml` は削除済みです。今後release自動化を導入する場合は、特定Version専用workflowではなく、Version引数・tag・hash検証を一般化した設計を検討してください。
 

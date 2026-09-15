@@ -4,6 +4,21 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Queue stateを書き換える前にtab leaseを取得し、別tabの古いsnapshotによるstate巻き戻しを防止
+- Range 416でローカル完成済みの場合も `LOCAL_COMMITTED` を永続化して復旧可能に修正
+- `Content-Length` 不明と0 byteを区別し、明示的size verificationで0 byte fileを安全に完了可能に修正
+- ownership確定時 `confirmedDest` をimmutable snapshotとして維持し、download前/403更新時のidentity変化を拒否
+- 長いfilenameのcollision suffixがtruncateで消える問題を修正
+
+### Added
+
+- 未完了QueueをLinkex側へDELETEせずローカルstateだけ破棄する「Queueを安全に破棄」
+- read-only GETのHTTP 429/5xx retry（COPY/DELETE等のwrite requestは従来どおり自動retry禁止）
+- DONE transactionのcompact化と完了QueueのIndexedDB DirectoryHandle cleanup
+- Node標準回帰テストとGitHub Actions CI
+
 ### Documentation
 
 - READMEを利用者向け主要ドキュメントとして拡充
