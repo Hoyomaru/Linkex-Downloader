@@ -22,6 +22,20 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
+      - name: Relax one brittle staged replacement
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+          p = Path('tools/apply-review-priority-fixes.py')
+          s = p.read_text(encoding='utf-8')
+          pattern = r"replace_exact\(\n\"\"\"    async function runJob\(job, queueRoot, resume=false\) \{.*?\n'runJob lease ownership'\)\n"
+          replacement = '''replace_exact(\n"""    async function runJob(job, queueRoot, resume=false) {\n      await acquireLease();\n""",\n"""    async function runJob(job, queueRoot, resume=false) {\n      // 呼び出し側がleaseを取得済みであること。Queue stateのmutationより先に排他を確立する。\n      assertLease();\n""",\n'runJob lease ownership')\n'''
+          s2, n = re.subn(pattern, replacement, s, count=1, flags=re.S)
+          if n != 1:
+              raise SystemExit(f'failed to relax runJob patch block: {n}')
+          p.write_text(s2, encoding='utf-8', newline='\n')
+          PY
       - name: Apply exact source patches
         run: python3 tools/apply-review-priority-fixes.py
       - name: Syntax check
