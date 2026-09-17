@@ -4,6 +4,8 @@
 
 ## [Unreleased]
 
+## [1.2.1] - 2026-09-17
+
 ### Fixed
 
 - CDNが `Content-Length` を公開しない正常応答でも、streamの正常EOF到達とローカル書き込みbyte数を証拠として安全に完了できるよう修正。Range 416で完成サイズを取得できない場合は曖昧なlocal fileを完成扱いせず0 byteから再取得する

@@ -6,9 +6,9 @@
 
 ## 現在の状態
 
-2026-09-15 時点:
+2026-09-17 時点:
 
-- `main` source: **v1.2.0**（公開済み / 実機確認済み）
+- `main` source: **v1.2.1**（Release準備中 / 実機確認済み）
 - 最新公開Stable: **v1.2.0**
 - 最新公開tag: **`v1.2.0`**
 - v1.2.0: GitHub Release公開済み
@@ -127,8 +127,8 @@ python tools/build_release_assets.py --output-dir <temporary directory>
 - COPY / DELETE結果不明時はwriteを盲目的に再送しない
 - `beforeIds` に含まれるIDを削除しない
 - ダウンロードIDと所有権確定IDを一致確認
-- `download.sizeVerified === true`
-- `downloadedBytes === expectedCdnBytes >= 0` を満たし `verifiedAt` がある場合だけdelete可能
+- Content-Length検証では `download.sizeVerified === true` かつ `downloadedBytes === expectedCdnBytes >= 0`
+- Content-Lengthがない場合は `verificationMethod === 'stream-eof'`、`streamComplete === true`、stream実書込byte数と最終ローカルサイズ一致を満たし、いずれも `verifiedAt` がある場合だけdelete可能
 - 削除直前identityを再確認
 - lease喪失時は停止
 - page URL変更で既存Queueの `shareToken` / queueRootを変更しない
