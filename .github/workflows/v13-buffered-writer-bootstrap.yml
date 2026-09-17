@@ -1,4 +1,4 @@
-name: one-shot-v13-buffered-writer
+name: one-shot-v13-buffered-writer-retry
 
 on:
   push:
