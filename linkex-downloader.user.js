@@ -720,17 +720,32 @@
     } finally { ctl.abort(); }
   }
 
-  function commitVerifiedDownload(state, {destId, downloadedBytes, expectedCdnBytes, localName}) {
-    const downloaded = Number(downloadedBytes);
-    const expected = Number(expectedCdnBytes);
-    if (!Number.isFinite(downloaded) || !Number.isFinite(expected) || downloaded < 0 || expected < 0 || downloaded !== expected) {
-      throw new LinkexError(`サイズ検証失敗: local=${downloadedBytes} / CDN=${expectedCdnBytes}`, {kind:'verify', actual:downloadedBytes, expectedTotal:expectedCdnBytes});
-    }
-    const current = loadProbeState() || state;
-    return saveProbeState({...current, state:'LOCAL_COMMITTED', download:{...(current.download||{}), destId, downloadedBytes:downloaded, expectedCdnBytes:expected, sizeVerified:true, sourceMetaSize:Number(state.source?.size || 0), verifiedAt:Date.now(), localName}});
+  function commitVerifiedDownload(state, {destId, downloadedBytes, expectedCdnBytes = null, localName, verificationMethod = 'content-length'}) {
+  const downloaded = Number(downloadedBytes);
+  if (!Number.isFinite(downloaded) || downloaded < 0) {
+    throw new LinkexError(`ダウンロード済みサイズが不正です: ${downloadedBytes}`, {kind:'verify', actual:downloadedBytes});
   }
 
-  async function downloadOwnedFile({api, state, handle, onProgress = () => {}}) {
+  let expected = null;
+  let sizeVerified = false;
+  let streamComplete = false;
+  if (verificationMethod === 'content-length') {
+    expected = Number(expectedCdnBytes);
+    if (!Number.isFinite(expected) || expected < 0 || downloaded !== expected) {
+      throw new LinkexError(`サイズ検証失敗: local=${downloadedBytes} / CDN=${expectedCdnBytes}`, {kind:'verify', actual:downloadedBytes, expectedTotal:expectedCdnBytes});
+    }
+    sizeVerified = true;
+  } else if (verificationMethod === 'stream-eof') {
+    streamComplete = true;
+  } else {
+    throw new LinkexError(`未対応のダウンロード検証方式です: ${verificationMethod}`, {kind:'verify'});
+  }
+
+  const current = loadProbeState() || state;
+  return saveProbeState({...current, state:'LOCAL_COMMITTED', download:{...(current.download||{}), destId, downloadedBytes:downloaded, expectedCdnBytes:expected, sizeVerified, verificationMethod, streamComplete, sourceMetaSize:Number(state.source?.size || 0), verifiedAt:Date.now(), localName}});
+}
+
+async function downloadOwnedFile({api, state, handle, onProgress = () => {}}) {
     const destId = state?.confirmedDest?.id;
     if (!destId || state.state === 'AMBIGUOUS_COPY') throw new LinkexError('所有権確定済みdestIdがありません。', {kind:'ownership'});
     await ensureHandlePermission(handle);
@@ -755,47 +770,61 @@
       }
 
       if (res.status === 416) {
-        try { await res.body?.cancel(); } catch {}
-        const total = await probeCdnTotalSize(url);
-        localFile = await handle.getFile();
-        if (localFile.size === total) {
-          const done = commitVerifiedDownload(state, {destId, downloadedBytes:localFile.size, expectedCdnBytes:total, localName:localFile.name});
-          return {verified:true, resumed:true, totalBytes:total, localBytes:localFile.size, status:'ALREADY_COMPLETE', state:done};
-        }
-        if (localFile.size > total) {
+      try { await res.body?.cancel(); } catch {}
+      let total;
+      try {
+        total = await probeCdnTotalSize(url);
+      } catch (e) {
+        // Range resumeの完成サイズをContent-Lengthで確認できない場合は、
+        // 曖昧なlocal fileを完成扱いせず0 byteから安全に取り直す。
+        if (offset > 0 && e?.kind === 'protocol') {
           const w = await handle.createWritable({keepExistingData:false});
           await w.truncate(0); await w.close();
           offset = 0;
           retried403 = false;
           continue;
         }
-        throw new LinkexError(`Range 416ですがローカルサイズが完成サイズと一致しません (${localFile.size}/${total})`, {kind:'range_416', localSize:localFile.size, total});
+        throw e;
       }
+      localFile = await handle.getFile();
+      if (localFile.size === total) {
+        const done = commitVerifiedDownload(state, {destId, downloadedBytes:localFile.size, expectedCdnBytes:total, localName:localFile.name});
+        return {verified:true, resumed:true, totalBytes:total, localBytes:localFile.size, status:'ALREADY_COMPLETE', state:done};
+      }
+      if (localFile.size > total) {
+        const w = await handle.createWritable({keepExistingData:false});
+        await w.truncate(0); await w.close();
+        offset = 0;
+        retried403 = false;
+        continue;
+      }
+      throw new LinkexError(`Range 416ですがローカルサイズが完成サイズと一致しません (${localFile.size}/${total})`, {kind:'range_416', localSize:localFile.size, total});
+    }
 
-      if (!(res.status === 200 || res.status === 206)) {
+    if (!(res.status === 200 || res.status === 206)) {
         try { await res.body?.cancel(); } catch {}
         throw new LinkexError(`CDN HTTP ${res.status}`, {kind:'cdn', status:res.status});
       }
       if (!res.body) throw new LinkexError('CDN response bodyがストリームではありません。', {kind:'protocol'});
 
       const rawRemaining = res.headers.get('Content-Length');
-      const remaining = rawRemaining === null ? null : Number(rawRemaining);
-      if (remaining === null || !Number.isFinite(remaining) || remaining < 0) {
-        try { await res.body?.cancel(); } catch {}
-        throw new LinkexError('CDN Content-Lengthを取得できないため、完全性を検証できません。', {kind:'protocol'});
-      }
-      let resumed = offset > 0 && res.status === 206;
-      let base = resumed ? offset : 0;
+    const remaining = rawRemaining === null ? null : Number(rawRemaining);
+    const hasKnownLength = remaining !== null && Number.isFinite(remaining) && remaining >= 0;
+    let resumed = offset > 0 && res.status === 206;
+    let base = resumed ? offset : 0;
 
-      // Rangeを要求したのに200ならサーバーが無視したとみなし、同じ200 bodyを0から保存。
-      if (offset > 0 && res.status === 200) {
-        base = 0;
-        resumed = false;
-        offset = 0;
-      }
+    // Rangeを要求したのに200ならサーバーが無視したとみなし、同じ200 bodyを0から保存。
+    if (offset > 0 && res.status === 200) {
+      base = 0;
+      resumed = false;
+      offset = 0;
+    }
 
-      const expectedTotal = base + remaining;
-      const writable = await handle.createWritable({keepExistingData: resumed});
+    // Content-LengthがCORS等で見えない正常応答では、HTTP streamが正常EOFまで
+    // 到達したことを完全性証拠として扱う。metadata sizeはCDN実サイズと異なるため使わない。
+    const expectedTotal = hasKnownLength ? base + remaining : null;
+    const verificationMethod = hasKnownLength ? 'content-length' : 'stream-eof';
+    const writable = await handle.createWritable({keepExistingData: resumed});
       if (resumed) await writable.seek(base);
       else await writable.truncate(0);
 
@@ -832,49 +861,58 @@
       }
 
       const finalFile = await handle.getFile();
-      const actual = finalFile.size;
-      if (actual !== expectedTotal) {
-        const current = loadProbeState() || state;
-        saveProbeState({...current, state:'VERIFY_FAILED', download:{...(current.download||{}), destId, downloadedBytes:actual, expectedCdnBytes:expectedTotal, sizeVerified:false, updatedAt:Date.now()}});
-        throw new LinkexError(`サイズ検証失敗: local=${actual} / CDN=${expectedTotal}`, {kind:'verify', actual, expectedTotal});
-      }
+    const actual = finalFile.size;
+    // writableへ渡したbyte数と最終ファイルサイズは、Content-Length有無に関係なく一致必須。
+    if (actual !== written) {
+      const current = loadProbeState() || state;
+      saveProbeState({...current, state:'VERIFY_FAILED', download:{...(current.download||{}), destId, downloadedBytes:actual, expectedCdnBytes:expectedTotal, sizeVerified:false, verificationMethod, streamComplete:false, updatedAt:Date.now()}});
+      throw new LinkexError(`ローカル書き込み検証失敗: file=${actual} / written=${written}`, {kind:'verify', actual, written});
+    }
+    if (hasKnownLength && actual !== expectedTotal) {
+      const current = loadProbeState() || state;
+      saveProbeState({...current, state:'VERIFY_FAILED', download:{...(current.download||{}), destId, downloadedBytes:actual, expectedCdnBytes:expectedTotal, sizeVerified:false, verificationMethod, streamComplete:false, updatedAt:Date.now()}});
+      throw new LinkexError(`サイズ検証失敗: local=${actual} / CDN=${expectedTotal}`, {kind:'verify', actual, expectedTotal});
+    }
 
-      const done = commitVerifiedDownload(state, {destId, downloadedBytes:actual, expectedCdnBytes:expectedTotal, localName:finalFile.name});
-      return {verified:true, resumed, totalBytes:expectedTotal, localBytes:actual, finalFile, state:done, metadataSize:Number(state.source?.size || 0)};
+    const done = commitVerifiedDownload(state, {destId, downloadedBytes:actual, expectedCdnBytes:expectedTotal, localName:finalFile.name, verificationMethod});
+    return {verified:true, resumed, totalBytes:expectedTotal ?? actual, localBytes:actual, finalFile, state:done, verificationMethod, metadataSize:Number(state.source?.size || 0)};
     }
   }
 
   // --- I: destructive action guard + delete reconciliation ---
   function assertDeleteGuards(state) {
-    if (!state || state.state !== 'LOCAL_COMMITTED') {
-      throw new LinkexError('削除条件を満たしていません: state が LOCAL_COMMITTED ではありません。', {kind:'delete_guard'});
-    }
-    const destId = String(state.confirmedDest?.id || '');
-    if (!destId) throw new LinkexError('削除条件を満たしていません: confirmedDest.id がありません。', {kind:'delete_guard'});
-    if (state.state === 'AMBIGUOUS_COPY') throw new LinkexError('AMBIGUOUS_COPY は削除できません。', {kind:'delete_guard'});
-    if (!Array.isArray(state.beforeIds)) throw new LinkexError('削除条件を満たしていません: コピー前ID集合がありません。', {kind:'delete_guard'});
-    if (state.beforeIds.map(String).includes(destId)) {
-      throw new LinkexError('削除拒否: destId がコピー前から存在していました。所有権を証明できません。', {kind:'delete_guard'});
-    }
-    if (String(state.download?.destId || '') !== destId) {
-      throw new LinkexError('削除拒否: ダウンロード検証IDとコピー所有IDが一致しません。', {kind:'delete_guard'});
-    }
-    const downloaded = Number(state.download?.downloadedBytes);
-    const expected = Number(state.download?.expectedCdnBytes);
-    const explicitSizeVerified = state.download?.sizeVerified === true;
-    // v1.0.0で既にLOCAL_COMMITTEDになった正サイズ(>0) Queueは互換維持する。
-    // 0 byteは新実装の明示的sizeVerifiedがある場合だけ許可する。
-    const legacySizeVerified = state.download?.sizeVerified == null && downloaded > 0 && expected > 0 && downloaded === expected;
-    if (!(explicitSizeVerified || legacySizeVerified) || !Number.isFinite(downloaded) || !Number.isFinite(expected) || downloaded < 0 || expected < 0 || downloaded !== expected) {
-      throw new LinkexError(`削除拒否: ローカル検証サイズが確定していません (${downloaded}/${expected})。`, {kind:'delete_guard'});
-    }
-    if (!Number(state.download?.verifiedAt || 0)) {
-      throw new LinkexError('削除拒否: verifiedAt がありません。', {kind:'delete_guard'});
-    }
-    return {destId, downloaded, expected};
+  if (!state || state.state !== 'LOCAL_COMMITTED') {
+    throw new LinkexError('削除条件を満たしていません: state が LOCAL_COMMITTED ではありません。', {kind:'delete_guard'});
   }
+  const destId = String(state.confirmedDest?.id || '');
+  if (!destId) throw new LinkexError('削除条件を満たしていません: confirmedDest.id がありません。', {kind:'delete_guard'});
+  if (state.state === 'AMBIGUOUS_COPY') throw new LinkexError('AMBIGUOUS_COPY は削除できません。', {kind:'delete_guard'});
+  if (!Array.isArray(state.beforeIds)) throw new LinkexError('削除条件を満たしていません: コピー前ID集合がありません。', {kind:'delete_guard'});
+  if (state.beforeIds.map(String).includes(destId)) {
+    throw new LinkexError('削除拒否: destId がコピー前から存在していました。所有権を証明できません。', {kind:'delete_guard'});
+  }
+  if (String(state.download?.destId || '') !== destId) {
+    throw new LinkexError('削除拒否: ダウンロード検証IDとコピー所有IDが一致しません。', {kind:'delete_guard'});
+  }
+  const downloaded = Number(state.download?.downloadedBytes);
+  const expectedRaw = state.download?.expectedCdnBytes;
+  const expected = expectedRaw == null ? null : Number(expectedRaw);
+  const explicitSizeVerified = state.download?.sizeVerified === true;
+  // v1.0.0で既にLOCAL_COMMITTEDになった正サイズ(>0) Queueは互換維持する。
+  // 0 byteは新実装の明示的sizeVerifiedがある場合だけ許可する。
+  const legacySizeVerified = state.download?.sizeVerified == null && downloaded > 0 && expected > 0 && downloaded === expected;
+  const sizeEvidenceValid = (explicitSizeVerified || legacySizeVerified) && Number.isFinite(downloaded) && Number.isFinite(expected) && downloaded >= 0 && expected >= 0 && downloaded === expected;
+  const streamEofVerified = state.download?.verificationMethod === 'stream-eof' && state.download?.streamComplete === true && Number.isFinite(downloaded) && downloaded >= 0;
+  if (!(sizeEvidenceValid || streamEofVerified)) {
+    throw new LinkexError(`削除拒否: ローカルダウンロードの完全性が確定していません (${downloaded}/${expected ?? 'EOF'})。`, {kind:'delete_guard'});
+  }
+  if (!Number(state.download?.verifiedAt || 0)) {
+    throw new LinkexError('削除拒否: verifiedAt がありません。', {kind:'delete_guard'});
+  }
+  return streamEofVerified ? {destId, downloaded, expected:null, verificationMethod:'stream-eof'} : {destId, downloaded, expected};
+}
 
-  function sameOwnedIdentity(current, state) {
+function sameOwnedIdentity(current, state) {
     if (!current || !state?.confirmedDest) return false;
     if (String(current.id) !== String(state.confirmedDest.id)) return false;
     if (String(current.name || '') !== String(state.confirmedDest.name || '')) return false;
@@ -1140,14 +1178,16 @@
       createdAt:tx.confirmedDest.createdAt ?? null
     } : null;
     const download = tx.download ? {
-      destId:tx.download.destId,
-      downloadedBytes:Number(tx.download.downloadedBytes ?? 0),
-      expectedCdnBytes:Number(tx.download.expectedCdnBytes ?? 0),
-      sizeVerified:tx.download.sizeVerified ?? null,
-      sourceMetaSize:Number(tx.download.sourceMetaSize ?? tx.source?.size ?? 0),
-      verifiedAt:tx.download.verifiedAt ?? null,
-      localName:tx.download.localName ?? null
-    } : null;
+    destId:tx.download.destId,
+    downloadedBytes:Number(tx.download.downloadedBytes ?? 0),
+    expectedCdnBytes:tx.download.expectedCdnBytes == null ? null : Number(tx.download.expectedCdnBytes),
+    sizeVerified:tx.download.sizeVerified ?? null,
+    verificationMethod:tx.download.verificationMethod ?? (tx.download.sizeVerified === true ? 'content-length' : null),
+    streamComplete:tx.download.streamComplete === true,
+    sourceMetaSize:Number(tx.download.sourceMetaSize ?? tx.source?.size ?? 0),
+    verifiedAt:tx.download.verifiedAt ?? null,
+    localName:tx.download.localName ?? null
+  } : null;
     const deletion = tx.delete ? {
       destId:tx.delete.destId ?? confirmed?.id ?? null,
       confirmedAbsentAt:tx.delete.confirmedAbsentAt ?? null,
