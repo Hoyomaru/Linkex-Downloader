@@ -81,15 +81,20 @@ The three baseline runs improved monotonically (27.63 -> 35.45 -> 40.19 MiB/s), 
 
 `exp/v1.3-cadence` changes only checkpoint/UI cadence for the first A/B candidate: checkpoint after 16 MiB **or** 1000 ms (whichever is reached first on a received chunk), UI refresh every 750 ms, while the 250 ms transfer-rate sampling remains unchanged for comparability.
 
+
+Cadence A/B follow-up: the candidate measured 38.52 MiB/s and the immediate baseline rerun measured 36.90 MiB/s. That +4.4% paired difference is smaller than the observed baseline drift; the candidate is almost exactly the midpoint of the two most recent baseline runs (40.19 and 36.90 MiB/s). Treat cadence as throughput-neutral and keep it because it substantially reduces checkpoint/UI update frequency without changing verification or deletion gates.
+
+`exp/v1.3-buffered-writer` adds a 4 MiB multi-chunk write buffer on top of the cadence candidate. Checkpoints only persist bytes that have actually been flushed to the File System Access writable stream. Unflushed JS-buffer bytes are intentionally discarded on interruption so the resume offset cannot overstate durable local progress.
+
 ## Phase A — Low-risk optimization experiments
 
 Compare each change against the v1.2.1-equivalent baseline using the same file and environment.
 
 | Experiment | Baseline | Candidate | Result |
 |---|---|---|---|
-| Checkpoint cadence | 2 MiB | 16 MiB or 1000 ms | candidate implemented; A/B pending |
-| UI update cadence | ~250 ms | 750 ms | candidate implemented; A/B pending |
-| Writer behavior | per stream chunk | buffered multi-chunk writes | pending |
+| Checkpoint cadence | 2 MiB | 16 MiB or 1000 ms | throughput-neutral; keep |
+| UI update cadence | ~250 ms | 750 ms | throughput-neutral; keep |
+| Writer behavior | per stream chunk | 4 MiB buffered multi-chunk writes | candidate implemented; A/B pending |
 
 Do not keep a change that does not improve performance or at least remain neutral while preserving all safety tests.
 

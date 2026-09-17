@@ -626,6 +626,7 @@
   const CHECKPOINT_BYTES = 16 * 1024 * 1024;
   const CHECKPOINT_INTERVAL_MS = 1000;
   const UI_UPDATE_INTERVAL_MS = 750;
+  const WRITE_BUFFER_BYTES = 4 * 1024 * 1024;
   const PERFORMANCE_SCHEMA_VERSION = 1;
 
   function perfPhaseStart(tx, phase, at = Date.now()) {
@@ -664,6 +665,24 @@
     const n = Number(value || 0);
     if (!Number.isFinite(n) || n <= 0) return '0 B/s';
     return `${formatBytes(n)}/s`;
+  }
+
+  function mergeWriteBufferChunks(chunks, totalBytes) {
+    const total = Number(totalBytes || 0);
+    if (!Number.isFinite(total) || total < 0) throw new LinkexError('書き込みバッファサイズが不正です。', {kind:'filesystem'});
+    if (total === 0) return new Uint8Array(0);
+    if (chunks.length === 1 && Number(chunks[0]?.byteLength || 0) === total) return chunks[0];
+    const merged = new Uint8Array(total);
+    let offset = 0;
+    for (const chunk of chunks) {
+      const size = Number(chunk?.byteLength || 0);
+      if (!size) continue;
+      if (offset + size > total) throw new LinkexError('書き込みバッファの合計サイズが不一致です。', {kind:'filesystem'});
+      merged.set(chunk, offset);
+      offset += size;
+    }
+    if (offset !== total) throw new LinkexError('書き込みバッファの合計サイズが不一致です。', {kind:'filesystem'});
+    return merged;
   }
 
   function buildPerformanceSummary(job) {
@@ -925,38 +944,64 @@ async function downloadOwnedFile({api, state, handle, onProgress = () => {}, onP
 
       const reader = res.body.getReader();
       let written = base;
+      let received = base;
+      let bufferedChunks = [];
+      let bufferedBytes = 0;
       let nextCheckpoint = written + CHECKPOINT_BYTES;
       let lastCheckpointAt = transferStartedAt;
       let lastUi = 0;
+
+      async function flushBufferedWrite() {
+        if (!bufferedBytes) return;
+        const batchBytes = bufferedBytes;
+        const batch = mergeWriteBufferChunks(bufferedChunks, batchBytes);
+        await writable.write(batch);
+        written += batchBytes;
+        bufferedChunks = [];
+        bufferedBytes = 0;
+      }
+
       try {
         while (true) {
           const {done, value} = await reader.read();
           if (done) break;
           if (!value?.byteLength) continue;
-          await writable.write(value);
-          written += value.byteLength;
-          const now = Date.now();
+          bufferedChunks.push(value);
+          bufferedBytes += value.byteLength;
+          received += value.byteLength;
+
+          let now = Date.now();
+          if (bufferedBytes >= WRITE_BUFFER_BYTES || now - lastCheckpointAt >= CHECKPOINT_INTERVAL_MS) {
+            await flushBufferedWrite();
+            now = Date.now();
+          }
+
           const elapsedMs = Math.max(1, now - transferStartedAt);
-          const transferredBytes = Math.max(0, written - transferStartBytes);
+          const transferredBytes = Math.max(0, received - transferStartBytes);
           const averageBytesPerSecond = transferredBytes * 1000 / elapsedMs;
           if (now - lastRateAt >= 250) {
             const deltaMs = Math.max(1, now - lastRateAt);
-            instantBytesPerSecond = Math.max(0, written - lastRateBytes) * 1000 / deltaMs;
+            instantBytesPerSecond = Math.max(0, received - lastRateBytes) * 1000 / deltaMs;
             peakBytesPerSecond = Math.max(peakBytesPerSecond, instantBytesPerSecond);
             lastRateAt = now;
-            lastRateBytes = written;
+            lastRateBytes = received;
           }
           if (written >= nextCheckpoint || now - lastCheckpointAt >= CHECKPOINT_INTERVAL_MS) {
+            if (bufferedBytes) {
+              await flushBufferedWrite();
+              now = Date.now();
+            }
             const current = loadProbeState() || state;
             saveProbeState({...current, state:'DOWNLOADING', download:{...(current.download||{}), destId, downloadedBytes:written, expectedCdnBytes:expectedTotal, telemetry:{transferStartedAt, transferStartBytes, transferredBytes, elapsedMs, averageBytesPerSecond, averageMBps:bytesPerSecondToMBps(averageBytesPerSecond), instantBytesPerSecond, peakBytesPerSecond, resumed}, updatedAt:now}});
             nextCheckpoint = written + CHECKPOINT_BYTES;
             lastCheckpointAt = now;
           }
           if (now - lastUi >= UI_UPDATE_INTERVAL_MS) {
-            onProgress({written, expectedTotal, resumed, sourceMetaSize:Number(state.source?.size || 0), averageBytesPerSecond, instantBytesPerSecond, peakBytesPerSecond});
+            onProgress({written:received, expectedTotal, resumed, sourceMetaSize:Number(state.source?.size || 0), averageBytesPerSecond, instantBytesPerSecond, peakBytesPerSecond});
             lastUi = now;
           }
         }
+        await flushBufferedWrite();
         await writable.close();
       } catch (e) {
         try { await reader.cancel(); } catch {}
