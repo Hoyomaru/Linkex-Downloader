@@ -18,7 +18,9 @@ jobs:
         with:
           ref: feat/v1.3-performance
       - name: Apply telemetry patch
-        run: python tools/apply_v13_telemetry.py
+        run: |
+          python tools/apply_v13_telemetry.py
+          python tools/fix_v13_telemetry_test.py
       - name: Verify implementation
         run: |
           node --check linkex-downloader.user.js
@@ -29,6 +31,7 @@ jobs:
         run: |
           rm .github/workflows/v13-telemetry-bootstrap.yml
           rm tools/apply_v13_telemetry.py
+          rm tools/fix_v13_telemetry_test.py
           rm -f docs/.ci-probe
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
