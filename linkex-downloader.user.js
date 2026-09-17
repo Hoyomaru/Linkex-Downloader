@@ -623,7 +623,9 @@
   const DOWNLOAD_DB = 'linkexDownloaderProbeV1';
   const DOWNLOAD_STORE = 'handles';
   const PREFERRED_DIR_HANDLE_KEY = 'preferred-download-root:v1';
-  const CHECKPOINT_BYTES = 2 * 1024 * 1024;
+  const CHECKPOINT_BYTES = 16 * 1024 * 1024;
+  const CHECKPOINT_INTERVAL_MS = 1000;
+  const UI_UPDATE_INTERVAL_MS = 750;
   const PERFORMANCE_SCHEMA_VERSION = 1;
 
   function perfPhaseStart(tx, phase, at = Date.now()) {
@@ -924,6 +926,7 @@ async function downloadOwnedFile({api, state, handle, onProgress = () => {}, onP
       const reader = res.body.getReader();
       let written = base;
       let nextCheckpoint = written + CHECKPOINT_BYTES;
+      let lastCheckpointAt = transferStartedAt;
       let lastUi = 0;
       try {
         while (true) {
@@ -943,12 +946,13 @@ async function downloadOwnedFile({api, state, handle, onProgress = () => {}, onP
             lastRateAt = now;
             lastRateBytes = written;
           }
-          if (written >= nextCheckpoint) {
+          if (written >= nextCheckpoint || now - lastCheckpointAt >= CHECKPOINT_INTERVAL_MS) {
             const current = loadProbeState() || state;
             saveProbeState({...current, state:'DOWNLOADING', download:{...(current.download||{}), destId, downloadedBytes:written, expectedCdnBytes:expectedTotal, telemetry:{transferStartedAt, transferStartBytes, transferredBytes, elapsedMs, averageBytesPerSecond, averageMBps:bytesPerSecondToMBps(averageBytesPerSecond), instantBytesPerSecond, peakBytesPerSecond, resumed}, updatedAt:now}});
             nextCheckpoint = written + CHECKPOINT_BYTES;
+            lastCheckpointAt = now;
           }
-          if (now - lastUi > 250) {
+          if (now - lastUi >= UI_UPDATE_INTERVAL_MS) {
             onProgress({written, expectedTotal, resumed, sourceMetaSize:Number(state.source?.size || 0), averageBytesPerSecond, instantBytesPerSecond, peakBytesPerSecond});
             lastUi = now;
           }
