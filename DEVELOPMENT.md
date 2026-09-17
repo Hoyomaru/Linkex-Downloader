@@ -10,13 +10,13 @@ READMEは利用者向け、CHANGELOGは変更履歴、`docs/ARCHITECTURE.md` は
 
 2026-09-17 時点で確認した状態です。
 
-- `main` source: **v1.2.1**（Release準備中 / 実機確認済み）
-- 最新公開Stable: **v1.2.0**
+- `main` source: **v1.2.1**（公開済み / 実機確認済み）
+- 最新公開Stable: **v1.2.1**
 - userscript metadata `@version`: **1.2.1**
 - `const VERSION`: **1.2.1**
-- 最新公開Git tag: **`v1.2.0`**
-- GitHub Release: **v1.2.0 公開済み**
-- Release commit: `8bb478fbd320eaed2388427d3e03d1b91769bfc2`
+- 最新公開Git tag: **`v1.2.1`**
+- GitHub Release: **v1.2.1 公開済み**
+- Release commit: `ac698e0d3d8f6a6e6ba876cf2ea64e8cc98e1ac5`
 - 現行 GitHub Actions: **CIあり**（userscript構文 + Node回帰テスト + repository整合性 + Release Asset生成検証）
 - Runtime: Tampermonkey userscript
 - Targets: `https://disk.linkex.io/*`, `https://l2e.click/d/*`, `https://www.l2e.click/d/*`

@@ -8,13 +8,26 @@
 
 2026-09-17 時点:
 
-- `main` source: **v1.2.1**（Release準備中 / 実機確認済み）
-- 最新公開Stable: **v1.2.0**
-- 最新公開tag: **`v1.2.0`**
-- v1.2.0: GitHub Release公開済み
-- Release commit: `8bb478fbd320eaed2388427d3e03d1b91769bfc2`
+- `main` source: **v1.2.1**（公開済み / 実機確認済み）
+- 最新公開Stable: **v1.2.1**
+- 最新公開tag: **`v1.2.1`**
+- v1.2.1: GitHub Release公開済み
+- Release commit: `ac698e0d3d8f6a6e6ba876cf2ea64e8cc98e1ac5`
 - License: **MIT**
 - CI: `.github/workflows/ci.yml`
+
+## v1.2.1 公開実績
+
+GitHub Release `v1.2.1` は2026-09-17に公開済みです。tagは `ac698e0d3d8f6a6e6ba876cf2ea64e8cc98e1ac5` を指します。
+
+公開Asset:
+
+```text
+linkex_downloader_v1.2.1.user.js  115812 bytes  sha256:2aaf914f94f68972d09e02611b626567c980693abc0c8b628067db98726c58b4
+linkex_downloader_v1.2.1.zip       30544 bytes  sha256:651c6e5cfa8ad74a4b49f0c06628ecfc63e846530b496ea4ca2c997aebf27e8f
+```
+
+GitHub Release APIのAsset digestと生成時SHA-256が一致することを確認済みです。standalone userscriptはrelease commitの `linkex-downloader.user.js` とbyte-identicalで、ZIPは `tools/build_release_assets.py` のdeterministic出力です。
 
 ## v1.2.0 公開実績
 
