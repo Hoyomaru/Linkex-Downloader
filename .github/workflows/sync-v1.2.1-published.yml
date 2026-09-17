@@ -1,0 +1,83 @@
+name: Sync v1.2.1 published state
+
+on:
+  push:
+    branches:
+      - release/v1.2.1-published
+    paths:
+      - .github/workflows/sync-v1.2.1-published.yml
+
+permissions:
+  contents: write
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: release/v1.2.1-published
+          fetch-depth: 0
+
+      - name: Update published release documentation
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          RELEASE_SHA = 'ac698e0d3d8f6a6e6ba876cf2ea64e8cc98e1ac5'
+          USER_SHA = '2aaf914f94f68972d09e02611b626567c980693abc0c8b628067db98726c58b4'
+          ZIP_SHA = '651c6e5cfa8ad74a4b49f0c06628ecfc63e846530b496ea4ca2c997aebf27e8f'
+
+          def replace_once(path, old, new):
+              p = Path(path)
+              s = p.read_text(encoding='utf-8')
+              if s.count(old) != 1:
+                  raise SystemExit(f'{path}: expected exactly one match for {old!r}, got {s.count(old)}')
+              p.write_text(s.replace(old, new, 1), encoding='utf-8')
+
+          # README public release state + install instructions.
+          replace_once('README.md',
+              '- `main` source: **v1.2.1**（Release準備中 / 実機確認済み）\n- 最新公開安定版: **v1.2.0**\n- 最新公開tag: **`v1.2.0`**\n- GitHub Release: **v1.2.0 公開済み（2026-09-15）**\n- Release commit: `8bb478fbd320eaed2388427d3e03d1b91769bfc2`',
+              f'- `main` source: **v1.2.1**（公開済み / 実機確認済み）\n- 最新公開安定版: **v1.2.1**\n- 最新公開tag: **`v1.2.1`**\n- GitHub Release: **v1.2.1 公開済み（2026-09-17）**\n- Release commit: `{RELEASE_SHA}`')
+          replace_once('README.md',
+              '2. GitHub Releases から最新の公開安定版 **v1.2.0** を開きます。\n3. v1.2.0では Release Assets の `linkex-downloader_v1.2.0.user.js` を取得します。',
+              '2. GitHub Releases から最新の公開安定版 **v1.2.1** を開きます。\n3. Release Assets の `linkex_downloader_v1.2.1.user.js` を取得します。')
+          replace_once('README.md',
+              'ZIP Asset `linkex_downloader_v1.2.0.zip` は同じuserscriptを1ファイルだけ含む補助配布物です。リポジトリ直下のversion固定コピーは今後作成しません。\n\n`linkex-downloader.user.js` は `main` の正本です。現在はv1.2.0 Releaseと同じversionですが、今後の開発では公開安定版より先行する場合があります。',
+              'ZIP Asset `linkex_downloader_v1.2.1.zip` は同じuserscriptを1ファイルだけ含む補助配布物です。リポジトリ直下のversion固定コピーは今後作成しません。\n\n`linkex-downloader.user.js` は `main` の正本です。現在はv1.2.1 Releaseと同じversionですが、今後の開発では公開安定版より先行する場合があります。')
+
+          # DEVELOPMENT published state.
+          replace_once('DEVELOPMENT.md',
+              '- `main` source: **v1.2.1**（Release準備中 / 実機確認済み）\n- 最新公開Stable: **v1.2.0**\n- userscript metadata `@version`: **1.2.1**\n- `const VERSION`: **1.2.1**\n- 最新公開Git tag: **`v1.2.0`**\n- GitHub Release: **v1.2.0 公開済み**\n- Release commit: `8bb478fbd320eaed2388427d3e03d1b91769bfc2`',
+              f'- `main` source: **v1.2.1**（公開済み / 実機確認済み）\n- 最新公開Stable: **v1.2.1**\n- userscript metadata `@version`: **1.2.1**\n- `const VERSION`: **1.2.1**\n- 最新公開Git tag: **`v1.2.1`**\n- GitHub Release: **v1.2.1 公開済み**\n- Release commit: `{RELEASE_SHA}`')
+
+          # RELEASE current state and public record.
+          replace_once('docs/RELEASE.md',
+              '- `main` source: **v1.2.1**（Release準備中 / 実機確認済み）\n- 最新公開Stable: **v1.2.0**\n- 最新公開tag: **`v1.2.0`**\n- v1.2.0: GitHub Release公開済み\n- Release commit: `8bb478fbd320eaed2388427d3e03d1b91769bfc2`',
+              f'- `main` source: **v1.2.1**（公開済み / 実機確認済み）\n- 最新公開Stable: **v1.2.1**\n- 最新公開tag: **`v1.2.1`**\n- v1.2.1: GitHub Release公開済み\n- Release commit: `{RELEASE_SHA}`')
+          record = f'''## v1.2.1 公開実績\n\nGitHub Release `v1.2.1` は2026-09-17に公開済みです。tagは `{RELEASE_SHA}` を指します。\n\n公開Asset:\n\n```text\nlinkex_downloader_v1.2.1.user.js  115812 bytes  sha256:{USER_SHA}\nlinkex_downloader_v1.2.1.zip       30544 bytes  sha256:{ZIP_SHA}\n```\n\nGitHub Release APIのAsset digestと生成時SHA-256が一致することを確認済みです。standalone userscriptはrelease commitの `linkex-downloader.user.js` とbyte-identicalで、ZIPは `tools/build_release_assets.py` のdeterministic出力です。\n\n'''
+          replace_once('docs/RELEASE.md', '## v1.2.0 公開実績\n', record + '## v1.2.0 公開実績\n')
+
+          # Version-specific release notes: replace provisional checksum wording with actual published values.
+          replace_once('docs/releases/v1.2.1.md',
+              '## SHA-256\n\nRelease対象commitから `tools/build_release_assets.py` で生成したAssetのSHA-256を公開時にGitHub Release Asset digestと照合します。\n',
+              f'''## SHA-256\n\n2026-09-17公開のGitHub Release Asset digestと生成時SHA-256を照合済みです。tag `v1.2.1` は `{RELEASE_SHA}` を指します。\n\n```text\nlinkex_downloader_v1.2.1.user.js  115812 bytes  sha256:{USER_SHA}\nlinkex_downloader_v1.2.1.zip       30544 bytes  sha256:{ZIP_SHA}\n```\n''')
+          PY
+
+      - name: Remove one-shot workflow
+        run: rm .github/workflows/sync-v1.2.1-published.yml
+
+      - name: Validate repository
+        run: |
+          node --check linkex-downloader.user.js
+          node --test tests/*.test.js
+          python tools/check_repo_consistency.py
+          python tools/build_release_assets.py --output-dir "$RUNNER_TEMP/linkex-release"
+
+      - name: Commit synchronized documentation
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -m "docs: mark v1.2.1 as published"
+          git push origin HEAD:release/v1.2.1-published
