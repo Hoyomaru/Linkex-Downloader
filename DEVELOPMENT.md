@@ -8,12 +8,12 @@ READMEは利用者向け、CHANGELOGは変更履歴、`docs/ARCHITECTURE.md` は
 
 ## 現在の状態
 
-2026-09-15 時点で確認した状態です。
+2026-09-17 時点で確認した状態です。
 
-- `main` source: **v1.2.0**（公開済み / 実機確認済み）
+- `main` source: **v1.2.1**（Release準備中 / 実機確認済み）
 - 最新公開Stable: **v1.2.0**
-- userscript metadata `@version`: **1.2.0**
-- `const VERSION`: **1.2.0**
+- userscript metadata `@version`: **1.2.1**
+- `const VERSION`: **1.2.1**
 - 最新公開Git tag: **`v1.2.0`**
 - GitHub Release: **v1.2.0 公開済み**
 - Release commit: `8bb478fbd320eaed2388427d3e03d1b91769bfc2`
@@ -46,7 +46,8 @@ Linkex-Downloader/
    ├─ TROUBLESHOOTING.md
    └─ releases/
       ├─ v1.1.0.md
-      └─ v1.2.0.md
+      ├─ v1.2.0.md
+      └─ v1.2.1.md
 ```
 
 `linkex-downloader.user.js` が唯一のtracked userscript正本です。version固定 `.user.js` / `.zip` はGit管理せず、release対象commitから `tools/build_release_assets.py` で生成してGitHub Releaseへ添付します。過去のv1.0.0 / v1.1.0配布物は各GitHub Release Assetとして保持し、リポジトリ直下からは削除します。
@@ -79,7 +80,7 @@ shared file
 6. コピー前後で新規IDが複数増え、所有権を一意に証明できない場合は停止する。名前から推測して続行しない。
 7. `destId` がコピー前ID集合に含まれていた場合は削除拒否。
 8. ダウンロードに使用したIDと所有権確定IDが一致しない場合は削除拒否。
-9. ローカル検証済みサイズとCDN実サイズが一致しない場合は削除拒否。
+9. Content-Lengthが得られる場合はローカル検証済みサイズとCDN実サイズの一致を要求する。Content-Lengthが得られない場合は `verificationMethod === 'stream-eof'`、正常EOF、stream実書込byte数と最終ローカルサイズ一致を要求する。
 10. `verifiedAt` がない場合は削除拒否。
 11. 削除直前の `destId` のname / Linkex metadata sizeが所有権確定時と一致しない場合は削除拒否。
 12. leaseを失った場合は処理を停止する。
@@ -167,7 +168,7 @@ Share Page Modeでは `l2e.click` が別originのためdisk Local Storageを直�
 
 ## 利用API
 
-現行main（v1.2.0 release candidate）で確認できる範囲です。
+現行main（v1.2.1 release candidate）で確認できる範囲です。
 
 | 用途 | Method | Path | 認証 | 書込 |
 |---|---|---|---|---|
@@ -302,8 +303,8 @@ metadata sizeをlocal verify基準へ戻さないでください。
 - `beforeIds` が存在
 - `confirmedDest.id` が `beforeIds` に含まれない
 - `download.destId === confirmedDest.id`
-- `downloadedBytes === expectedCdnBytes >= 0`
-- 新規transactionでは `download.sizeVerified === true`
+- `verificationMethod === 'content-length'` の場合は `downloadedBytes === expectedCdnBytes >= 0` かつ `download.sizeVerified === true`
+- `verificationMethod === 'stream-eof'` の場合は `streamComplete === true` かつstream実書込byte数と最終ローカルサイズが一致
 - `verifiedAt` が存在
 
 その後 `ensureDeleted()` が削除直前にcurrent own fileを再取得し、`sameOwnedIdentity()` で:

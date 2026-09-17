@@ -23,7 +23,7 @@ flowchart TD
     H -->|曖昧| X[安全停止]
     I --> J[signed CDN URL取得]
     J --> K[ローカルへRange対応DL]
-    K --> L[CDN実サイズで検証]
+    K --> L[Content-Length / stream EOFで検証]
     L --> M[LOCAL_COMMITTED]
     M --> N[DELETE安全条件を再検証]
     N --> O[確定destId 1件だけ削除]
@@ -42,7 +42,7 @@ flowchart TD
 | Page context | `l2e.click/d/...` の現在share token検出、SPA URL変更時のmanifest guard | `detectSharePageTarget()`, `syncSharePageContext()` |
 | 共有解析 | 共有URL解析、フォルダ再帰、manifest生成 | `parseShareToken()`, `buildManifest()` |
 | 所有権確定 | コピー前後の root ID 差分から `destId` を確定 | `reconcileCopy()`, `isPlausibleCopy()` |
-| ダウンロード | signed URL、Range resume、checkpoint、サイズ検証 | `downloadOwnedFile()` |
+| ダウンロード | signed URL、Range resume、checkpoint、Content-Length / stream EOF検証 | `downloadOwnedFile()` |
 | 削除安全ゲート | `LOCAL_COMMITTED` 後の単一ID削除と結果照合 | `assertDeleteGuards()`, `ensureDeleted()` |
 | Queue | 1ファイルずつ直列処理、容量skip、pause/resume | `createQueueFromManifest()`, `processQueue()` |
 | 排他 | 別タブとの二重実行防止 | `acquireLease()`, `assertLease()` |
@@ -136,8 +136,8 @@ manifest を基に `createQueueFromManifest()` が Full Queue を作成します
 3. Range が 200 で無視された場合は0 byteから書き直し。
 4. 403時はURLを再取得して1回リトライ。
 5. 約2 MiBごとにcheckpoint。
-6. 最終ローカルサイズと CDN の実サイズを照合。
-7. 一致した場合だけ `LOCAL_COMMITTED`。
+6. `Content-Length` が得られる場合は最終ローカルサイズと CDN 実サイズを厳密照合。得られない場合はstreamの正常EOF、stream実書込byte数、最終ローカルサイズの一致を照合。
+7. どちらかの検証方式が成立した場合だけ `LOCAL_COMMITTED`。
 
 Linkex metadata の `size` は実CDNサイズと一致しないケースが確認されているため、ローカル完全性判定には使いません。
 
@@ -149,8 +149,8 @@ Linkex metadata の `size` は実CDNサイズと一致しないケースが確�
 - `confirmedDest.id` が存在
 - `destId` がコピー前ID集合に含まれていない
 - ダウンロード対象IDと所有権確定IDが一致
-- `download.sizeVerified === true`
-- `downloadedBytes === expectedCdnBytes >= 0`（明示検証済み0 byteを含む）
+- `download.verificationMethod === 'content-length'` の場合は `download.sizeVerified === true` かつ `downloadedBytes === expectedCdnBytes >= 0`
+- `download.verificationMethod === 'stream-eof'` の場合は `streamComplete === true` かつstream実書込byte数と最終ローカルサイズが一致
 - `verifiedAt` が存在
 - 削除直前の name / Linkex metadata size が所有権確定時と一致
 

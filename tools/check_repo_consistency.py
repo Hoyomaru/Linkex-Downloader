@@ -37,8 +37,10 @@ require((ROOT / f'docs/releases/v{version}.md').exists(), f'docs/releases/v{vers
 require('[MIT License](LICENSE)' in readme, 'README MIT license link missing')
 
 arch = text('docs/ARCHITECTURE.md')
-require('download.sizeVerified === true' in arch, 'ARCHITECTURE missing sizeVerified delete guard')
-require('downloadedBytes === expectedCdnBytes >= 0' in arch, 'ARCHITECTURE zero-byte delete guard is stale')
+require("download.verificationMethod === 'content-length'" in arch, 'ARCHITECTURE missing content-length verification guard')
+require("download.verificationMethod === 'stream-eof'" in arch, 'ARCHITECTURE missing stream-eof verification guard')
+require('streamComplete === true' in arch, 'ARCHITECTURE missing stream EOF completion guard')
+require('downloadedBytes === expectedCdnBytes >= 0' in arch, 'ARCHITECTURE zero-byte content-length guard is stale')
 require('downloadedBytes === expectedCdnBytes > 0' not in arch, 'ARCHITECTURE still contains obsolete > 0 guard')
 
 share = text('docs/SHARE_PAGE_MODE.md')

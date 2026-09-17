@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Linkex Downloader
 // @namespace    openai-linkex-helper
-// @version      1.2.0
+// @version      1.2.1
 // @description  Linkex共有ページからワンクリックで安全にQueue保存。選択DL・再開・検証・所有ID限定削除・診断付き。
 // @license      MIT
 // @match        https://disk.linkex.io/*
@@ -19,7 +19,7 @@
 (() => {
   'use strict';
 
-  const VERSION = '1.2.0';
+  const VERSION = '1.2.1';
   const API_BASE = 'https://prod.linksvc.xyz';
   const SIGNED_HEADER_PREFIX = 'x-linkinflu-';
   const SIGNATURE_HEADER = 'x-linkinflu-sign';
