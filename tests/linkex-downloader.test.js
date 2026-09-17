@@ -155,18 +155,124 @@ test('Content-Length: 0 is a known size and completes as a verified zero-byte do
   assert.doesNotThrow(() => api.assertDeleteGuards({...result.state, beforeIds: []}));
 });
 
-test('missing Content-Length never becomes LOCAL_COMMITTED', async () => {
+test('missing Content-Length completes only after a normal stream EOF and is safe to delete', async () => {
+  const {api, context} = loadRuntime();
+  const owned = {id: 'd1', name: 'file.bin', size: 10, url: 'https://cdn.example/file'};
+  const state = {state: 'OWNERSHIP_CONFIRMED', confirmedDest: {id: 'd1', name: 'file.bin', size: 10}, source: {size: 10}};
+  let size = 0;
+  const handle = {
+    async queryPermission() { return 'granted'; },
+    async getFile() { return {size, name: 'file.bin'}; },
+    async createWritable() {
+      return {
+        async seek() {},
+        async truncate(n) { size = n; },
+        async write(value) { size += value?.byteLength || 0; },
+        async close() {},
+      };
+    },
+  };
+  const chunks = [new Uint8Array([1,2,3]), new Uint8Array([4,5])];
+  let index = 0;
+  context.fetch = async () => response({
+    status: 200,
+    length: null,
+    reader: {
+      async read() { return index < chunks.length ? {done:false, value:chunks[index++]} : {done:true}; },
+      async cancel() {},
+    },
+  });
+
+  const result = await api.downloadOwnedFile({api: ownedApi(owned), state, handle});
+  assert.equal(result.state.state, 'LOCAL_COMMITTED');
+  assert.equal(result.state.download.downloadedBytes, 5);
+  assert.equal(result.state.download.expectedCdnBytes, null);
+  assert.equal(result.state.download.sizeVerified, false);
+  assert.equal(result.state.download.verificationMethod, 'stream-eof');
+  assert.equal(result.state.download.streamComplete, true);
+  assert.doesNotThrow(() => api.assertDeleteGuards({...result.state, beforeIds: []}));
+});
+
+test('missing Content-Length stream interruption remains resumable and never commits', async () => {
   const {api, context, storage} = loadRuntime();
   const owned = {id: 'd1', name: 'file.bin', size: 10, url: 'https://cdn.example/file'};
   const state = {state: 'OWNERSHIP_CONFIRMED', confirmedDest: {id: 'd1', name: 'file.bin', size: 10}, source: {size: 10}};
+  let size = 0;
   const handle = {
     async queryPermission() { return 'granted'; },
-    async getFile() { return {size: 0, name: 'file.bin'}; },
+    async getFile() { return {size, name: 'file.bin'}; },
+    async createWritable() {
+      return {
+        async seek() {},
+        async truncate(n) { size = n; },
+        async write(value) { size += value?.byteLength || 0; },
+        async close() {},
+      };
+    },
   };
-  context.fetch = async () => response({status: 200, length: null, reader: {async read() { return {done: true}; }}});
+  let reads = 0;
+  context.fetch = async () => response({
+    status: 200,
+    length: null,
+    reader: {
+      async read() {
+        reads += 1;
+        if (reads === 1) return {done:false, value:new Uint8Array([1,2,3])};
+        throw new Error('stream interrupted');
+      },
+      async cancel() {},
+    },
+  });
 
-  await assert.rejects(() => api.downloadOwnedFile({api: ownedApi(owned), state, handle}), error => error?.kind === 'protocol');
+  await assert.rejects(() => api.downloadOwnedFile({api: ownedApi(owned), state, handle}), /stream interrupted/);
+  assert.equal(storage.get('linkexCopyProbeStateV1')?.state, 'DOWNLOAD_PAUSED');
   assert.notEqual(storage.get('linkexCopyProbeStateV1')?.state, 'LOCAL_COMMITTED');
+});
+
+test('Range 416 without a probe Content-Length restarts from zero and verifies by stream EOF', async () => {
+  const {api, context} = loadRuntime();
+  const owned = {id: 'd1', name: 'file.bin', size: 10, url: 'https://cdn.example/file'};
+  const state = {state: 'DOWNLOAD_PAUSED', confirmedDest: {id: 'd1', name: 'file.bin', size: 10}, source: {size: 10}};
+  let size = 5;
+  let fetchCalls = 0;
+  const handle = {
+    async queryPermission() { return 'granted'; },
+    async getFile() { return {size, name: 'file.bin'}; },
+    async createWritable() {
+      return {
+        async seek() {},
+        async truncate(n) { size = n; },
+        async write(value) { size += value?.byteLength || 0; },
+        async close() {},
+      };
+    },
+  };
+  context.fetch = async (_url, options = {}) => {
+    fetchCalls += 1;
+    if (fetchCalls === 1) {
+      assert.equal(options.headers?.Range, 'bytes=5-');
+      return response({status: 416, length: null, reader: {async read() { return {done:true}; }}});
+    }
+    if (fetchCalls === 2) {
+      assert.equal(options.headers?.Range, undefined);
+      return response({status: 200, length: null, reader: {async read() { return {done:true}; }}});
+    }
+    assert.equal(options.headers?.Range, undefined);
+    let sent = false;
+    return response({status: 200, length: null, reader: {
+      async read() {
+        if (!sent) { sent = true; return {done:false, value:new Uint8Array([1,2,3,4])}; }
+        return {done:true};
+      },
+      async cancel() {},
+    }});
+  };
+
+  const result = await api.downloadOwnedFile({api: ownedApi(owned), state, handle});
+  assert.equal(fetchCalls, 3);
+  assert.equal(result.state.download.downloadedBytes, 4);
+  assert.equal(result.state.download.verificationMethod, 'stream-eof');
+  assert.equal(result.state.download.streamComplete, true);
 });
 
 test('download refuses a destId whose identity changed after ownership confirmation', async () => {
