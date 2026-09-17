@@ -62,6 +62,8 @@ Telemetry must not persist signed URLs, Authorization headers, access tokens, or
 
 The exact persisted schema may change during implementation, but it must remain operation-scoped so later multi-worker work cannot collide through a single global state entry.
 
+Implemented on `feat/v1.3-performance`: transaction-scoped phase timing, transfer-rate telemetry, UI average/instant rate display, and an aggregate `performance` section in the support bundle. The existing 2 MiB checkpoint and ~250 ms UI cadence are intentionally unchanged for the baseline measurement.
+
 ## Phase A — Low-risk optimization experiments
 
 Compare each change against the v1.2.1-equivalent baseline using the same file and environment.
@@ -124,7 +126,7 @@ Automatic deletion requires an independent local verification design, such as a 
 
 ## Current execution order
 
-- [ ] P0: Add performance telemetry to support JSON and UI.
+- [x] P0: Add performance telemetry to support JSON and UI.
 - [ ] P0: A/B checkpoint and UI update cadence.
 - [ ] P0: Test buffered writer approach.
 - [ ] P0: Split download state by operation ID.

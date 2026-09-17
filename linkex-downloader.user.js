@@ -624,6 +624,88 @@
   const DOWNLOAD_STORE = 'handles';
   const PREFERRED_DIR_HANDLE_KEY = 'preferred-download-root:v1';
   const CHECKPOINT_BYTES = 2 * 1024 * 1024;
+  const PERFORMANCE_SCHEMA_VERSION = 1;
+
+  function perfPhaseStart(tx, phase, at = Date.now()) {
+    const performance = {...(tx?.performance || {}), schemaVersion:PERFORMANCE_SCHEMA_VERSION};
+    const current = {...(performance[phase] || {})};
+    if (!Number(current.startedAt || 0)) current.startedAt = at;
+    performance[phase] = current;
+    return {...tx, performance};
+  }
+
+  function perfPhaseEnd(tx, phase, at = Date.now(), extra = {}) {
+    const startedAt = Number(tx?.performance?.[phase]?.startedAt || 0) || at;
+    const performance = {...(tx?.performance || {}), schemaVersion:PERFORMANCE_SCHEMA_VERSION};
+    performance[phase] = {
+      ...(performance[phase] || {}),
+      startedAt,
+      endedAt:at,
+      durationMs:Math.max(0, at - startedAt),
+      ...extra
+    };
+    return {...tx, performance};
+  }
+
+  function perfPhaseSet(tx, phase, values = {}) {
+    const performance = {...(tx?.performance || {}), schemaVersion:PERFORMANCE_SCHEMA_VERSION};
+    performance[phase] = {...(performance[phase] || {}), ...values};
+    return {...tx, performance};
+  }
+
+  function bytesPerSecondToMBps(value) {
+    const n = Number(value || 0);
+    return Number.isFinite(n) && n >= 0 ? n / (1024 * 1024) : 0;
+  }
+
+  function formatTransferRate(value) {
+    const n = Number(value || 0);
+    if (!Number.isFinite(n) || n <= 0) return '0 B/s';
+    return `${formatBytes(n)}/s`;
+  }
+
+  function buildPerformanceSummary(job) {
+    const phaseNames = ['copy','ownershipReconcile','download','verify','delete','total'];
+    const phaseMs = Object.fromEntries(phaseNames.map(name => [name, 0]));
+    let measuredTransactions = 0;
+    let completedTransactions = 0;
+    let transferredBytes = 0;
+    let measuredTransferMs = 0;
+    let peakBytesPerSecond = 0;
+
+    for (const item of job?.items || []) {
+      const tx = item?.tx;
+      if (!tx) continue;
+      if (tx.state === 'DONE' || item.state === 'DONE') completedTransactions += 1;
+      if (tx.performance && typeof tx.performance === 'object') {
+        measuredTransactions += 1;
+        for (const name of phaseNames) {
+          const duration = Number(tx.performance?.[name]?.durationMs || 0);
+          if (Number.isFinite(duration) && duration >= 0) phaseMs[name] += duration;
+        }
+      }
+      const transfer = tx.download?.telemetry || {};
+      const bytes = Number(transfer.transferredBytes || 0);
+      const duration = Number(transfer.durationMs || 0);
+      const peak = Number(transfer.peakBytesPerSecond || 0);
+      if (Number.isFinite(bytes) && bytes >= 0) transferredBytes += bytes;
+      if (Number.isFinite(duration) && duration > 0) measuredTransferMs += duration;
+      if (Number.isFinite(peak) && peak > peakBytesPerSecond) peakBytesPerSecond = peak;
+    }
+
+    const aggregateBytesPerSecond = measuredTransferMs > 0 ? transferredBytes * 1000 / measuredTransferMs : 0;
+    return {
+      schemaVersion:PERFORMANCE_SCHEMA_VERSION,
+      completedTransactions,
+      measuredTransactions,
+      transferredBytes,
+      phaseMs,
+      measuredTransferMs,
+      aggregateBytesPerSecond,
+      aggregateDownloadMBps:bytesPerSecondToMBps(aggregateBytesPerSecond),
+      peakBytesPerSecond
+    };
+  }
 
   function openDownloadDb() {
     return new Promise((resolve, reject) => {
@@ -745,7 +827,7 @@
   return saveProbeState({...current, state:'LOCAL_COMMITTED', download:{...(current.download||{}), destId, downloadedBytes:downloaded, expectedCdnBytes:expected, sizeVerified, verificationMethod, streamComplete, sourceMetaSize:Number(state.source?.size || 0), verifiedAt:Date.now(), localName}});
 }
 
-async function downloadOwnedFile({api, state, handle, onProgress = () => {}}) {
+async function downloadOwnedFile({api, state, handle, onProgress = () => {}, onPhase = () => {}}) {
     const destId = state?.confirmedDest?.id;
     if (!destId || state.state === 'AMBIGUOUS_COPY') throw new LinkexError('所有権確定済みdestIdがありません。', {kind:'ownership'});
     await ensureHandlePermission(handle);
@@ -788,8 +870,13 @@ async function downloadOwnedFile({api, state, handle, onProgress = () => {}}) {
       }
       localFile = await handle.getFile();
       if (localFile.size === total) {
+        const verifyStartedAt = Date.now();
+        onPhase({phase:'download-end', at:verifyStartedAt});
+        onPhase({phase:'verify-start', at:verifyStartedAt});
         const done = commitVerifiedDownload(state, {destId, downloadedBytes:localFile.size, expectedCdnBytes:total, localName:localFile.name});
-        return {verified:true, resumed:true, totalBytes:total, localBytes:localFile.size, status:'ALREADY_COMPLETE', state:done};
+        const verifyEndedAt = Date.now();
+        onPhase({phase:'verify-end', at:verifyEndedAt});
+        return {verified:true, resumed:true, totalBytes:total, localBytes:localFile.size, status:'ALREADY_COMPLETE', state:done, verificationMethod:'content-length', telemetry:{transferredBytes:0, durationMs:0, averageBytesPerSecond:0, averageMBps:0, peakBytesPerSecond:0, resumed:true, alreadyComplete:true}};
       }
       if (localFile.size > total) {
         const w = await handle.createWritable({keepExistingData:false});
@@ -824,6 +911,12 @@ async function downloadOwnedFile({api, state, handle, onProgress = () => {}}) {
     // 到達したことを完全性証拠として扱う。metadata sizeはCDN実サイズと異なるため使わない。
     const expectedTotal = hasKnownLength ? base + remaining : null;
     const verificationMethod = hasKnownLength ? 'content-length' : 'stream-eof';
+    const transferStartedAt = Date.now();
+    const transferStartBytes = base;
+    let lastRateAt = transferStartedAt;
+    let lastRateBytes = base;
+    let instantBytesPerSecond = 0;
+    let peakBytesPerSecond = 0;
     const writable = await handle.createWritable({keepExistingData: resumed});
       if (resumed) await writable.seek(base);
       else await writable.truncate(0);
@@ -840,13 +933,23 @@ async function downloadOwnedFile({api, state, handle, onProgress = () => {}}) {
           await writable.write(value);
           written += value.byteLength;
           const now = Date.now();
+          const elapsedMs = Math.max(1, now - transferStartedAt);
+          const transferredBytes = Math.max(0, written - transferStartBytes);
+          const averageBytesPerSecond = transferredBytes * 1000 / elapsedMs;
+          if (now - lastRateAt >= 250) {
+            const deltaMs = Math.max(1, now - lastRateAt);
+            instantBytesPerSecond = Math.max(0, written - lastRateBytes) * 1000 / deltaMs;
+            peakBytesPerSecond = Math.max(peakBytesPerSecond, instantBytesPerSecond);
+            lastRateAt = now;
+            lastRateBytes = written;
+          }
           if (written >= nextCheckpoint) {
             const current = loadProbeState() || state;
-            saveProbeState({...current, state:'DOWNLOADING', download:{...(current.download||{}), destId, downloadedBytes:written, expectedCdnBytes:expectedTotal, updatedAt:now}});
+            saveProbeState({...current, state:'DOWNLOADING', download:{...(current.download||{}), destId, downloadedBytes:written, expectedCdnBytes:expectedTotal, telemetry:{transferStartedAt, transferStartBytes, transferredBytes, elapsedMs, averageBytesPerSecond, averageMBps:bytesPerSecondToMBps(averageBytesPerSecond), instantBytesPerSecond, peakBytesPerSecond, resumed}, updatedAt:now}});
             nextCheckpoint = written + CHECKPOINT_BYTES;
           }
           if (now - lastUi > 250) {
-            onProgress({written, expectedTotal, resumed, sourceMetaSize:Number(state.source?.size || 0)});
+            onProgress({written, expectedTotal, resumed, sourceMetaSize:Number(state.source?.size || 0), averageBytesPerSecond, instantBytesPerSecond, peakBytesPerSecond});
             lastUi = now;
           }
         }
@@ -856,10 +959,22 @@ async function downloadOwnedFile({api, state, handle, onProgress = () => {}}) {
         try { await writable.close(); } catch {}
         const partial = await handle.getFile();
         const current = loadProbeState() || state;
-        saveProbeState({...current, state:'DOWNLOAD_PAUSED', download:{...(current.download||{}), destId, downloadedBytes:partial.size, expectedCdnBytes:expectedTotal, lastError:String(e?.message || e), updatedAt:Date.now()}});
+        const pausedAt = Date.now();
+        const transferredBytes = Math.max(0, partial.size - transferStartBytes);
+        const elapsedMs = Math.max(1, pausedAt - transferStartedAt);
+        const averageBytesPerSecond = transferredBytes * 1000 / elapsedMs;
+        saveProbeState({...current, state:'DOWNLOAD_PAUSED', download:{...(current.download||{}), destId, downloadedBytes:partial.size, expectedCdnBytes:expectedTotal, telemetry:{transferStartedAt, transferStartBytes, transferredBytes, durationMs:elapsedMs, elapsedMs, averageBytesPerSecond, averageMBps:bytesPerSecondToMBps(averageBytesPerSecond), instantBytesPerSecond, peakBytesPerSecond, resumed, interrupted:true}, lastError:String(e?.message || e), updatedAt:pausedAt}});
         throw e;
       }
 
+      const transferEndedAt = Date.now();
+      const transferDurationMs = Math.max(0, transferEndedAt - transferStartedAt);
+      const transferredBytes = Math.max(0, written - transferStartBytes);
+      const averageBytesPerSecond = transferDurationMs > 0 ? transferredBytes * 1000 / transferDurationMs : 0;
+      peakBytesPerSecond = Math.max(peakBytesPerSecond, instantBytesPerSecond, averageBytesPerSecond);
+      onPhase({phase:'download-end', at:transferEndedAt});
+      const verifyStartedAt = Date.now();
+      onPhase({phase:'verify-start', at:verifyStartedAt});
       const finalFile = await handle.getFile();
     const actual = finalFile.size;
     // writableへ渡したbyte数と最終ファイルサイズは、Content-Length有無に関係なく一致必須。
@@ -874,8 +989,12 @@ async function downloadOwnedFile({api, state, handle, onProgress = () => {}}) {
       throw new LinkexError(`サイズ検証失敗: local=${actual} / CDN=${expectedTotal}`, {kind:'verify', actual, expectedTotal});
     }
 
+    const telemetry = {transferStartedAt, transferEndedAt, transferStartBytes, transferredBytes, durationMs:transferDurationMs, averageBytesPerSecond, averageMBps:bytesPerSecondToMBps(averageBytesPerSecond), instantBytesPerSecond, peakBytesPerSecond, resumed};
+    const currentBeforeCommit = loadProbeState() || state;
+    saveProbeState({...currentBeforeCommit, download:{...(currentBeforeCommit.download||{}), telemetry}});
     const done = commitVerifiedDownload(state, {destId, downloadedBytes:actual, expectedCdnBytes:expectedTotal, localName:finalFile.name, verificationMethod});
-    return {verified:true, resumed, totalBytes:expectedTotal ?? actual, localBytes:actual, finalFile, state:done, verificationMethod, metadataSize:Number(state.source?.size || 0)};
+    onPhase({phase:'verify-end', at:Date.now()});
+    return {verified:true, resumed, totalBytes:expectedTotal ?? actual, localBytes:actual, finalFile, state:done, verificationMethod, metadataSize:Number(state.source?.size || 0), telemetry};
     }
   }
 
@@ -1186,7 +1305,8 @@ function sameOwnedIdentity(current, state) {
     streamComplete:tx.download.streamComplete === true,
     sourceMetaSize:Number(tx.download.sourceMetaSize ?? tx.source?.size ?? 0),
     verifiedAt:tx.download.verifiedAt ?? null,
-    localName:tx.download.localName ?? null
+    localName:tx.download.localName ?? null,
+    telemetry:tx.download.telemetry ? {...tx.download.telemetry} : null
   } : null;
     const deletion = tx.delete ? {
       destId:tx.delete.destId ?? confirmed?.id ?? null,
@@ -1205,7 +1325,8 @@ function sameOwnedIdentity(current, state) {
       startedAt:tx.startedAt ?? null,
       reconciledAt:tx.reconciledAt ?? null,
       queueJobId:tx.queueJobId ?? null,
-      queueIndex:tx.queueIndex ?? null
+      queueIndex:tx.queueIndex ?? null,
+      performance:tx.performance ? {...tx.performance} : null
     };
   }
 
@@ -1277,6 +1398,7 @@ function sameOwnedIdentity(current, state) {
 
       assertLease();
       const beforeRoot = await listAllRoot(api);
+      const transactionStartedAt = Date.now();
       tx = {
         schemaVersion:1,
         operationId:makeId('queue-op'),
@@ -1284,7 +1406,8 @@ function sameOwnedIdentity(current, state) {
         shareToken:job.shareToken,
         source:item.source,
         beforeIds:beforeRoot.map(x => String(x.id)),
-        startedAt:Date.now(),
+        startedAt:transactionStartedAt,
+        performance:{schemaVersion:PERFORMANCE_SCHEMA_VERSION, total:{startedAt:transactionStartedAt}},
         queueJobId:job.jobId,
         queueIndex:index
       };
@@ -1292,13 +1415,18 @@ function sameOwnedIdentity(current, state) {
       onStatus?.(`COPY_INTENT [${index+1}/${job.items.length}]\n${item.source.remotePath}\ncopy POSTを1回だけ送信します…`);
 
       let copyResult;
+      tx = perfPhaseStart(tx, 'copy');
+      persistItemTx(job, index, tx, 'COPYING');
       try {
         assertLease();
         copyResult = await api.copySharedFile({shareToken:job.shareToken, sourceId:item.source.sourceId});
         tx = {...tx, state:'COPY_REQUEST_SENT', copyResponse:copyResult ?? {}, requestCompletedAt:Date.now()};
         persistItemTx(job, index, tx, 'COPYING');
         await waitTaskIfPresent(api, copyResult, s => onStatus?.(`COPY task: ${s}\n${item.source.remotePath}`));
+        tx = perfPhaseEnd(tx, 'copy', Date.now(), {outcome:'request-complete'});
+        persistItemTx(job, index, tx, 'COPYING');
       } catch (e) {
+        tx = perfPhaseEnd(tx, 'copy', Date.now(), {outcome:e?.kind === 'copy_task' ? 'task-failed' : 'request-uncertain'});
         if (e?.kind === 'copy_task' && e?.status === 'insufficient_storage') {
           tx = {...tx, state:'COPY_REJECTED_CAPACITY', requestError:{message:e.message, kind:e.kind, status:e.status}, requestFailedAt:Date.now()};
           persistItemTx(job, index, tx, 'SKIPPED_CAPACITY');
@@ -1322,7 +1450,10 @@ function sameOwnedIdentity(current, state) {
     tx = item.tx;
     if (['COPY_INTENT','COPY_REQUEST_SENT','NEEDS_RECONCILE','UNCERTAIN_NO_EVIDENCE'].includes(tx.state)) {
       onStatus?.(`コピー結果を照合中 [${index+1}/${job.items.length}]…\n${item.source.remotePath}\ncopy POST再送: NO`);
+      tx = perfPhaseStart(tx, 'ownershipReconcile');
+      persistItemTx(job, index, tx, 'COPYING');
       const rec = await reconcileCopy(api, tx, {timeoutMs:90000, onProgress:x => onStatus?.(`コピー照合中 [${index+1}/${job.items.length}]…\n${item.source.remotePath}\n差分: ${x.diff?.length ?? 0}\n候補: ${x.plausible?.length ?? 0}`)});
+      tx = perfPhaseEnd(tx, 'ownershipReconcile', Date.now(), {outcome:rec.status});
       if (rec.status === 'CONFIRMED' || rec.status === 'UNIQUE') {
         tx = {...tx, state:'OWNERSHIP_CONFIRMED', confirmedDest:rec.item, reconciledAt:Date.now()};
         persistItemTx(job, index, tx, 'COPIED');
@@ -1357,6 +1488,7 @@ function sameOwnedIdentity(current, state) {
     const local = await handle.getFile();
     // confirmedDestはownership確定時のimmutable snapshotとして維持し、signed URL等の現在metadataは永続化しない。
     tx = {...tx, state:'DOWNLOAD_READY', download:{...(tx.download||{}), destId:tx.confirmedDest.id, localName:local.name, downloadedBytes:local.size, startedAt:tx.download?.startedAt || Date.now(), updatedAt:Date.now()}};
+    tx = perfPhaseStart(tx, 'download');
     persistItemTx(job, index, tx, 'DOWNLOADING');
 
     let lastErr = null;
@@ -1366,14 +1498,36 @@ function sameOwnedIdentity(current, state) {
       saveQueueJob(job);
       try {
         onStatus?.(`DOWNLOADING [${index+1}/${job.items.length}]\n${item.source.remotePath}\n再開可能 / attempt ${attempt}`);
-        await downloadOwnedFile({api, state:tx, handle, onProgress:x => {
+        let downloadEndedAt = null;
+        let verifyStartedAt = null;
+        let verifyEndedAt = null;
+        const result = await downloadOwnedFile({api, state:tx, handle, onProgress:x => {
           const pct = x.expectedTotal ? Math.min(100, x.written / x.expectedTotal * 100) : null;
-          onStatus?.(`DOWNLOADING [${index+1}/${job.items.length}]\n${item.source.remotePath}\n${formatBytes(x.written)}${x.expectedTotal ? ` / ${formatBytes(x.expectedTotal)}` : ''}${pct == null ? '' : ` (${pct.toFixed(1)}%)`}\n${x.resumed ? 'Range resume' : 'full/restart'}`);
+          const rateText = x.averageBytesPerSecond > 0 ? `\n平均 ${formatTransferRate(x.averageBytesPerSecond)} / 瞬間 ${formatTransferRate(x.instantBytesPerSecond)}` : '';
+          onStatus?.(`DOWNLOADING [${index+1}/${job.items.length}]\n${item.source.remotePath}\n${formatBytes(x.written)}${x.expectedTotal ? ` / ${formatBytes(x.expectedTotal)}` : ''}${pct == null ? '' : ` (${pct.toFixed(1)}%)`}${rateText}\n${x.resumed ? 'Range resume' : 'full/restart'}`);
+        }, onPhase:x => {
+          if (x?.phase === 'download-end') downloadEndedAt = Number(x.at || Date.now());
+          if (x?.phase === 'verify-start') verifyStartedAt = Number(x.at || Date.now());
+          if (x?.phase === 'verify-end') verifyEndedAt = Number(x.at || Date.now());
         }});
         tx = syncTxFromProbe(job, index);
         if (tx.state !== 'LOCAL_COMMITTED') throw new LinkexError(`DL後stateがLOCAL_COMMITTEDではありません: ${tx.state}`, {kind:'state'});
-        item.state = 'LOCAL_COMMITTED';
-        saveQueueJob(job);
+        const t = result?.telemetry || tx.download?.telemetry || {};
+        tx = perfPhaseEnd(tx, 'download', downloadEndedAt || Date.now(), {
+          transferredBytes:Number(t.transferredBytes || 0),
+          transferDurationMs:Number(t.durationMs || 0),
+          averageBytesPerSecond:Number(t.averageBytesPerSecond || 0),
+          averageMBps:Number(t.averageMBps || 0),
+          peakBytesPerSecond:Number(t.peakBytesPerSecond || 0),
+          resumed:!!result?.resumed,
+          attempts:Number(item.attempts.download || 0)
+        });
+        if (verifyStartedAt) {
+          const end = verifyEndedAt || Date.now();
+          tx = perfPhaseSet(tx, 'verify', {startedAt:verifyStartedAt, endedAt:end, durationMs:Math.max(0, end - verifyStartedAt), verificationMethod:result?.verificationMethod || tx.download?.verificationMethod || null});
+        }
+        tx = {...tx, download:{...(tx.download||{}), telemetry:t}};
+        persistItemTx(job, index, tx, 'LOCAL_COMMITTED');
         return tx;
       } catch (e) {
         lastErr = e;
@@ -1394,6 +1548,8 @@ function sameOwnedIdentity(current, state) {
     const item = job.items[index];
     let tx = item.tx;
     if (tx.state === 'DONE') return tx;
+    tx = perfPhaseStart(tx, 'delete');
+    persistItemTx(job, index, tx, item.state);
 
     // 応答不明の削除は絶対に再送しない。存在/不在だけ照合する。
     if (['DELETE_INTENT','DELETE_REQUEST_SENT','DELETE_UNCERTAIN','DELETE_UNCERTAIN_PRESENT'].includes(tx.state)) {
@@ -1401,6 +1557,7 @@ function sameOwnedIdentity(current, state) {
       const rec = await reconcileDelete(api, tx, {timeoutMs:30000, onProgress:x => onStatus?.(`DELETE照合 [${index+1}/${job.items.length}]\n存在: ${x.exists ? 'YES' : 'NO'}\n再送: NO`)});
       if (rec.status === 'ABSENT') {
         tx = {...tx, state:'DONE', delete:{...(tx.delete||{}), destId:tx.delete?.destId || tx.confirmedDest?.id, confirmedAbsentAt:Date.now()}};
+        tx = perfPhaseEnd(tx, 'delete', Date.now(), {outcome:'confirmed-absent'});
         persistItemTx(job, index, tx, 'DONE');
         return tx;
       }
@@ -1413,6 +1570,7 @@ function sameOwnedIdentity(current, state) {
     const current = await findOwnedRootFile(api, guard.destId);
     if (!current) {
       tx = {...tx, state:'DONE', delete:{...(tx.delete||{}), destId:guard.destId, confirmedAbsentAt:Date.now(), alreadyAbsent:true}};
+      tx = perfPhaseEnd(tx, 'delete', Date.now(), {outcome:'already-absent'});
       persistItemTx(job, index, tx, 'DONE');
       return tx;
     }
@@ -1459,6 +1617,8 @@ function sameOwnedIdentity(current, state) {
         await ensureCopyOwned(api, job, i, onStatus);
         await ensureDownloaded(api, job, i, queueRoot, onStatus);
         await ensureDeleted(api, job, i, onStatus);
+        item.tx = perfPhaseEnd(item.tx, 'total', Date.now(), {outcome:'done'});
+        persistItemTx(job, i, item.tx, 'DONE');
         compactCompletedItem(job, item);
         saveQueueJob(job);
         onStatus?.(`完了 [${i+1}/${job.items.length}]\n${item.source.remotePath}\nLinkex一時コピー削除確認済み`);
@@ -1609,6 +1769,7 @@ function sameOwnedIdentity(current, state) {
       version: VERSION,
       generatedAt: new Date().toISOString(),
       signatureSelfTest: runSignatureSelfTest().map(x => ({name:x.name, ok:x.ok, actual:x.actual, expected:x.expected})),
+      performance: redactForExport(buildPerformanceSummary(queue)),
       queue: redactForExport(queue),
       events: redactForExport(loadEventLog())
     };
