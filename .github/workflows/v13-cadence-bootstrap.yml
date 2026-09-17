@@ -1,0 +1,128 @@
+name: one-shot-v13-cadence
+
+on:
+  push:
+    branches:
+      - exp/v1.3-cadence
+    paths:
+      - '.github/workflows/v13-cadence-bootstrap.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: exp/v1.3-cadence
+
+      - name: Apply cadence experiment
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          src_path = Path('linkex-downloader.user.js')
+          src = src_path.read_text(encoding='utf-8')
+
+          def replace_once(text, old, new, label):
+              count = text.count(old)
+              if count != 1:
+                  raise SystemExit(f'{label}: expected exactly 1 match, got {count}')
+              return text.replace(old, new, 1)
+
+          src = replace_once(
+              src,
+              "  const CHECKPOINT_BYTES = 2 * 1024 * 1024;\n  const PERFORMANCE_SCHEMA_VERSION = 1;",
+              "  const CHECKPOINT_BYTES = 16 * 1024 * 1024;\n  const CHECKPOINT_INTERVAL_MS = 1000;\n  const UI_UPDATE_INTERVAL_MS = 750;\n  const PERFORMANCE_SCHEMA_VERSION = 1;",
+              'performance cadence constants',
+          )
+
+          src = replace_once(
+              src,
+              "      let nextCheckpoint = written + CHECKPOINT_BYTES;\n      let lastUi = 0;",
+              "      let nextCheckpoint = written + CHECKPOINT_BYTES;\n      let lastCheckpointAt = transferStartedAt;\n      let lastUi = 0;",
+              'checkpoint clock init',
+          )
+
+          src = replace_once(
+              src,
+              "          if (written >= nextCheckpoint) {\n            const current = loadProbeState() || state;\n            saveProbeState({...current, state:'DOWNLOADING', download:{...(current.download||{}), destId, downloadedBytes:written, expectedCdnBytes:expectedTotal, telemetry:{transferStartedAt, transferStartBytes, transferredBytes, elapsedMs, averageBytesPerSecond, averageMBps:bytesPerSecondToMBps(averageBytesPerSecond), instantBytesPerSecond, peakBytesPerSecond, resumed}, updatedAt:now}});\n            nextCheckpoint = written + CHECKPOINT_BYTES;\n          }\n          if (now - lastUi > 250) {",
+              "          if (written >= nextCheckpoint || now - lastCheckpointAt >= CHECKPOINT_INTERVAL_MS) {\n            const current = loadProbeState() || state;\n            saveProbeState({...current, state:'DOWNLOADING', download:{...(current.download||{}), destId, downloadedBytes:written, expectedCdnBytes:expectedTotal, telemetry:{transferStartedAt, transferStartBytes, transferredBytes, elapsedMs, averageBytesPerSecond, averageMBps:bytesPerSecondToMBps(averageBytesPerSecond), instantBytesPerSecond, peakBytesPerSecond, resumed}, updatedAt:now}});\n            nextCheckpoint = written + CHECKPOINT_BYTES;\n            lastCheckpointAt = now;\n          }\n          if (now - lastUi >= UI_UPDATE_INTERVAL_MS) {",
+              'checkpoint and UI cadence',
+          )
+
+          src_path.write_text(src, encoding='utf-8')
+
+          docs_path = Path('docs/PERFORMANCE.md')
+          docs = docs_path.read_text(encoding='utf-8')
+          marker = "Implemented on `feat/v1.3-performance`: transaction-scoped phase timing, transfer-rate telemetry, UI average/instant rate display, and an aggregate `performance` section in the support bundle. The existing 2 MiB checkpoint and ~250 ms UI cadence are intentionally unchanged for the baseline measurement.\n"
+          addition = marker + """
+
+### Browser baseline (3 runs, same 26-file / 6.37 GB workload)
+
+| Metric | Run 1 | Run 2 | Run 3 | Median |
+|---|---:|---:|---:|---:|
+| Transfer throughput (MiB/s) | 27.63 | 35.45 | 40.19 | 35.45 |
+| Transfer time (s) | 219.962 | 171.460 | 151.203 | 171.460 |
+| DOWNLOAD phase (s) | 235.033 | 178.346 | 157.902 | 178.346 |
+| COPY phase (s) | 8.807 | 7.246 | 6.489 | 7.246 |
+| Ownership reconcile (s) | 8.153 | 6.917 | 5.952 | 6.917 |
+| DELETE phase (s) | 25.463 | 21.802 | 19.113 | 21.802 |
+| Transaction total (s) | 286.182 | 221.200 | 196.092 | 221.200 |
+| Queue effective throughput (MiB/s) | 20.03 | 25.86 | 29.19 | 25.86 |
+
+The three baseline runs improved monotonically (27.63 -> 35.45 -> 40.19 MiB/s), so CDN/cache/time effects are material. Candidate measurements must therefore be followed by at least one baseline rerun when the result is close enough that drift could explain the difference.
+
+`exp/v1.3-cadence` changes only checkpoint/UI cadence for the first A/B candidate: checkpoint after 16 MiB **or** 1000 ms (whichever is reached first on a received chunk), UI refresh every 750 ms, while the 250 ms transfer-rate sampling remains unchanged for comparability.
+"""
+          if marker not in docs:
+              raise SystemExit('performance docs marker not found')
+          docs = docs.replace(marker, addition, 1)
+          docs = docs.replace(
+              "| Checkpoint cadence | 2 MiB | time + bytes (e.g. 16 MiB or ~1 s) | pending |\n| UI update cadence | ~250 ms | 500 ms–1 s | pending |",
+              "| Checkpoint cadence | 2 MiB | 16 MiB or 1000 ms | candidate implemented; A/B pending |\n| UI update cadence | ~250 ms | 750 ms | candidate implemented; A/B pending |",
+              1,
+          )
+          docs_path.write_text(docs, encoding='utf-8')
+
+          test_path = Path('tests/performance-cadence.test.js')
+          test_path.write_text("""const test = require('node:test');
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+
+const source = fs.readFileSync('linkex-downloader.user.js', 'utf8');
+
+test('cadence experiment uses 16 MiB or 1 s checkpoints and 750 ms UI refresh', () => {
+  assert.match(source, /const CHECKPOINT_BYTES = 16 \* 1024 \* 1024;/);
+  assert.match(source, /const CHECKPOINT_INTERVAL_MS = 1000;/);
+  assert.match(source, /const UI_UPDATE_INTERVAL_MS = 750;/);
+  assert.match(source, /written >= nextCheckpoint \|\| now - lastCheckpointAt >= CHECKPOINT_INTERVAL_MS/);
+  assert.match(source, /now - lastUi >= UI_UPDATE_INTERVAL_MS/);
+});
+
+test('instantaneous transfer-rate sampling remains at 250 ms for A\/B comparability', () => {
+  assert.match(source, /now - lastRateAt >= 250/);
+});
+""", encoding='utf-8')
+          PY
+
+      - name: Verify cadence experiment
+        shell: bash
+        run: |
+          node --check linkex-downloader.user.js
+          node --test tests/*.test.js
+          python tools/check_repo_consistency.py
+          python tools/build_release_assets.py --output-dir "$RUNNER_TEMP/linkex-release"
+
+      - name: Commit verified cadence experiment
+        shell: bash
+        run: |
+          rm .github/workflows/v13-cadence-bootstrap.yml
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -m "perf: add checkpoint and UI cadence experiment"
+          git push origin HEAD:exp/v1.3-cadence
