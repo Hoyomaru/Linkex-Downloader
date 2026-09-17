@@ -33,11 +33,11 @@ Linkex 自領域へ一時コピー
 
 ## Version / 配布状態
 
-- `main` source: **v1.2.1**（Release準備中 / 実機確認済み）
-- 最新公開安定版: **v1.2.0**
-- 最新公開tag: **`v1.2.0`**
-- GitHub Release: **v1.2.0 公開済み（2026-09-15）**
-- Release commit: `8bb478fbd320eaed2388427d3e03d1b91769bfc2`
+- `main` source: **v1.2.1**（公開済み / 実機確認済み）
+- 最新公開安定版: **v1.2.1**
+- 最新公開tag: **`v1.2.1`**
+- GitHub Release: **v1.2.1 公開済み（2026-09-17）**
+- Release commit: `ac698e0d3d8f6a6e6ba876cf2ea64e8cc98e1ac5`
 - 現行CI: **GitHub Actions (`.github/workflows/ci.yml`)** — userscript構文、回帰テスト、repository整合性、Release Asset生成を検証
 - License: **MIT**
 
@@ -132,15 +132,15 @@ Node.js / Python等の外部ランタイムは不要です。
 ### GitHub Releaseから導入する場合（推奨）
 
 1. Chrome / Edge に Tampermonkey をインストールします。
-2. GitHub Releases から最新の公開安定版 **v1.2.0** を開きます。
-3. v1.2.0では Release Assets の `linkex-downloader_v1.2.0.user.js` を取得します。
+2. GitHub Releases から最新の公開安定版 **v1.2.1** を開きます。
+3. Release Assets の `linkex_downloader_v1.2.1.user.js` を取得します。
 4. Tampermonkeyで新規スクリプトを作成し、userscript全文を貼り付けて保存します。
 5. Linkexへログインした状態で `https://disk.linkex.io/` を一度開きます。
 6. 共有ページ `https://l2e.click/d/...` を開き、右下にLinkex Downloaderパネルが表示されれば導入完了です。
 
-ZIP Asset `linkex_downloader_v1.2.0.zip` は同じuserscriptを1ファイルだけ含む補助配布物です。リポジトリ直下のversion固定コピーは今後作成しません。
+ZIP Asset `linkex_downloader_v1.2.1.zip` は同じuserscriptを1ファイルだけ含む補助配布物です。リポジトリ直下のversion固定コピーは今後作成しません。
 
-`linkex-downloader.user.js` は `main` の正本です。現在はv1.2.0 Releaseと同じversionですが、今後の開発では公開安定版より先行する場合があります。
+`linkex-downloader.user.js` は `main` の正本です。現在はv1.2.1 Releaseと同じversionですが、今後の開発では公開安定版より先行する場合があります。
 
 ## 更新
 
