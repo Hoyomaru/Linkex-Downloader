@@ -30,20 +30,18 @@ jobs:
           def write(path, text):
               Path(path).write_text(text, encoding='utf-8')
 
-          def sub_once(text, pattern, repl, label, flags=0):
-              out, n = re.subn(pattern, repl, text, count=1, flags=flags)
+          def sub_once(text, pattern, repl, label):
+              out, n = re.subn(pattern, repl, text, count=1)
               if n != 1:
                   raise SystemExit(f'{label}: expected 1 replacement, got {n}')
               return out
 
-          # Userscript version markers.
           p = 'linkex-downloader.user.js'
           s = read(p)
           s = sub_once(s, r'(?m)^// @version\s+1\.2\.0$', '// @version      1.2.1', 'metadata version')
           s = sub_once(s, r"const VERSION = '1\.2\.0';", "const VERSION = '1.2.1';", 'runtime version')
           write(p, s)
 
-          # Changelog: promote the existing Unreleased fix into 1.2.1.
           p = 'CHANGELOG.md'
           s = read(p)
           needle = "## [Unreleased]\n\n### Fixed\n\n- CDNが `Content-Length` を公開しない正常応答でも、streamの正常EOF到達とローカル書き込みbyte数を証拠として安全に完了できるよう修正。Range 416で完成サイズを取得できない場合は曖昧なlocal fileを完成扱いせず0 byteから再取得する\n"
@@ -52,7 +50,6 @@ jobs:
               raise SystemExit('CHANGELOG release block not found')
           write(p, s.replace(needle, repl, 1))
 
-          # README: main source becomes the 1.2.1 release candidate; public stable stays 1.2.0 until publication.
           p = 'README.md'
           s = read(p)
           s = sub_once(s, r'- `main` source: \*\*v1\.2\.0\*\*（公開済み / 実機確認済み）', '- `main` source: **v1.2.1**（Release準備中 / 実機確認済み）', 'README main version')
@@ -60,7 +57,6 @@ jobs:
           s = sub_once(s, r'- CDN実サイズ基準のローカル保存検証', '- Content-Lengthがある場合はCDN実サイズ一致、ない場合はstream正常EOF＋実書込byte数でローカル保存検証', 'README verification feature')
           write(p, s)
 
-          # DEVELOPMENT: version state + safety invariant + delete guards.
           p = 'DEVELOPMENT.md'
           s = read(p)
           s = sub_once(s, r'2026-09-15 時点で確認した状態です。', '2026-09-17 時点で確認した状態です。', 'DEVELOPMENT state date')
@@ -73,7 +69,6 @@ jobs:
           s = s.replace('現行main（v1.2.0 release candidate）', '現行main（v1.2.1 release candidate）')
           write(p, s)
 
-          # Architecture: document both verification paths.
           p = 'docs/ARCHITECTURE.md'
           s = read(p)
           s = sub_once(s, r'K\[ローカルへRange対応DL\]\n    K --> L\[CDN実サイズで検証\]', 'K[ローカルへRange対応DL]\n    K --> L[Content-Length / stream EOFで検証]', 'ARCHITECTURE diagram')
@@ -87,10 +82,8 @@ jobs:
           new = "- `download.verificationMethod === 'content-length'` の場合は `download.sizeVerified === true` かつ `downloadedBytes === expectedCdnBytes >= 0`\n- `download.verificationMethod === 'stream-eof'` の場合は `streamComplete === true` かつstream実書込byte数と最終ローカルサイズが一致"
           if old not in s:
               raise SystemExit('ARCHITECTURE delete guard block not found')
-          s = s.replace(old, new, 1)
-          write(p, s)
+          write(p, s.replace(old, new, 1))
 
-          # Release procedure: main source is RC until publication, and safety checks include stream EOF evidence.
           p = 'docs/RELEASE.md'
           s = read(p)
           s = sub_once(s, r'2026-09-15 時点:', '2026-09-17 時点:', 'RELEASE date')
@@ -99,10 +92,8 @@ jobs:
           new = "- Content-Length検証では `download.sizeVerified === true` かつ `downloadedBytes === expectedCdnBytes >= 0`\n- Content-Lengthがない場合は `verificationMethod === 'stream-eof'`、`streamComplete === true`、stream実書込byte数と最終ローカルサイズ一致を満たし、いずれも `verifiedAt` がある場合だけdelete可能"
           if old not in s:
               raise SystemExit('RELEASE safety block not found')
-          s = s.replace(old, new, 1)
-          write(p, s)
+          write(p, s.replace(old, new, 1))
 
-          # Consistency checks must validate the new documented invariant instead of the v1.2.0-only rule.
           p = 'tools/check_repo_consistency.py'
           s = read(p)
           old = "require('download.sizeVerified === true' in arch, 'ARCHITECTURE missing sizeVerified delete guard')\nrequire('downloadedBytes === expectedCdnBytes >= 0' in arch, 'ARCHITECTURE zero-byte delete guard is stale')\nrequire('downloadedBytes === expectedCdnBytes > 0' not in arch, 'ARCHITECTURE still contains obsolete > 0 guard')"
@@ -111,60 +102,60 @@ jobs:
               raise SystemExit('consistency architecture checks not found')
           write(p, s.replace(old, new, 1))
 
-          # Version-specific release notes. Asset hashes are appended/verified when publishing the tag.
-          p = Path('docs/releases/v1.2.1.md')
-          if p.exists():
+          note_lines = [
+              '# Linkex Downloader v1.2.1 — Content-LengthなしCDN応答への対応',
+              '',
+              'v1.2.1は、CDNが `Content-Length` を公開しない正常応答でQueueが停止する問題を修正するpatch releaseです。v1.2.0の所有権確認・単一ID削除・write再送禁止などの安全条件は維持します。',
+              '',
+              '> [!IMPORTANT]',
+              '> 本ツールはLinkex公式とは無関係の非公式ツールです。Linkex側のWeb / API / CDN仕様変更により将来動作しなくなる可能性があります。',
+              '',
+              '## 修正内容',
+              '',
+              '- CDN応答に `Content-Length` がある場合は、従来どおり期待CDN byte数と最終ローカルサイズを厳密照合します。',
+              '- `Content-Length` がない場合は、streamの正常EOF到達・stream実書込byte数・最終ローカルサイズの一致を検証し、`verificationMethod: stream-eof` として完了できます。',
+              '- stream途中切断やreader例外は `DOWNLOAD_PAUSED` とし、`LOCAL_COMMITTED` にはしません。',
+              '- Range再開時にHTTP 416となり、追加probeでも総byte数を得られない場合は、曖昧なローカルファイルを完成扱いせず0 byteから安全に再取得します。',
+              '- Linkex metadataの `size` をCDN実サイズの代替には使用しません。',
+              '- DONE transaction compact化後も `verificationMethod` / `streamComplete` を保持します。',
+              '',
+              '## 削除安全条件',
+              '',
+              '一時コピーの自動DELETEは `LOCAL_COMMITTED` 後だけです。',
+              '',
+              '- Content-Length方式: `sizeVerified === true` かつ `downloadedBytes === expectedCdnBytes >= 0`',
+              "- stream EOF方式: `verificationMethod === 'stream-eof'`、`streamComplete === true`、stream実書込byte数と最終ローカルサイズが一致",
+              '- どちらも `verifiedAt` が必要',
+              '- ownership確定済み `destId` だけを `select_all:false` + 単一 `file_ids:[destId]` で削除',
+              '',
+              'stream EOF方式は、サーバーが明示する総byte数との独立照合ではなく、正常なtransport EOFと実書込byte数を完全性証拠として使用します。Content-Lengthが得られる場合は従来の厳密なsize一致を優先します。',
+              '',
+              '## 回帰テスト',
+              '',
+              '- Content-Lengthなし + 正常EOF → `LOCAL_COMMITTED`',
+              '- Content-Lengthなし + stream途中切断 → `DOWNLOAD_PAUSED`、未commit',
+              '- Range 416 + probeでもContent-Lengthなし → 0 byteから再取得しstream EOF検証',
+              '- 既存の0 byte / 416既知サイズ / ownership変更 / lease / retryケース',
+              '',
+              '## 実機確認',
+              '',
+              '2026-09-17に、実際に `Content-Length` 不在で停止していたファイルを含むQueueで修正版の動作確認を実施済みです。',
+              '',
+              '## インストール / 更新',
+              '',
+              'GitHub Release `v1.2.1` の `linkex_downloader_v1.2.1.user.js` を推奨Assetとします。ZIPは同じuserscriptを1ファイルだけ含む補助Assetです。',
+              '',
+              '未完了Queueがある場合は、可能なら更新前に安全停止してからuserscriptを更新してください。',
+              '',
+              '## SHA-256',
+              '',
+              'Release対象commitから `tools/build_release_assets.py` で生成したAssetのSHA-256を公開時にGitHub Release Asset digestと照合します。',
+              '',
+          ]
+          note = Path('docs/releases/v1.2.1.md')
+          if note.exists():
               raise SystemExit('v1.2.1 release note already exists')
-          p.write_text("""# Linkex Downloader v1.2.1 — Content-LengthなしCDN応答への対応
-
-v1.2.1は、CDNが `Content-Length` を公開しない正常応答でQueueが停止する問題を修正するpatch releaseです。v1.2.0の所有権確認・単一ID削除・write再送禁止などの安全条件は維持します。
-
-> [!IMPORTANT]
-> 本ツールはLinkex公式とは無関係の非公式ツールです。Linkex側のWeb / API / CDN仕様変更により将来動作しなくなる可能性があります。
-
-## 修正内容
-
-- CDN応答に `Content-Length` がある場合は、従来どおり期待CDN byte数と最終ローカルサイズを厳密照合します。
-- `Content-Length` がない場合は、streamの正常EOF到達・stream実書込byte数・最終ローカルサイズの一致を検証し、`verificationMethod: stream-eof` として完了できます。
-- stream途中切断やreader例外は `DOWNLOAD_PAUSED` とし、`LOCAL_COMMITTED` にはしません。
-- Range再開時にHTTP 416となり、追加probeでも総byte数を得られない場合は、曖昧なローカルファイルを完成扱いせず0 byteから安全に再取得します。
-- Linkex metadataの `size` をCDN実サイズの代替には使用しません。
-- DONE transaction compact化後も `verificationMethod` / `streamComplete` を保持します。
-
-## 削除安全条件
-
-一時コピーの自動DELETEは `LOCAL_COMMITTED` 後だけです。
-
-- Content-Length方式: `sizeVerified === true` かつ `downloadedBytes === expectedCdnBytes >= 0`
-- stream EOF方式: `verificationMethod === 'stream-eof'`、`streamComplete === true`、stream実書込byte数と最終ローカルサイズが一致
-- どちらも `verifiedAt` が必要
-- ownership確定済み `destId` だけを `select_all:false` + 単一 `file_ids:[destId]` で削除
-
-stream EOF方式は、サーバーが明示する総byte数との独立照合ではなく、正常なtransport EOFと実書込byte数を完全性証拠として使用します。Content-Lengthが得られる場合は従来の厳密なsize一致を優先します。
-
-## 回帰テスト
-
-次のケースを追加・確認しています。
-
-- Content-Lengthなし + 正常EOF → `LOCAL_COMMITTED`
-- Content-Lengthなし + stream途中切断 → `DOWNLOAD_PAUSED`、未commit
-- Range 416 + probeでもContent-Lengthなし → 0 byteから再取得しstream EOF検証
-- 既存の0 byte / 416既知サイズ / ownership変更 / lease / retryケース
-
-## 実機確認
-
-2026-09-17に、実際に `Content-Length` 不在で停止していたファイルを含むQueueで修正版の動作確認を実施済みです。
-
-## インストール / 更新
-
-GitHub Release `v1.2.1` の `linkex_downloader_v1.2.1.user.js` を推奨Assetとします。ZIPは同じuserscriptを1ファイルだけ含む補助Assetです。
-
-未完了Queueがある場合は、可能なら更新前に安全停止してからuserscriptを更新してください。
-
-## SHA-256
-
-Release対象commitから `tools/build_release_assets.py` で生成したAssetのSHA-256を公開時にGitHub Release Asset digestと照合します。
-""", encoding='utf-8')
+          note.write_text('\n'.join(note_lines), encoding='utf-8')
           PY
       - name: Remove one-shot workflow
         run: rm .github/workflows/release-prep-v1.2.1.yml
