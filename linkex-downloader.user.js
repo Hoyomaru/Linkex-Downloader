@@ -1860,6 +1860,24 @@ function sameOwnedIdentity(current, state) {
       persistItemTx(job, 0, tx, 'GOPEED_DOWNLOADING');
     }
   
+    if (!taskId && tx.state === 'GOPEED_SUBMIT_INTENT') {
+      onStatus?.(`Gopeed送信intentを復旧照合中…\n${item.source.remotePath}\nPOST再送: NO`);
+      const found = await reconcileGopeedSubmission(client, operationId);
+      if (!found) {
+        tx = {...tx, state:'GOPEED_SUBMIT_UNCERTAIN', external:{...(tx.external||{}), gopeed:{...gopeed, recoveredAt:Date.now()}}};
+        persistItemTx(job, 0, tx, 'BLOCKED');
+        item.lastError = {message:'Gopeed POST intentの送信結果を確定できません。自動再送しません。', kind:'gopeed_submit_uncertain', at:Date.now()};
+        job.state = 'BLOCKED';
+        job.lastError = {...item.lastError, index:0};
+        saveQueueJob(job);
+        throw new LinkexError(item.lastError.message, {kind:'gopeed_submit_uncertain'});
+      }
+      taskId = String(found.id || '');
+      gopeed = {...gopeed, taskId, task:compactGopeedTask(found), reconciledAt:Date.now()};
+      tx = {...tx, state:'GOPEED_TASK_CREATED', external:{...(tx.external||{}), gopeed}};
+      persistItemTx(job, 0, tx, 'GOPEED_DOWNLOADING');
+    }
+
     if (!taskId) {
       const owned = await refreshOwnedFileUrl(linkexApi, tx.confirmedDest?.id);
       if (!sameOwnedIdentity(owned, tx)) throw new LinkexError('Gopeed送信前にdestId identityの変化を検出しました。停止します。', {kind:'ownership_lost'});
@@ -2397,7 +2415,7 @@ function sameOwnedIdentity(current, state) {
         #linkex-full-queue .mini { flex:0 0 auto; width:auto; padding:5px 9px; font-size:12px; background:#374151; color:#fff; }
         #linkex-full-queue .body { padding:12px; overflow-y:auto; overscroll-behavior:contain; min-height:0; scrollbar-gutter:stable; }
         #linkex-full-queue.collapsed .body { display:none; }
-        #linkex-full-queue input { width:100%; box-sizing:border-box; background:#0b1220; border:1px solid #4b5563; color:#fff; border-radius:8px; padding:9px 10px; margin-bottom:8px; }
+        #linkex-full-queue input, #linkex-full-queue select { width:100%; box-sizing:border-box; background:#0b1220; border:1px solid #4b5563; color:#fff; border-radius:8px; padding:9px 10px; margin-bottom:8px; }
         #linkex-full-queue .row { display:flex; gap:8px; margin-bottom:8px; }
         #linkex-full-queue button { flex:1; border:0; border-radius:8px; padding:9px 10px; cursor:pointer; font-weight:700; }
         #linkex-full-queue button:disabled { opacity:.4; cursor:not-allowed; }
@@ -2456,7 +2474,7 @@ function sameOwnedIdentity(current, state) {
             <div class="selection-actions"><button id="lf-select-all" class="secondary">全件選択</button><button id="lf-clear-all" class="secondary">全解除</button><button id="lf-select-visible" class="secondary">表示中を選択</button><button id="lf-clear-visible" class="secondary">表示中を解除</button></div>
             <div id="lf-file-list" class="file-list"></div>
             <div id="lf-selection-note" class="notice"></div>
-            <div class="row" style="margin-top:8px;margin-bottom:0"><button id="lf-start-selected" class="primary" disabled>選択をダウンロード</button></div>
+            <div class="row" style="margin-top:8px;margin-bottom:0"><button id="lf-start-selected" class="primary" disabled>選択をブラウザDL</button><button id="lf-gopeed-selected" class="primary" disabled>選択1件をGopeed</button></div>
           </div>
           <div id="lf-queue-actions" class="row" hidden><button id="lf-resume" class="primary" disabled>Queueを再開</button><button id="lf-pause" class="secondary" disabled>現在ファイル後に停止</button></div>
           <div class="progress-wrap">
@@ -2471,9 +2489,25 @@ function sameOwnedIdentity(current, state) {
               <div class="row"><button id="lf-selftest" class="secondary">署名テスト</button><button id="lf-export" class="secondary">診断ログを保存</button></div>
               <div class="row"><button id="lf-refresh" class="secondary">状態を再表示</button><button id="lf-retry" class="secondary" disabled>容量スキップを再試行</button></div>
               <div class="row" style="margin-bottom:0"><button id="lf-abandon" class="secondary" disabled>Queueを安全に破棄</button></div>
+              <details class="log">
+                <summary>Gopeed設定（実験）</summary>
+                <div style="padding-top:7px">
+                  <input id="lf-gopeed-url" value="http://127.0.0.1:9999" placeholder="http://127.0.0.1:9999" />
+                  <input id="lf-gopeed-token" type="password" autocomplete="off" placeholder="API Token（未設定なら空欄）" />
+                  <select id="lf-gopeed-connections">
+                    <option value="1">connections: 1</option>
+                    <option value="2">connections: 2</option>
+                    <option value="4">connections: 4</option>
+                    <option value="8">connections: 8</option>
+                    <option value="16">connections: 16</option>
+                  </select>
+                  <div class="row" style="margin-bottom:4px"><button id="lf-gopeed-test" class="secondary">Gopeed接続テスト</button></div>
+                  <div class="notice">GopeedはGopeed側の既定保存先へ保存します。doneだけではローカル検証済みにせず、Linkex一時コピーも自動削除しません。</div>
+                </div>
+              </details>
               <details id="lf-log-details" class="log">
                 <summary>ログを表示</summary>
-                <div id="lf-status" class="status">共有ページでは「すべてダウンロード」だけで解析からQueue開始まで進めます。\n安全処理は1ファイルずつ COPY → DL → VERIFY → 所有destIdだけDELETE します。</div>
+                <div id="lf-status" class="status">共有ページでは「すべてダウンロード」だけで解析からQueue開始まで進めます。\nブラウザDLは COPY → DL → VERIFY → 所有destIdだけDELETE。Gopeed実験は完了しても自動DELETEしません。</div>
               </details>
             </div>
           </details>
@@ -2492,6 +2526,11 @@ function sameOwnedIdentity(current, state) {
     const startBtn = root.querySelector('#lf-start');
     const selectModeBtn = root.querySelector('#lf-select-mode');
     const selectedStartBtn = root.querySelector('#lf-start-selected');
+    const gopeedSelectedBtn = root.querySelector('#lf-gopeed-selected');
+    const gopeedUrlInput = root.querySelector('#lf-gopeed-url');
+    const gopeedTokenInput = root.querySelector('#lf-gopeed-token');
+    const gopeedConnectionsSelect = root.querySelector('#lf-gopeed-connections');
+    const gopeedTestBtn = root.querySelector('#lf-gopeed-test');
     const selectionPanel = root.querySelector('#lf-selection');
     const selectionMeta = root.querySelector('#lf-selection-meta');
     const fileFilter = root.querySelector('#lf-file-filter');
@@ -2550,6 +2589,10 @@ function sameOwnedIdentity(current, state) {
     let preferredDirPermission = 'unknown';
     let preferredHandleReady = false;
     input.value = GM_getValue(LAST_URL_KEY, '') || '';
+    const initialGopeedPrefs = loadGopeedPrefs();
+    gopeedUrlInput.value = initialGopeedPrefs.baseUrl;
+    gopeedTokenInput.value = initialGopeedPrefs.apiToken;
+    gopeedConnectionsSelect.value = String(initialGopeedPrefs.connections);
 
     const prefs = loadUiPrefs();
     if (prefs.collapsed) root.classList.add('collapsed');
@@ -2672,6 +2715,35 @@ function sameOwnedIdentity(current, state) {
       return total;
     }
 
+    function saveGopeedPrefsFromUi() {
+        const prefs = saveGopeedPrefs({baseUrl:gopeedUrlInput.value, apiToken:gopeedTokenInput.value, connections:Number(gopeedConnectionsSelect.value)});
+        gopeedUrlInput.value = prefs.baseUrl;
+        gopeedConnectionsSelect.value = String(prefs.connections);
+        return prefs;
+      }
+      gopeedUrlInput.addEventListener('change', () => {
+        try { saveGopeedPrefsFromUi(); } catch (e) { write(`Gopeed設定エラー: ${e?.message || e}`, 'err'); }
+      });
+      gopeedTokenInput.addEventListener('change', () => {
+        try { saveGopeedPrefsFromUi(); } catch (e) { write(`Gopeed設定エラー: ${e?.message || e}`, 'err'); }
+      });
+      gopeedConnectionsSelect.addEventListener('change', () => {
+        try { saveGopeedPrefsFromUi(); } catch (e) { write(`Gopeed設定エラー: ${e?.message || e}`, 'err'); }
+      });
+      gopeedTestBtn.addEventListener('click', async () => {
+        if (running || preparing) return;
+        preparing = true; refreshQueueUi();
+        try {
+          const prefs = saveGopeedPrefsFromUi();
+          const info = await new GopeedClient(prefs).info();
+          write(`Gopeed接続OK\nversion: ${info?.version || 'unknown'}\nruntime: ${info?.runtime || 'unknown'}\nAPI: ${prefs.baseUrl}`, 'ok');
+          recordEvent('info', 'gopeed-connect', 'Gopeed接続OK', {version:info?.version || null, runtime:info?.runtime || null, baseUrl:prefs.baseUrl});
+        } catch (e) {
+          write(`Gopeed接続失敗: ${e?.message || e}`, 'err');
+          recordEvent('error', 'gopeed-connect', `Gopeed接続失敗: ${e?.message || e}`);
+        } finally { preparing = false; refreshQueueUi(); }
+      });
+
     function renderSelection() {
       const hasManifest = !!manifest?.files?.length;
       selectionPanel.hidden = !hasManifest || !selectionExpanded;
@@ -2743,9 +2815,9 @@ function sameOwnedIdentity(current, state) {
         return;
       }
       const c = queueCounts(job);
-      const terminal = c.done + c.skippedCapacity + c.unfittable;
+      const terminal = c.done + c.externalComplete + c.skippedCapacity + c.unfittable;
       const pct = Math.max(0, Math.min(100, terminal / job.items.length * 100));
-      progressText.textContent = `DONE ${c.done}/${job.items.length} · skip ${c.skippedCapacity + c.unfittable} · blocked ${c.blocked}`;
+      progressText.textContent = `DONE ${c.done}/${job.items.length} · ext ${c.externalComplete} · skip ${c.skippedCapacity + c.unfittable} · blocked ${c.blocked}`;
       progressPct.textContent = `${pct.toFixed(job.items.length > 200 ? 1 : 0)}%`;
       progressBar.style.width = `${pct}%`;
     }
@@ -2753,16 +2825,23 @@ function sameOwnedIdentity(current, state) {
     function refreshQueueUi() {
       const job = loadQueueJob();
       const active = job && !isTerminal(job);
+      const externalComplete = job?.state === 'EXTERNAL_COMPLETE_UNVERIFIED';
       const busy = running || preparing;
       const hasShareInput = !!detectSharePageTarget(globalThis.location?.href || '') || !!String(input.value || '').trim();
-      resumeBtn.disabled = busy || !active;
-      resumeBtn.hidden = running || !active;
+      resumeBtn.disabled = busy || !active || externalComplete;
+      resumeBtn.hidden = running || !active || externalComplete;
       pauseBtn.disabled = !running || !activeRunJob || !!activeRunJob.stopRequested;
       pauseBtn.hidden = !running;
       queueActions.hidden = resumeBtn.hidden && pauseBtn.hidden;
       startBtn.disabled = busy || !!active || !hasShareInput || !preferredHandleReady;
       selectModeBtn.disabled = busy || !!active || !hasShareInput;
       selectedStartBtn.disabled = busy || !manifest?.files?.length || selectedIndexes.size === 0 || !!active || !preferredHandleReady;
+      gopeedSelectedBtn.disabled = busy || !manifest?.files?.length || selectedIndexes.size !== 1 || !!active;
+      gopeedTestBtn.disabled = busy;
+      gopeedUrlInput.disabled = busy;
+      gopeedTokenInput.disabled = busy;
+      gopeedConnectionsSelect.disabled = busy;
+      pauseBtn.textContent = running && activeRunJob?.kind === 'gopeed-external' ? 'Gopeed監視を停止' : '現在ファイル後に停止';
       const c = queueCounts(job);
       retryBtn.disabled = busy || !job || !(c.skippedCapacity || c.unfittable) || !isTerminal(job);
       abandonBtn.disabled = busy || !active;
@@ -2847,7 +2926,19 @@ function sameOwnedIdentity(current, state) {
       refreshQueueUi();
       recordEvent('info', resume ? 'queue-resume' : 'queue-start', `${resume ? 'Queue再開' : 'Queue開始'}: ${job.jobId}`, {jobId:job.jobId, items:job.items?.length, folderName:job.folderName});
       try {
-        const result = await processQueue(job, queueRoot, t => write(`${t}\n\n${queueSummary(loadQueueJob())}`));
+        const result = job.kind === 'gopeed-external'
+          ? await processGopeedQueue(job, t => write(`${t}\n\n${queueSummary(loadQueueJob())}`))
+          : await processQueue(job, queueRoot, t => write(`${t}\n\n${queueSummary(loadQueueJob())}`));
+        if (job.kind === 'gopeed-external') {
+          if (result.state === 'EXTERNAL_COMPLETE_UNVERIFIED') {
+            const ext = buildExternalPerformanceSummary(result);
+            write(`Gopeed完了（外部完了・ローカル未検証）\n\n${queueSummary(result, {detail:true})}\n\nGopeed: ${ext?.averageDownloadMBps?.toFixed?.(2) || '0.00'} MiB/s / connections=${ext?.connections || '?'}\n\nuserscriptはGopeed保存先の実ファイルを独立検証できないためLOCAL_COMMITTEDにはしていません。Linkex一時コピーは自動削除していません。\n診断ログ保存後、必要に応じてLinkex側を手動確認してください。次のテスト前は「Queueを安全に破棄」でローカルQueue記録だけ整理できます。`, 'ok');
+            recordEvent('info', 'gopeed-done-unverified', `Gopeed外部完了: ${result.jobId}`, {externalPerformance:ext});
+          } else if (result.state === 'PAUSED_USER') {
+            write(`Gopeed監視を停止しました。\n\n${queueSummary(result)}\n\nGopeed task自体は停止していません。「Queueを再開」で同じtaskの監視を続けます。`);
+          }
+          return result;
+        }
         if (result.state === 'PAUSED_USER') {
           write(`安全停止しました（現在ファイルの処理境界）。\n\n${queueSummary(result)}\n\n「Queueを再開」で続行できます。`, '');
           recordEvent('info', 'queue-paused-user', `安全停止: ${result.jobId}`);
@@ -2865,6 +2956,40 @@ function sameOwnedIdentity(current, state) {
       } finally {
         activeRunJob = null;
         refreshQueueUi();
+      }
+    }
+
+    async function startGopeedSelected() {
+      if (!manifest || running || selectedIndexes.size !== 1) return;
+      const manifestIndex = Array.from(selectedIndexes)[0];
+      const selectedFile = manifest.files?.[manifestIndex];
+      if (!selectedFile) return;
+      const currentHref = String(globalThis.location?.href || '');
+      const currentPageTarget = detectSharePageTarget(currentHref);
+      if (isSharePageHost(currentHref) && (!currentPageTarget || currentPageTarget.shareToken !== manifest.shareToken)) {
+        write('共有ページが解析時点から変わっています。現在の共有をもう一度解析してください。', 'err');
+        return;
+      }
+      if (!resolveCredentials()) { write(credentialBootstrapMessage(), 'err'); return; }
+      running = true;
+      try {
+        const prefs = saveGopeedPrefsFromUi();
+        const info = await new GopeedClient(prefs).info();
+        await acquireLease();
+        const activeJob = loadQueueJob();
+        if (activeJob && !isTerminal(activeJob)) throw new LinkexError('別の未完了Queueがあります。Gopeed完了記録を含め「Queueを安全に破棄」等で整理してから開始してください。', {kind:'queue_conflict'});
+        const job = createGopeedQueueFromManifest(manifest, manifestIndex, prefs);
+        job.external.engineVersion = String(info?.version || '');
+        job.external.engineRuntime = info?.runtime || null;
+        saveQueueJob(job);
+        recordEvent('info', 'gopeed-queue-created', `Gopeed Queue作成: ${job.jobId}`, {jobId:job.jobId, file:selectedFile.remotePath, connections:prefs.connections, baseUrl:prefs.baseUrl, engineVersion:job.external.engineVersion});
+        write(`Gopeed Queue作成\n${selectedFile.remotePath}\nconnections=${prefs.connections}\n\nCOPY所有権確定後、signed URLをGopeedへ1回送信します。\nGopeed完了後もLinkex自動DELETEはしません。`, 'ok');
+        await runJob(job, null, false);
+      } catch (e) {
+        console.error('[Linkex Gopeed]', e);
+        write(`Gopeed Queue停止: ${e?.message || e}\n\n${queueSummary(loadQueueJob())}\n\nGopeed POSTやLinkex COPY/DELETEを盲目的に再送しません。`, 'err');
+      } finally {
+        running = false; releaseLease(); syncSharePageContext({initial:true}); refreshQueueUi();
       }
     }
 
@@ -2956,6 +3081,11 @@ function sameOwnedIdentity(current, state) {
       finally { preparing = false; refreshQueueUi(); }
     });
 
+    gopeedSelectedBtn.addEventListener('click', async () => {
+      if (running || preparing || !manifest || selectedIndexes.size !== 1) return;
+      await startGopeedSelected();
+    });
+
     selectedStartBtn.addEventListener('click', async () => {
       if (running || preparing || !manifest || !selectedIndexes.size) return;
       if (!resolveCredentials()) { write(credentialBootstrapMessage(), 'err'); syncSharePageContext({initial:true}); return; }
@@ -2994,9 +3124,12 @@ function sameOwnedIdentity(current, state) {
         // lease取得後に最新stateを読み直し、別tabの古いsnapshotを書き戻さない。
         const job = loadQueueJob();
         if (!job || isTerminal(job)) { refreshQueueUi(); return; }
-        const queueRoot = await getQueueRootHandle(job);
-        if (!queueRoot) throw new LinkexError('保存先DirectoryHandleが見つかりません。開始時と同じTampermonkeyスクリプトを使用してください。', {kind:'filesystem'});
-        await ensureHandlePermission(queueRoot);
+        let queueRoot = null;
+        if (job.kind !== 'gopeed-external') {
+          queueRoot = await getQueueRootHandle(job);
+          if (!queueRoot) throw new LinkexError('保存先DirectoryHandleが見つかりません。開始時と同じTampermonkeyスクリプトを使用してください。', {kind:'filesystem'});
+          await ensureHandlePermission(queueRoot);
+        }
         job.stopRequested = false;
         saveQueueJob(job);
         write(`Queue再開\n\n${queueSummary(job)}\n\n現状態を照合して続行します。`);
@@ -3013,7 +3146,11 @@ function sameOwnedIdentity(current, state) {
       job.stopRequested = true;
       saveQueueJob(job);
       recordEvent('info', 'pause-requested', `停止予約: ${job.jobId}`);
-      write(`停止予約を受け付けました。\n新しいCOPYを止め、進行中のDOWNLOAD/VERIFY/DELETEを安全に完了してから停止します。\n\n${queueSummary(job)}`);
+      if (job.kind === 'gopeed-external') {
+        write(`Gopeed監視停止を予約しました。\nGopeed task自体は停止せず、次回poll境界でuserscriptの監視だけ停止します。\n\n${queueSummary(job)}`);
+      } else {
+        write(`停止予約を受け付けました。\n新しいCOPYを止め、進行中のDOWNLOAD/VERIFY/DELETEを安全に完了してから停止します。\n\n${queueSummary(job)}`);
+      }
       refreshQueueUi();
     });
 
@@ -3105,6 +3242,7 @@ function sameOwnedIdentity(current, state) {
     if (existing) {
       if (existing.state === 'DONE') write(`前回Full Queueは完了済みです。\n\n${queueSummary(existing, {detail:true})}\n\n別共有は「すべてダウンロード」から開始できます。`, 'ok');
       else if (existing.state === 'DONE_WITH_SKIPS') write(`前回Full Queueはスキップありで走査完了しています。\n\n${queueSummary(existing, {detail:true})}\n\n容量条件を変えた場合は「容量スキップを再試行」が使えます。`, 'ok');
+      else if (existing.state === 'EXTERNAL_COMPLETE_UNVERIFIED') write(`前回Gopeed Queueは外部完了していますが、ローカル実ファイル未検証のためLinkex一時コピーを残しています。\n\n${queueSummary(existing, {detail:true})}\n\n診断ログ保存後、「Queueを安全に破棄」でローカル記録だけ整理できます。`, 'ok');
       else write(`未完了Full Queueを検出しました。\n\n${queueSummary(existing)}\n\n「Queueを再開」で状態照合から続けられます。`, '');
     }
     recordEvent('info', 'startup', `Linkex Downloader v${VERSION} 起動`);
