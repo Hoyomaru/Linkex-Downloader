@@ -8,6 +8,8 @@
 // @match        https://l2e.click/d/*
 // @match        https://www.l2e.click/d/*
 // @connect      prod.linksvc.xyz
+// @connect      localhost
+// @connect      127.0.0.1
 // CDNはpage-origin fetchで取得するため @connect 不要
 // @grant        GM_xmlhttpRequest
 // @grant        GM_getValue
@@ -21,6 +23,9 @@
 
   const VERSION = '1.2.1';
   const API_BASE = 'https://prod.linksvc.xyz';
+  const GOPEED_PREFS_KEY = 'linkexGopeedPrefsV1';
+  const GOPEED_DEFAULT_BASE_URL = 'http://127.0.0.1:9999';
+  const GOPEED_CONNECTION_CHOICES = [1, 2, 4, 8, 16];
   const SIGNED_HEADER_PREFIX = 'x-linkinflu-';
   const SIGNATURE_HEADER = 'x-linkinflu-sign';
   const TS_HEADER = 'x-linkinflu-ts';
@@ -300,6 +305,116 @@
         onabort: () => reject(new LinkexError('Request aborted', {kind:'network', url}))
       });
     });
+  }
+
+  function normalizeGopeedBaseUrl(input) {
+    const raw = String(input || GOPEED_DEFAULT_BASE_URL).trim();
+    let url;
+    try { url = new URL(raw); }
+    catch { throw new LinkexError('Gopeed API URLが正しくありません。', {kind:'gopeed_config'}); }
+    if (url.protocol !== 'http:') throw new LinkexError('Gopeed APIはローカルHTTPのみ許可します。', {kind:'gopeed_config'});
+    const host = url.hostname.toLowerCase();
+    if (host !== '127.0.0.1' && host !== 'localhost') throw new LinkexError('Gopeed APIは127.0.0.1 / localhostだけ許可します。', {kind:'gopeed_config'});
+    if (url.username || url.password || url.search || url.hash) throw new LinkexError('Gopeed API URLに認証情報・query・fragmentは入れられません。', {kind:'gopeed_config'});
+    const path = url.pathname.replace(/\/+$/, '');
+    if (path) throw new LinkexError('Gopeed API URLにはpathを付けないでください。例: http://127.0.0.1:9999', {kind:'gopeed_config'});
+    return `${url.protocol}//${url.host}`;
+  }
+
+  function loadGopeedPrefs() {
+    const raw = GM_getValue(GOPEED_PREFS_KEY, null);
+    const value = raw && typeof raw === 'object' ? raw : {};
+    let baseUrl = GOPEED_DEFAULT_BASE_URL;
+    try { baseUrl = normalizeGopeedBaseUrl(value.baseUrl || GOPEED_DEFAULT_BASE_URL); } catch {}
+    const requested = Number(value.connections || 16);
+    return {baseUrl, apiToken:String(value.apiToken || ''), connections:GOPEED_CONNECTION_CHOICES.includes(requested) ? requested : 16};
+  }
+
+  function saveGopeedPrefs(next) {
+    const current = loadGopeedPrefs();
+    const merged = {...current, ...(next || {})};
+    merged.baseUrl = normalizeGopeedBaseUrl(merged.baseUrl);
+    merged.apiToken = String(merged.apiToken || '');
+    merged.connections = Number(merged.connections || 16);
+    if (!GOPEED_CONNECTION_CHOICES.includes(merged.connections)) throw new LinkexError('Gopeed connectionsは1/2/4/8/16から選んでください。', {kind:'gopeed_config'});
+    GM_setValue(GOPEED_PREFS_KEY, merged);
+    return merged;
+  }
+
+  class GopeedClient {
+    constructor({baseUrl, apiToken = ''} = {}) {
+      this.baseUrl = normalizeGopeedBaseUrl(baseUrl || GOPEED_DEFAULT_BASE_URL);
+      this.apiToken = String(apiToken || '');
+    }
+    async request(method, path, {body = undefined, timeout = 15000} = {}) {
+      const headers = {'Accept':'application/json'};
+      let data;
+      if (body !== undefined) {
+        headers['Content-Type'] = 'application/json';
+        data = JSON.stringify(body);
+      }
+      if (this.apiToken) headers['X-Api-Token'] = this.apiToken;
+      const res = await gmRequest({method:String(method || 'GET').toUpperCase(), url:`${this.baseUrl}${path}`, headers, data, timeout});
+      let payload = res?.response;
+      if (typeof payload === 'string') {
+        try { payload = JSON.parse(payload); } catch {}
+      }
+      if (Number(res?.status || 0) < 200 || Number(res?.status || 0) >= 300) throw new LinkexError(`Gopeed HTTP ${res?.status || 0}`, {kind:'gopeed_http', status:res?.status || 0});
+      if (!payload || typeof payload !== 'object' || typeof payload.code !== 'number') throw new LinkexError('Gopeed API応答形式を確認できません。', {kind:'gopeed_protocol'});
+      if (payload.code !== 0) throw new LinkexError(payload.msg || `Gopeed API error ${payload.code}`, {kind:'gopeed_api', code:payload.code});
+      return payload.data;
+    }
+    info() { return this.request('GET', '/api/v1/info'); }
+    getTask(id) { return this.request('GET', `/api/v1/tasks/${encodeURIComponent(String(id || ''))}`); }
+    getTasks() { return this.request('GET', '/api/v1/tasks'); }
+    createTask(payload) { return this.request('POST', '/api/v1/tasks', {body:payload, timeout:30000}); }
+  }
+
+  function buildGopeedTaskPayload({url, name, operationId, connections}) {
+    const conn = Number(connections || 16);
+    if (!GOPEED_CONNECTION_CHOICES.includes(conn)) throw new LinkexError('Gopeed connectionsは1/2/4/8/16から選んでください。', {kind:'gopeed_config'});
+    return {
+      req:{url:String(url || ''), labels:{source:'linkex-downloader', linkexOperationId:String(operationId || '')}, skipVerifyCert:false},
+      opts:{name:sanitizeSegment(name || 'download.bin'), path:'', selectFiles:[], extra:{connections:conn}}
+    };
+  }
+
+  function compactGopeedTask(task) {
+    const progress = task?.progress || {};
+    return {
+      id:String(task?.id || ''), name:String(task?.name || ''), protocol:task?.protocol || null, status:String(task?.status || ''),
+      progress:{used:Number(progress.used || 0), speed:Number(progress.speed || 0), downloaded:Number(progress.downloaded || 0), uploaded:Number(progress.uploaded || 0)},
+      resourceBytes:Number(task?.meta?.res?.size || 0), rangeSupported:task?.meta?.res?.range === true,
+      createdAt:task?.createdAt || null, updatedAt:task?.updatedAt || null
+    };
+  }
+
+  async function reconcileGopeedSubmission(client, operationId) {
+    const tasks = await client.getTasks();
+    const matches = (Array.isArray(tasks) ? tasks : []).filter(task =>
+      String(task?.meta?.req?.labels?.source || '') === 'linkex-downloader' &&
+      String(task?.meta?.req?.labels?.linkexOperationId || '') === String(operationId || '')
+    );
+    if (matches.length > 1) throw new LinkexError('Gopeed送信結果に複数候補があり一意に確定できません。再送せず停止します。', {kind:'gopeed_submit_ambiguous'});
+    return matches[0] || null;
+  }
+
+  function buildExternalPerformanceSummary(job) {
+    if (job?.kind !== 'gopeed-external') return null;
+    const ext = job.items?.[0]?.tx?.external?.gopeed || {};
+    const downloadedBytes = Number(ext.downloadedBytes || ext.task?.progress?.downloaded || 0);
+    const startedAt = Number(ext.runningStartedAt || ext.submittedAt || 0);
+    const completedAt = Number(ext.completedAt || 0);
+    const durationMs = startedAt > 0 && completedAt >= startedAt ? completedAt - startedAt : 0;
+    const averageBytesPerSecond = durationMs > 0 ? downloadedBytes * 1000 / durationMs : 0;
+    return {
+      engine:'gopeed', engineVersion:job.external?.engineVersion || null, connections:Number(job.external?.connections || 0),
+      taskId:ext.taskId || null, status:ext.task?.status || ext.status || null, downloadedBytes,
+      submittedAt:Number(ext.submittedAt || 0) || null, runningStartedAt:Number(ext.runningStartedAt || 0) || null,
+      completedAt:completedAt || null, durationMs, averageBytesPerSecond,
+      averageDownloadMBps:bytesPerSecondToMBps(averageBytesPerSecond), peakBytesPerSecond:Number(ext.peakBytesPerSecond || 0),
+      localVerified:false, linkexAutoDelete:false
+    };
   }
 
   function parseRetryAfterMs(responseHeaders) {
@@ -1411,6 +1526,20 @@ function sameOwnedIdentity(current, state) {
     };
   }
 
+  function createGopeedQueueFromManifest(manifest, manifestIndex, prefs) {
+    const index = Number(manifestIndex);
+    if (!Number.isInteger(index) || !manifest?.files?.[index]) throw new LinkexError('Gopeedへ送る1ファイルを選択してください。', {kind:'selection'});
+    const job = createQueueFromManifest(manifest, new Set([index]));
+    const safePrefs = saveGopeedPrefs(prefs || loadGopeedPrefs());
+    job.kind = 'gopeed-external';
+    job.external = {
+      schemaVersion:1, engine:'gopeed', baseUrl:safePrefs.baseUrl, connections:safePrefs.connections,
+      noAutoDelete:true, localVerificationAvailable:false, createdAt:Date.now()
+    };
+    job.folderName = '(Gopeed既定保存先)';
+    return job;
+  }
+
   async function invokeDirectoryPicker(options = {}) {
     const pageWindow = getNativePageWindow();
     const picker = pageWindow?.showDirectoryPicker;
@@ -1434,15 +1563,16 @@ function sameOwnedIdentity(current, state) {
   }
 
   function queueCounts(job) {
-    const c = {done:0, pending:0, skippedCapacity:0, unfittable:0, blocked:0, active:0};
+    const c = {done:0, pending:0, skippedCapacity:0, unfittable:0, blocked:0, active:0, externalComplete:0};
     if (!job?.items) return c;
     for (const item of job.items) {
       const s = item.tx?.state === 'DONE' ? 'DONE' : item.state;
       if (s === 'DONE') c.done++;
+      else if (s === 'EXTERNAL_COMPLETE_UNVERIFIED') c.externalComplete++;
       else if (s === 'SKIPPED_CAPACITY' || s === 'BLOCKED_CAPACITY') c.skippedCapacity++;
       else if (s === 'UNFITTABLE') c.unfittable++;
       else if (['BLOCKED','ERROR'].includes(s)) c.blocked++;
-      else if (['COPYING','COPIED','DOWNLOADING','LOCAL_COMMITTED','DELETING'].includes(s)) c.active++;
+      else if (['COPYING','COPIED','DOWNLOADING','LOCAL_COMMITTED','DELETING','GOPEED_SUBMITTING','GOPEED_DOWNLOADING'].includes(s)) c.active++;
       else c.pending++;
     }
     return c;
@@ -1451,12 +1581,12 @@ function sameOwnedIdentity(current, state) {
   function queueSummary(job, {detail=false} = {}) {
     if (!job) return 'Queueなし';
     const c = queueCounts(job);
-    const processed = c.done + c.skippedCapacity + c.unfittable;
+    const processed = c.done + c.externalComplete + c.skippedCapacity + c.unfittable;
     const parts = [
       `job: ${job.jobId}`,
       `state: ${job.state}`,
       `folder: ${job.folderName}`,
-      `processed: ${processed}/${job.items.length}  DONE:${c.done}  capacity-skip:${c.skippedCapacity}  unfittable:${c.unfittable}  blocked:${c.blocked}`
+      `processed: ${processed}/${job.items.length}  DONE:${c.done}  external-unverified:${c.externalComplete}  capacity-skip:${c.skippedCapacity}  unfittable:${c.unfittable}  blocked:${c.blocked}`
     ];
     const current = job.items?.[job.currentIndex];
     if (current) parts.push(`current: [${job.currentIndex+1}/${job.items.length}] ${current.source?.remotePath || current.source?.name}  ${current.tx?.state || current.state}`);
@@ -1680,6 +1810,124 @@ function sameOwnedIdentity(current, state) {
       throw new LinkexError(`未対応のコピー状態: ${tx.state}`, {kind:'state'});
     }
     return item.tx;
+  }
+
+  async function processGopeedQueue(job, onStatus) {
+    if (!job || job.kind !== 'gopeed-external' || job.items?.length !== 1) throw new LinkexError('Gopeed external Queue形式が正しくありません。', {kind:'state'});
+    assertLease();
+    const creds = resolveCredentials();
+    if (!creds) throw new LinkexError(credentialBootstrapMessage(), {kind:'auth'});
+  
+    const prefs = loadGopeedPrefs();
+    const baseUrl = normalizeGopeedBaseUrl(job.external?.baseUrl || prefs.baseUrl);
+    const connections = Number(job.external?.connections || prefs.connections || 16);
+    const client = new GopeedClient({baseUrl, apiToken:prefs.apiToken});
+    const info = await client.info();
+    job.external = {...(job.external || {}), engine:'gopeed', baseUrl, connections, noAutoDelete:true, localVerificationAvailable:false,
+      engineVersion:String(info?.version || ''), engineRuntime:info?.runtime || null, lastConnectedAt:Date.now()};
+    job.state = 'RUNNING_EXTERNAL';
+    saveQueueJob(job);
+  
+    const item = job.items[0];
+    let tx = item.tx;
+    if (tx?.state === 'EXTERNAL_COMPLETE_UNVERIFIED') {
+      job.state = 'EXTERNAL_COMPLETE_UNVERIFIED';
+      saveQueueJob(job);
+      return job;
+    }
+  
+    const externalStates = new Set(['GOPEED_SUBMIT_INTENT','GOPEED_SUBMIT_UNCERTAIN','GOPEED_TASK_CREATED','GOPEED_DOWNLOADING','GOPEED_ERROR']);
+    if (!tx || !externalStates.has(tx.state)) tx = await ensureCopyOwned(new LinkexApi({token:creds.token}), job, 0, onStatus);
+    tx = item.tx;
+  
+    let gopeed = {...(tx.external?.gopeed || {})};
+    let taskId = String(gopeed.taskId || '');
+    const operationId = String(tx.operationId || '');
+    const linkexApi = new LinkexApi({token:creds.token});
+  
+    if (!taskId && tx.state === 'GOPEED_SUBMIT_UNCERTAIN') {
+      onStatus?.(`Gopeed送信結果を照合中…\n${item.source.remotePath}\nPOST再送: NO`);
+      const found = await reconcileGopeedSubmission(client, operationId);
+      if (!found) {
+        item.state = 'BLOCKED'; job.state = 'BLOCKED';
+        item.lastError = {message:'Gopeed POSTの結果を確定できません。自動再送しません。', kind:'gopeed_submit_uncertain', at:Date.now()};
+        saveQueueJob(job);
+        throw new LinkexError(item.lastError.message, {kind:'gopeed_submit_uncertain'});
+      }
+      taskId = String(found.id || '');
+      gopeed = {...gopeed, taskId, task:compactGopeedTask(found), reconciledAt:Date.now()};
+      tx = {...tx, state:'GOPEED_TASK_CREATED', external:{...(tx.external||{}), gopeed}};
+      persistItemTx(job, 0, tx, 'GOPEED_DOWNLOADING');
+    }
+  
+    if (!taskId) {
+      const owned = await refreshOwnedFileUrl(linkexApi, tx.confirmedDest?.id);
+      if (!sameOwnedIdentity(owned, tx)) throw new LinkexError('Gopeed送信前にdestId identityの変化を検出しました。停止します。', {kind:'ownership_lost'});
+      const payload = buildGopeedTaskPayload({url:owned.url, name:item.localSegments?.at(-1) || item.source?.name, operationId, connections});
+      gopeed = {...gopeed, connections, submitIntentAt:Date.now()};
+      tx = {...tx, state:'GOPEED_SUBMIT_INTENT', external:{...(tx.external||{}), gopeed}};
+      persistItemTx(job, 0, tx, 'GOPEED_SUBMITTING');
+      onStatus?.(`Gopeedへ送信 [connections=${connections}]\n${item.source.remotePath}\nLinkex自動DELETE: OFF`);
+  
+      try {
+        taskId = String(await client.createTask(payload) || '');
+        if (!taskId) throw new LinkexError('Gopeed task idが空です。', {kind:'gopeed_protocol'});
+      } catch (e) {
+        let found = null;
+        try { found = await reconcileGopeedSubmission(client, operationId); }
+        catch (reconcileError) {
+          tx = {...tx, state:'GOPEED_SUBMIT_UNCERTAIN', external:{...(tx.external||{}), gopeed:{...gopeed, submitError:e?.message || String(e)}}};
+          persistItemTx(job, 0, tx, 'BLOCKED'); job.state = 'BLOCKED'; saveQueueJob(job); throw reconcileError;
+        }
+        if (!found) {
+          tx = {...tx, state:'GOPEED_SUBMIT_UNCERTAIN', external:{...(tx.external||{}), gopeed:{...gopeed, submitError:e?.message || String(e)}}};
+          persistItemTx(job, 0, tx, 'BLOCKED'); job.state = 'BLOCKED'; saveQueueJob(job);
+          throw new LinkexError('Gopeed task作成結果が不明です。安全のためPOSTを再送せず停止します。', {kind:'gopeed_submit_uncertain'});
+        }
+        taskId = String(found.id || '');
+        gopeed = {...gopeed, task:compactGopeedTask(found), reconciledAt:Date.now()};
+      }
+  
+      gopeed = {...gopeed, taskId, submittedAt:Date.now(), status:'submitted'};
+      tx = {...tx, state:'GOPEED_TASK_CREATED', external:{...(tx.external||{}), gopeed}};
+      persistItemTx(job, 0, tx, 'GOPEED_DOWNLOADING');
+    }
+  
+    let peakBytesPerSecond = Number(gopeed.peakBytesPerSecond || 0);
+    while (true) {
+      assertLease();
+      if (job.stopRequested) {
+        job.stopRequested = false; job.state = 'PAUSED_USER';
+        tx = {...item.tx, external:{...(item.tx.external||{}), gopeed:{...(item.tx.external?.gopeed||{}), monitoringPausedAt:Date.now()}}};
+        persistItemTx(job, 0, tx, item.state); saveQueueJob(job); return job;
+      }
+  
+      const task = await client.getTask(taskId);
+      const compact = compactGopeedTask(task);
+      peakBytesPerSecond = Math.max(peakBytesPerSecond, Number(compact.progress.speed || 0));
+      const existing = item.tx.external?.gopeed || {};
+      const runningStartedAt = existing.runningStartedAt || (compact.status === 'running' ? Date.now() : null);
+      gopeed = {...existing, taskId, connections, task:compact, status:compact.status, runningStartedAt, peakBytesPerSecond, lastPolledAt:Date.now()};
+      tx = {...item.tx, state:'GOPEED_DOWNLOADING', external:{...(item.tx.external||{}), gopeed}};
+      persistItemTx(job, 0, tx, 'GOPEED_DOWNLOADING');
+      onStatus?.(`Gopeed ${compact.status} [connections=${connections}]\n${item.source.remotePath}\n${formatBytes(compact.progress.downloaded)} · ${formatTransferRate(compact.progress.speed)}\nLinkex自動DELETE: OFF`);
+  
+      if (compact.status === 'done') {
+        const completedAt = Date.now();
+        gopeed = {...gopeed, task:compact, status:'done', completedAt, downloadedBytes:Number(compact.progress.downloaded || 0), localVerified:false, linkexAutoDelete:false};
+        tx = {...tx, state:'EXTERNAL_COMPLETE_UNVERIFIED', external:{...(tx.external||{}), gopeed}};
+        persistItemTx(job, 0, tx, 'EXTERNAL_COMPLETE_UNVERIFIED');
+        job.state = 'EXTERNAL_COMPLETE_UNVERIFIED'; job.completedAt = completedAt; saveQueueJob(job); return job;
+      }
+      if (compact.status === 'error') {
+        tx = {...tx, state:'GOPEED_ERROR', external:{...(tx.external||{}), gopeed}};
+        persistItemTx(job, 0, tx, 'BLOCKED');
+        item.lastError = {message:'Gopeed taskがerrorになりました。signed URLの自動差し替え/再送はしません。', kind:'gopeed_task_error', at:Date.now()};
+        job.state = 'BLOCKED'; job.lastError = {...item.lastError, index:0}; saveQueueJob(job);
+        throw new LinkexError(item.lastError.message, {kind:'gopeed_task_error'});
+      }
+      await sleep(1000);
+    }
   }
 
   async function ensureDownloaded(api, job, index, queueRoot, onStatus) {
@@ -2119,6 +2367,7 @@ function sameOwnedIdentity(current, state) {
       generatedAt: new Date().toISOString(),
       signatureSelfTest: runSignatureSelfTest().map(x => ({name:x.name, ok:x.ok, actual:x.actual, expected:x.expected})),
       performance: redactForExport(buildPerformanceSummary(queue)),
+      externalPerformance: redactForExport(buildExternalPerformanceSummary(queue)),
       queue: redactForExport(queue),
       events: redactForExport(loadEventLog())
     };
