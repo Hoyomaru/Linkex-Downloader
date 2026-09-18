@@ -94,3 +94,14 @@ test('semaphore blocks work beyond the configured permit count', async () => {
   assert.equal(acquiredThird, true);
   r2();
 });
+
+
+test('pause or fatal observed during capacity recheck prevents a new COPY', () => {
+  const reserveAt = SOURCE.indexOf('reservation = await capacity.reserve(item.source?.size || 0);');
+  const guardAt = SOURCE.indexOf('if (fatalError || job.stopRequested) {', reserveAt);
+  const copyAt = SOURCE.indexOf('await ensureCopyOwned(api, job, i, onStatus, {capacityReserved:!!reservation});', reserveAt);
+  assert.ok(reserveAt > 0 && guardAt > reserveAt && copyAt > guardAt);
+  const block = SOURCE.slice(guardAt, copyAt);
+  assert.match(block, /if \(reservation\) capacity\.release\(reservation\);/);
+  assert.match(block, /releaseInFlight\(\);/);
+});

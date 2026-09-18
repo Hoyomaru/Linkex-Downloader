@@ -722,6 +722,8 @@
     let transferredBytes = 0;
     let measuredTransferMs = 0;
     let peakBytesPerSecond = 0;
+    let firstTransferStartedAt = null;
+    let lastTransferEndedAt = null;
 
     for (const item of job?.items || []) {
       const tx = item?.tx;
@@ -738,12 +740,44 @@
       const bytes = Number(transfer.transferredBytes || 0);
       const duration = Number(transfer.durationMs || 0);
       const peak = Number(transfer.peakBytesPerSecond || 0);
+      const startedAt = Number(transfer.transferStartedAt || 0);
+      const endedAt = Number(transfer.transferEndedAt || 0);
       if (Number.isFinite(bytes) && bytes >= 0) transferredBytes += bytes;
       if (Number.isFinite(duration) && duration > 0) measuredTransferMs += duration;
       if (Number.isFinite(peak) && peak > peakBytesPerSecond) peakBytesPerSecond = peak;
+      if (startedAt > 0 && endedAt >= startedAt) {
+        firstTransferStartedAt = firstTransferStartedAt == null ? startedAt : Math.min(firstTransferStartedAt, startedAt);
+        lastTransferEndedAt = lastTransferEndedAt == null ? endedAt : Math.max(lastTransferEndedAt, endedAt);
+      }
     }
 
+    // Legacy/single-worker comparable metric: bytes divided by the sum of each
+    // transfer's own elapsed time. With parallel workers this approximates the
+    // weighted per-connection rate, not aggregate pool throughput.
     const aggregateBytesPerSecond = measuredTransferMs > 0 ? transferredBytes * 1000 / measuredTransferMs : 0;
+
+    // Pipeline-aware wall metrics. transferWindowMs includes overlap (and any
+    // gaps) from the first network byte window to the last completed transfer,
+    // so poolDownloadMBps is the aggregate throughput that matters for DL=2.
+    const transferWindowMs = firstTransferStartedAt != null && lastTransferEndedAt != null
+      ? Math.max(0, lastTransferEndedAt - firstTransferStartedAt)
+      : 0;
+    const poolBytesPerSecond = transferWindowMs > 0 ? transferredBytes * 1000 / transferWindowMs : 0;
+
+    const pipelineStartedAt = Number(job?.pipeline?.startedAt || 0);
+    const pipelineCompletedAt = Number(job?.pipeline?.completedAt || 0);
+    const pipelineWallMs = pipelineStartedAt > 0 && pipelineCompletedAt >= pipelineStartedAt
+      ? pipelineCompletedAt - pipelineStartedAt
+      : 0;
+    const pipelineEffectiveBytesPerSecond = pipelineWallMs > 0 ? transferredBytes * 1000 / pipelineWallMs : 0;
+
+    const queueCreatedAt = Number(job?.createdAt || 0);
+    const queueCompletedAt = Number(job?.completedAt || 0);
+    const queueWallMs = queueCreatedAt > 0 && queueCompletedAt >= queueCreatedAt
+      ? queueCompletedAt - queueCreatedAt
+      : 0;
+    const queueEffectiveBytesPerSecond = queueWallMs > 0 ? transferredBytes * 1000 / queueWallMs : 0;
+
     return {
       schemaVersion:PERFORMANCE_SCHEMA_VERSION,
       completedTransactions,
@@ -753,7 +787,18 @@
       measuredTransferMs,
       aggregateBytesPerSecond,
       aggregateDownloadMBps:bytesPerSecondToMBps(aggregateBytesPerSecond),
-      peakBytesPerSecond
+      peakBytesPerSecond,
+      firstTransferStartedAt,
+      lastTransferEndedAt,
+      transferWindowMs,
+      poolBytesPerSecond,
+      poolDownloadMBps:bytesPerSecondToMBps(poolBytesPerSecond),
+      pipelineWallMs,
+      pipelineEffectiveBytesPerSecond,
+      pipelineEffectiveMBps:bytesPerSecondToMBps(pipelineEffectiveBytesPerSecond),
+      queueWallMs,
+      queueEffectiveBytesPerSecond,
+      queueEffectiveMBps:bytesPerSecondToMBps(queueEffectiveBytesPerSecond)
     };
   }
 
@@ -1893,6 +1938,16 @@ function sameOwnedIdentity(current, state) {
             }
           }
           if (!releaseInFlight) break;
+        }
+
+        // reserve() performs a fresh usage request. A pause or fatal worker
+        // failure may arrive while that request is in flight. Since COPY has
+        // not started yet, release the reservation and do not begin new work.
+        if (fatalError || job.stopRequested) {
+          if (reservation) capacity.release(reservation);
+          releaseInFlight();
+          if (job.stopRequested) pauseRequested = true;
+          break;
         }
 
         await ensureCopyOwned(api, job, i, onStatus, {capacityReserved:!!reservation});

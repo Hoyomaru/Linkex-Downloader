@@ -177,3 +177,15 @@ Using the same 26-file / 6.37 GB workload, the corrected implementation labels p
 - Lease ownership is rechecked during long downloads at a low frequency, so lease loss cannot silently run through to DELETE.
 
 The destructive gate is unchanged: DELETE still requires `LOCAL_COMMITTED`, the ownership-confirmed `destId`, identity re-check, and the one-ID `select_all:false` request.
+
+
+### Pipeline benchmark metrics
+
+The support bundle now keeps the original `aggregateDownloadMBps` for single-worker comparability and adds concurrency-aware metrics:
+
+- `poolDownloadMBps`: all transferred bytes divided by the wall-clock transfer window from the first transfer start to the last transfer end. This is the primary DOWNLOAD=2 aggregate-throughput metric.
+- `pipelineEffectiveMBps`: transferred bytes divided by the active pipeline wall time.
+- `queueEffectiveMBps`: transferred bytes divided by Queue creation-to-completion wall time.
+- `transferWindowMs`, `pipelineWallMs`, and `queueWallMs` are included so the rate calculations remain auditable.
+
+A stop/fatal check is also repeated after the asynchronous capacity recheck and immediately before COPY. If stop/fatal arrives during that network request, the unused reservation is released and no new COPY starts.
