@@ -308,8 +308,10 @@ test('queue start and resume acquire the lease before shared Queue mutations', (
 
 test('runJob itself no longer acquires or releases the lease', () => {
   const runAt = SOURCE.indexOf('async function runJob(job, queueRoot, resume=false)');
-  const startAt = SOURCE.indexOf('async function startManifestQueue(', runAt);
-  const block = SOURCE.slice(runAt, startAt);
+  const nextAt = SOURCE.indexOf('async function startGopeedSelected(', runAt);
+  const fallbackAt = SOURCE.indexOf('async function startManifestQueue(', runAt);
+  const endAt = nextAt > runAt ? nextAt : fallbackAt;
+  const block = SOURCE.slice(runAt, endAt);
   assert.doesNotMatch(block, /await acquireLease\(\)/);
   assert.doesNotMatch(block, /releaseLease\(\)/);
   assert.match(block, /assertLease\(\)/);
@@ -610,10 +612,12 @@ test('selection UI stays collapsed after analysis until explicit file-selection 
   assert.match(block, /selectionExpanded = true;/);
 });
 
-test('Queue resume remains bound to its Queue-specific directory handle, never the preferred new-Queue destination', () => {
+test('browser Queue resume remains bound to its Queue-specific directory handle while Gopeed resume needs none', () => {
   const resumeAt = SOURCE.indexOf("resumeBtn.addEventListener('click'");
   const pauseAt = SOURCE.indexOf("pauseBtn.addEventListener('click'", resumeAt);
   const block = SOURCE.slice(resumeAt, pauseAt);
-  assert.match(block, /const queueRoot = await getQueueRootHandle\(job\);/);
+  assert.match(block, /let queueRoot = null;/);
+  assert.match(block, /if \(job\.kind !== 'gopeed-external'\)/);
+  assert.match(block, /queueRoot = await getQueueRootHandle\(job\);/);
   assert.doesNotMatch(block, /PREFERRED_DIR_HANDLE_KEY|preferredBaseDirHandle/);
 });
