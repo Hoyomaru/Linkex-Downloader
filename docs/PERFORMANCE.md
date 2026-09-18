@@ -205,3 +205,14 @@ DOWNLOAD=2 reduces Queue wall time by 13.57% versus DOWNLOAD=1 and raises Queue 
 The key result is not higher per-connection speed. With DOWNLOAD=1, actual network transfer time sums to 97.023 s but the first-to-last transfer window is 114.061 s, leaving about 17.038 s of no active network transfer between files. With DOWNLOAD=2, the pool transfer window falls to 97.974 s; overlapping setup and adjacent transfers fills most of those holes while keeping aggregate pool throughput around the same network ceiling.
 
 Decision for the browser candidate: keep COPY=1 / DOWNLOAD=2 / DELETE=1. There is no current evidence that increasing DOWNLOAD beyond 2 would raise the observed pool throughput enough to justify extra contention or safety complexity. The DL=1 branch remains an A/B reference only.
+
+
+## Gopeed external-engine experiment
+
+The browser candidate is COPY=1 / DOWNLOAD=2 / DELETE=1 with the 4 MiB buffered writer. Further browser worker-count tuning is paused while the Gopeed external-engine path is measured.
+
+`exp/v1.3-gopeed` targets stable Gopeed v1.9.3 and initially supports one selected Linkex file per external Queue. The REST endpoint is restricted to loopback HTTP (`127.0.0.1` or `localhost`), defaults to `http://127.0.0.1:9999`, and task creation uses the v1.9.3 field `opts`. Per-task HTTP connections are selectable at 1/2/4/8/16.
+
+Safety boundary: Linkex COPY/ownership proof is unchanged; the signed URL is submitted only after destId identity re-check; uncertain Gopeed POST is reconciled by an operation-ID label and is never blindly retried; Gopeed `done` becomes `EXTERNAL_COMPLETE_UNVERIFIED`, never `LOCAL_COMMITTED`; no automatic Linkex DELETE occurs; URL-expiry/task errors stop safely; and the userscript never calls Gopeed task DELETE. A future local helper is required before external completion can authorize Linkex deletion.
+
+Benchmark: start with the largest representative file at 16 connections, then compare 1/2/4/8/16 if the bridge is stable.
