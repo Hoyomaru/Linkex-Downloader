@@ -563,8 +563,9 @@
   }
 
   function saveProbeState(state) {
-    const key = probeKeyFor(state);
-    if (!key) throw new LinkexError('operation-scoped download stateにoperationIdがありません。', {kind:'state'});
+    // Queue transactions always have operationId and therefore use isolated keys.
+    // Keep the old single-operation key only for legacy/probe callers that predate operationId.
+    const key = probeKeyFor(state) || PROBE_KEY;
     GM_setValue(key, state);
     return state;
   }
@@ -1909,15 +1910,19 @@ function sameOwnedIdentity(current, state) {
       }
 
       // A different worker may have failed while this serial COPY was reconciling.
-      // Do not start new DOWNLOAD/DELETE work after a fatal stop; the proven destId
-      // remains persisted for a safe resume.
-      if (fatalError || job.stopRequested) {
+      // On fatal failure, keep this proven destId persisted for a safe resume.
+      if (fatalError) {
         releaseInFlight();
-        if (job.stopRequested) pauseRequested = true;
         break;
       }
 
+      // If the user requested pause while COPY was already running, finish this
+      // now-owned transaction through VERIFY/DELETE, then stop starting new COPYs.
       launchOwnedTransaction(i, releaseInFlight, reservation);
+      if (job.stopRequested) {
+        pauseRequested = true;
+        break;
+      }
     }
 
     await Promise.all(Array.from(tasks));

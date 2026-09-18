@@ -511,7 +511,11 @@ test('share-page mode keeps runtime transaction core and invalidates stale manif
   assert.match(SOURCE, /if \(onShareHost && !running && !preparing && manifest && manifest\.shareToken !== nextToken\)/);
   assert.match(SOURCE, /Queue実行中に共有ページURLが変わりました。実行中Queueは作成時のshareTokenを維持します。/);
   assert.match(SOURCE, /const creds = resolveCredentials\(\);/);
-  assert.match(SOURCE, /await ensureCopyOwned\(api, job, i, onStatus\);[\s\S]*await ensureDownloaded\(api, job, i, queueRoot, onStatus\);[\s\S]*await ensureDeleted\(api, job, i, onStatus\);/);
+  assert.match(SOURCE, /await ensureCopyOwned\(api, job, i, onStatus, \{capacityReserved:!!reservation\}\);/);
+  assert.match(SOURCE, /const downloadSlots = createAsyncSemaphore\(PIPELINE_DOWNLOAD_WORKERS\);/);
+  assert.match(SOURCE, /await ensureDownloaded\(api, job, index, queueRoot, onStatus\);/);
+  assert.match(SOURCE, /const deleteSlots = createAsyncSemaphore\(PIPELINE_DELETE_WORKERS\);/);
+  assert.match(SOURCE, /await ensureDeleted\(api, job, index, onStatus\);/);
 });
 
 

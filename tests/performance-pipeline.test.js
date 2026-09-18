@@ -55,7 +55,7 @@ test('pipeline configuration is COPY=1 / DOWNLOAD=2 / DELETE=1 and bounded', () 
 
 test('download probe state is operation-scoped rather than a shared worker slot', () => {
   assert.match(SOURCE, /const PROBE_KEY_PREFIX = 'linkexCopyProbeStateV2:';/);
-  assert.equal((SOURCE.match(/loadProbeState\(\)/g) || []).length, 1, 'only the function definition may use empty parentheses');
+  assert.equal((SOURCE.match(/loadProbeState\(\)/g) || []).length, 1, 'only the legacy cleanup call may use empty parentheses');
   const api = loadRuntime();
   api.saveProbeState({operationId:'op-a', state:'DOWNLOADING', download:{downloadedBytes:11}});
   api.saveProbeState({operationId:'op-b', state:'DOWNLOADING', download:{downloadedBytes:22}});
@@ -77,7 +77,7 @@ test('delete safety gate remains LOCAL_COMMITTED and one confirmed destId only',
   assert.match(SOURCE, /state\.state !== 'LOCAL_COMMITTED'/);
   assert.match(SOURCE, /collection:\{select_all:false, file_ids:\[id\]\}/);
   assert.match(SOURCE, /if \(String\(state\.download\?\.destId \|\| ''\) !== destId\)/);
-  assert.match(SOURCE, /if \(!state\.download\?\.verifiedAt\)/);
+  assert.match(SOURCE, /if \(!Number\(state\.download\?\.verifiedAt \|\| 0\)\)/);
 });
 
 test('semaphore blocks work beyond the configured permit count', async () => {
