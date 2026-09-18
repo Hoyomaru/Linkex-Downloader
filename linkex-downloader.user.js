@@ -516,7 +516,8 @@
     return `${(n / 1024 ** i).toFixed(i >= 3 ? 2 : 1)} ${units[i]}`;
   };
 
-  const PROBE_KEY = 'linkexCopyProbeStateV1';
+  const PROBE_KEY = 'linkexCopyProbeStateV1'; // legacy single-operation key; read-only migration fallback
+  const PROBE_KEY_PREFIX = 'linkexCopyProbeStateV2:';
   const LAST_URL_KEY = 'lastShareUrl';
   const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 
@@ -554,14 +555,41 @@
     return true;
   }
 
+  function probeKeyFor(operationOrState) {
+    const operationId = typeof operationOrState === 'string'
+      ? operationOrState
+      : String(operationOrState?.operationId || '');
+    return operationId ? `${PROBE_KEY_PREFIX}${operationId}` : null;
+  }
+
   function saveProbeState(state) {
-    GM_setValue(PROBE_KEY, state);
+    const key = probeKeyFor(state);
+    if (!key) throw new LinkexError('operation-scoped download stateにoperationIdがありません。', {kind:'state'});
+    GM_setValue(key, state);
     return state;
   }
 
-  function loadProbeState() {
-    const value = GM_getValue(PROBE_KEY, null);
-    return value && typeof value === 'object' ? value : null;
+  function loadProbeState(operationOrState = null) {
+    const key = probeKeyFor(operationOrState);
+    if (key) {
+      const scoped = GM_getValue(key, null);
+      if (scoped && typeof scoped === 'object') return scoped;
+      // v1.2.x / early v1.3 queues may still have only the legacy global probe.
+      const legacy = GM_getValue(PROBE_KEY, null);
+      const operationId = typeof operationOrState === 'string' ? operationOrState : operationOrState?.operationId;
+      if (legacy && typeof legacy === 'object' && String(legacy.operationId || '') === String(operationId || '')) {
+        GM_setValue(key, legacy);
+        return legacy;
+      }
+      return null;
+    }
+    const legacy = GM_getValue(PROBE_KEY, null);
+    return legacy && typeof legacy === 'object' ? legacy : null;
+  }
+
+  function clearProbeState(operationOrState) {
+    const key = probeKeyFor(operationOrState);
+    if (key) GM_setValue(key, null);
   }
 
   async function waitTaskIfPresent(api, copyResult, onStatus) {
@@ -844,7 +872,7 @@
     throw new LinkexError(`未対応のダウンロード検証方式です: ${verificationMethod}`, {kind:'verify'});
   }
 
-  const current = loadProbeState() || state;
+  const current = loadProbeState(state) || state;
   return saveProbeState({...current, state:'LOCAL_COMMITTED', download:{...(current.download||{}), destId, downloadedBytes:downloaded, expectedCdnBytes:expected, sizeVerified, verificationMethod, streamComplete, sourceMetaSize:Number(state.source?.size || 0), verifiedAt:Date.now(), localName}});
 }
 
@@ -949,6 +977,7 @@ async function downloadOwnedFile({api, state, handle, onProgress = () => {}, onP
       let bufferedBytes = 0;
       let nextCheckpoint = written + CHECKPOINT_BYTES;
       let lastCheckpointAt = transferStartedAt;
+      let lastLeaseCheckAt = transferStartedAt;
       let lastUi = 0;
 
       async function flushBufferedWrite() {
@@ -971,6 +1000,10 @@ async function downloadOwnedFile({api, state, handle, onProgress = () => {}, onP
           received += value.byteLength;
 
           let now = Date.now();
+          if (now - lastLeaseCheckAt >= 1000) {
+            assertLease();
+            lastLeaseCheckAt = now;
+          }
           if (bufferedBytes >= WRITE_BUFFER_BYTES || now - lastCheckpointAt >= CHECKPOINT_INTERVAL_MS) {
             await flushBufferedWrite();
             now = Date.now();
@@ -991,7 +1024,7 @@ async function downloadOwnedFile({api, state, handle, onProgress = () => {}, onP
               await flushBufferedWrite();
               now = Date.now();
             }
-            const current = loadProbeState() || state;
+            const current = loadProbeState(state) || state;
             saveProbeState({...current, state:'DOWNLOADING', download:{...(current.download||{}), destId, downloadedBytes:written, expectedCdnBytes:expectedTotal, telemetry:{transferStartedAt, transferStartBytes, transferredBytes, elapsedMs, averageBytesPerSecond, averageMBps:bytesPerSecondToMBps(averageBytesPerSecond), instantBytesPerSecond, peakBytesPerSecond, resumed}, updatedAt:now}});
             nextCheckpoint = written + CHECKPOINT_BYTES;
             lastCheckpointAt = now;
@@ -1007,7 +1040,7 @@ async function downloadOwnedFile({api, state, handle, onProgress = () => {}, onP
         try { await reader.cancel(); } catch {}
         try { await writable.close(); } catch {}
         const partial = await handle.getFile();
-        const current = loadProbeState() || state;
+        const current = loadProbeState(state) || state;
         const pausedAt = Date.now();
         const transferredBytes = Math.max(0, partial.size - transferStartBytes);
         const elapsedMs = Math.max(1, pausedAt - transferStartedAt);
@@ -1028,18 +1061,18 @@ async function downloadOwnedFile({api, state, handle, onProgress = () => {}, onP
     const actual = finalFile.size;
     // writableへ渡したbyte数と最終ファイルサイズは、Content-Length有無に関係なく一致必須。
     if (actual !== written) {
-      const current = loadProbeState() || state;
+      const current = loadProbeState(state) || state;
       saveProbeState({...current, state:'VERIFY_FAILED', download:{...(current.download||{}), destId, downloadedBytes:actual, expectedCdnBytes:expectedTotal, sizeVerified:false, verificationMethod, streamComplete:false, updatedAt:Date.now()}});
       throw new LinkexError(`ローカル書き込み検証失敗: file=${actual} / written=${written}`, {kind:'verify', actual, written});
     }
     if (hasKnownLength && actual !== expectedTotal) {
-      const current = loadProbeState() || state;
+      const current = loadProbeState(state) || state;
       saveProbeState({...current, state:'VERIFY_FAILED', download:{...(current.download||{}), destId, downloadedBytes:actual, expectedCdnBytes:expectedTotal, sizeVerified:false, verificationMethod, streamComplete:false, updatedAt:Date.now()}});
       throw new LinkexError(`サイズ検証失敗: local=${actual} / CDN=${expectedTotal}`, {kind:'verify', actual, expectedTotal});
     }
 
     const telemetry = {transferStartedAt, transferEndedAt, transferStartBytes, transferredBytes, durationMs:transferDurationMs, averageBytesPerSecond, averageMBps:bytesPerSecondToMBps(averageBytesPerSecond), instantBytesPerSecond, peakBytesPerSecond, resumed};
-    const currentBeforeCommit = loadProbeState() || state;
+    const currentBeforeCommit = loadProbeState(state) || state;
     saveProbeState({...currentBeforeCommit, download:{...(currentBeforeCommit.download||{}), telemetry}});
     const done = commitVerifiedDownload(state, {destId, downloadedBytes:actual, expectedCdnBytes:expectedTotal, localName:finalFile.name, verificationMethod});
     onPhase({phase:'verify-end', at:Date.now()});
@@ -1116,6 +1149,83 @@ function sameOwnedIdentity(current, state) {
   const TAB_ID = `tab-${(globalThis.crypto?.randomUUID?.() || `${Date.now()}-${Math.random().toString(16).slice(2)}`)}`;
   let leaseTimer = null;
   let leaseLost = false;
+  const PIPELINE_DOWNLOAD_WORKERS = 2;
+  const PIPELINE_DELETE_WORKERS = 1;
+  const PIPELINE_MAX_IN_FLIGHT = 3;
+  let queueCommitTail = Promise.resolve();
+
+  function commitQueueJob(job, mutate = null) {
+    const run = queueCommitTail.then(() => {
+      if (mutate) mutate();
+      saveQueueJob(job);
+      return job;
+    });
+    queueCommitTail = run.catch(() => {});
+    return run;
+  }
+
+  function createAsyncSemaphore(limit) {
+    const max = Math.max(1, Number(limit || 1));
+    let available = max;
+    const waiters = [];
+    const makeRelease = () => {
+      let released = false;
+      return () => {
+        if (released) return;
+        released = true;
+        const next = waiters.shift();
+        if (next) next(makeRelease());
+        else available = Math.min(max, available + 1);
+      };
+    };
+    return {
+      acquire() {
+        if (available > 0) {
+          available -= 1;
+          return Promise.resolve(makeRelease());
+        }
+        return new Promise(resolve => waiters.push(resolve));
+      }
+    };
+  }
+
+  async function createCapacityReservation(api) {
+    const initial = await api.getUsage();
+    const initialTotal = Number(initial.total_space || 0);
+    const initialUsed = Number(initial.used_space || 0);
+    let availableBytes = initialTotal > 0 ? Math.max(0, initialTotal - initialUsed) : Number.POSITIVE_INFINITY;
+
+    return {
+      async reserve(bytes) {
+        const needed = Math.max(0, Number(bytes || 0));
+        const usage = await api.getUsage();
+        const total = Number(usage.total_space || initialTotal || 0);
+        const used = Number(usage.used_space || 0);
+        if (total > 0 && needed > total) {
+          throw new LinkexError(`単一ファイルがLinkex総容量を超えます: ${formatBytes(needed)} > ${formatBytes(total)}`, {kind:'unfittable'});
+        }
+        const reportedFree = total > 0 ? Math.max(0, total - used) : availableBytes;
+        const effectiveFree = Math.min(availableBytes, reportedFree);
+        if (needed > effectiveFree) {
+          throw new LinkexError(`Linkex空き容量不足: 必要 ${formatBytes(needed)} / 予約可能 ${formatBytes(effectiveFree)}`, {kind:'capacity'});
+        }
+        availableBytes -= needed;
+        return {bytes:needed, released:false};
+      },
+      release(reservationOrBytes) {
+        const token = reservationOrBytes && typeof reservationOrBytes === 'object' ? reservationOrBytes : null;
+        if (token?.released) return;
+        const bytes = Math.max(0, Number(token ? token.bytes : reservationOrBytes || 0));
+        if (token) token.released = true;
+        availableBytes = initialTotal > 0
+          ? Math.min(initialTotal, availableBytes + bytes)
+          : availableBytes + bytes;
+      },
+      snapshot() {
+        return {totalBytes:initialTotal, availableBytes};
+      }
+    };
+  }
 
   function loadQueueJob() {
     const value = GM_getValue(QUEUE_KEY, null);
@@ -1328,8 +1438,9 @@ function sameOwnedIdentity(current, state) {
   }
 
   function syncTxFromProbe(job, index) {
-    const tx = loadProbeState();
-    if (tx && tx.operationId === job.items[index]?.tx?.operationId) {
+    const current = job.items[index]?.tx;
+    const tx = loadProbeState(current);
+    if (tx && tx.operationId === current?.operationId) {
       job.items[index].tx = tx;
       saveQueueJob(job);
     }
@@ -1384,7 +1495,7 @@ function sameOwnedIdentity(current, state) {
     item.tx = compactDoneTx(item.tx);
     item.state = 'DONE';
     item.lastError = null;
-    const probe = loadProbeState();
+    const probe = loadProbeState(item.tx);
     if (probe?.operationId === item.tx.operationId) saveProbeState(item.tx);
     return true;
   }
@@ -1421,28 +1532,30 @@ function sameOwnedIdentity(current, state) {
     leaseLost = false;
   }
 
-  async function ensureCopyOwned(api, job, index, onStatus) {
+  async function ensureCopyOwned(api, job, index, onStatus, {capacityReserved = false} = {}) {
     assertLease();
     const item = job.items[index];
     let tx = item.tx;
 
     if (!tx) {
-      const usage = await api.getUsage();
-      const total = Number(usage.total_space || 0);
-      const used = Number(usage.used_space || 0);
-      const free = total - used;
-      const needed = Number(item.source?.size || 0);
-      if (total > 0 && needed > total) {
-        item.state = 'UNFITTABLE';
-        item.lastError = {message:`単一ファイルがLinkex総容量を超えます: ${formatBytes(needed)} > ${formatBytes(total)}`, kind:'unfittable', at:Date.now()};
-        saveQueueJob(job);
-        throw new LinkexError(item.lastError.message, {kind:'unfittable'});
-      }
-      if (needed > free) {
-        item.state = 'SKIPPED_CAPACITY';
-        item.lastError = {message:`Linkex空き容量不足: 必要 ${formatBytes(needed)} / 空き ${formatBytes(free)}`, kind:'capacity', at:Date.now()};
-        saveQueueJob(job);
-        throw new LinkexError(item.lastError.message, {kind:'capacity'});
+      if (!capacityReserved) {
+        const usage = await api.getUsage();
+        const total = Number(usage.total_space || 0);
+        const used = Number(usage.used_space || 0);
+        const free = total - used;
+        const needed = Number(item.source?.size || 0);
+        if (total > 0 && needed > total) {
+          item.state = 'UNFITTABLE';
+          item.lastError = {message:`単一ファイルがLinkex総容量を超えます: ${formatBytes(needed)} > ${formatBytes(total)}`, kind:'unfittable', at:Date.now()};
+          saveQueueJob(job);
+          throw new LinkexError(item.lastError.message, {kind:'unfittable'});
+        }
+        if (needed > free) {
+          item.state = 'SKIPPED_CAPACITY';
+          item.lastError = {message:`Linkex空き容量不足: 必要 ${formatBytes(needed)} / 空き ${formatBytes(free)}`, kind:'capacity', at:Date.now()};
+          saveQueueJob(job);
+          throw new LinkexError(item.lastError.message, {kind:'capacity'});
+        }
       }
 
       assertLease();
@@ -1647,14 +1760,100 @@ function sameOwnedIdentity(current, state) {
     const creds = resolveCredentials();
     if (!creds) throw new LinkexError(credentialBootstrapMessage(), {kind:'auth'});
     const api = new LinkexApi({token:creds.token});
+    const downloadSlots = createAsyncSemaphore(PIPELINE_DOWNLOAD_WORKERS);
+    const deleteSlots = createAsyncSemaphore(PIPELINE_DELETE_WORKERS);
+    const inFlightSlots = createAsyncSemaphore(PIPELINE_MAX_IN_FLIGHT);
+    const capacity = await createCapacityReservation(api);
+    const tasks = new Set();
+    let fatalError = null;
+    let fatalIndex = null;
+    let pauseRequested = false;
+
     job.state = 'RUNNING';
     job.lastError = null;
+    job.pipeline = {
+      schemaVersion:1,
+      copyWorkers:1,
+      downloadWorkers:PIPELINE_DOWNLOAD_WORKERS,
+      deleteWorkers:PIPELINE_DELETE_WORKERS,
+      maxInFlight:PIPELINE_MAX_IN_FLIGHT,
+      startedAt:Date.now()
+    };
     saveQueueJob(job);
+
+    const markFatal = async (index, error) => {
+      const kind = error?.kind || null;
+      if (!fatalError) {
+        fatalError = error;
+        fatalIndex = index;
+      }
+      await commitQueueJob(job, () => {
+        const item = job.items[index];
+        item.lastError = {message:error?.message || String(error), kind, at:Date.now()};
+        item.state = item.state === 'DONE' ? 'DONE' : 'BLOCKED';
+        job.state = 'PAUSED';
+        job.lastError = {message:error?.message || String(error), kind, index, at:Date.now()};
+      });
+    };
+
+    const markSkippable = async (index, error) => {
+      const kind = error?.kind || null;
+      await commitQueueJob(job, () => {
+        const item = job.items[index];
+        item.lastError = {message:error?.message || String(error), kind, at:Date.now()};
+        item.state = kind === 'unfittable' ? 'UNFITTABLE' : 'SKIPPED_CAPACITY';
+      });
+      const item = job.items[index];
+      onStatus?.(`${kind === 'unfittable' ? '単一ファイル上限' : '容量不足'}でスキップ [${index+1}/${job.items.length}]\n${item.source.remotePath}\n次のファイルへ進みます。`);
+    };
+
+    const launchOwnedTransaction = (index, releaseInFlight, reservation) => {
+      const item = job.items[index];
+      const task = (async () => {
+        try {
+          const releaseDownload = await downloadSlots.acquire();
+          try {
+            assertLease();
+            await ensureDownloaded(api, job, index, queueRoot, onStatus);
+          } finally {
+            releaseDownload();
+          }
+
+          const releaseDelete = await deleteSlots.acquire();
+          try {
+            assertLease();
+            await ensureDeleted(api, job, index, onStatus);
+          } finally {
+            releaseDelete();
+          }
+
+          await commitQueueJob(job, () => {
+            item.tx = perfPhaseEnd(item.tx, 'total', Date.now(), {outcome:'done'});
+            item.state = 'DONE';
+            compactCompletedItem(job, item);
+          });
+          capacity.release(reservation || Number(item.source?.size || 0));
+          onStatus?.(`完了 [${index+1}/${job.items.length}]\n${item.source.remotePath}\nLinkex一時コピー削除確認済み`);
+        } catch (e) {
+          await markFatal(index, e);
+        } finally {
+          releaseInFlight();
+        }
+      })();
+      tasks.add(task);
+      task.finally(() => tasks.delete(task));
+      return task;
+    };
 
     for (let i = 0; i < job.items.length; i++) {
       assertLease();
-      job.currentIndex = i;
-      saveQueueJob(job);
+      if (fatalError) break;
+      if (job.stopRequested) {
+        pauseRequested = true;
+        break;
+      }
+
+      await commitQueueJob(job, () => { job.currentIndex = i; });
       const item = job.items[i];
       if (item.state === 'DONE' || item.tx?.state === 'DONE') {
         compactCompletedItem(job, item);
@@ -1662,46 +1861,84 @@ function sameOwnedIdentity(current, state) {
         continue;
       }
       if (['SKIPPED_CAPACITY','UNFITTABLE'].includes(item.state)) continue;
-      try {
-        await ensureCopyOwned(api, job, i, onStatus);
-        await ensureDownloaded(api, job, i, queueRoot, onStatus);
-        await ensureDeleted(api, job, i, onStatus);
-        item.tx = perfPhaseEnd(item.tx, 'total', Date.now(), {outcome:'done'});
-        persistItemTx(job, i, item.tx, 'DONE');
-        compactCompletedItem(job, item);
-        saveQueueJob(job);
-        onStatus?.(`完了 [${i+1}/${job.items.length}]\n${item.source.remotePath}\nLinkex一時コピー削除確認済み`);
-      } catch (e) {
-        const kind = e?.kind || null;
-        item.lastError = {message:e?.message || String(e), kind, at:Date.now()};
-        if (kind === 'capacity') {
-          item.state = 'SKIPPED_CAPACITY';
-          saveQueueJob(job);
-          onStatus?.(`容量不足でスキップ [${i+1}/${job.items.length}]\n${item.source.remotePath}\n次のファイルへ進みます。`);
-        } else if (kind === 'unfittable') {
-          item.state = 'UNFITTABLE';
-          saveQueueJob(job);
-          onStatus?.(`単一ファイル上限でスキップ [${i+1}/${job.items.length}]\n${item.source.remotePath}\n次のファイルへ進みます。`);
-        } else {
-          item.state = item.state === 'DONE' ? 'DONE' : 'BLOCKED';
-          job.state = 'PAUSED';
-          job.lastError = {message:e?.message || String(e), kind, index:i, at:Date.now()};
-          saveQueueJob(job);
-          throw e;
-        }
+
+      let releaseInFlight = await inFlightSlots.acquire();
+      if (fatalError || job.stopRequested) {
+        releaseInFlight();
+        if (job.stopRequested) pauseRequested = true;
+        break;
       }
 
-      if (job.stopRequested) {
-        job.stopRequested = false;
-        job.state = 'PAUSED_USER';
-        saveQueueJob(job);
-        return job;
+      let reservation = null;
+      try {
+        if (!item.tx) {
+          while (true) {
+            try {
+              reservation = await capacity.reserve(item.source?.size || 0);
+              break;
+            } catch (e) {
+              if (e?.kind === 'capacity' && tasks.size > 0) {
+                releaseInFlight();
+                await Promise.race(Array.from(tasks));
+                if (fatalError || job.stopRequested) {
+                  if (job.stopRequested) pauseRequested = true;
+                  releaseInFlight = null;
+                  break;
+                }
+                releaseInFlight = await inFlightSlots.acquire();
+                continue;
+              }
+              throw e;
+            }
+          }
+          if (!releaseInFlight) break;
+        }
+
+        await ensureCopyOwned(api, job, i, onStatus, {capacityReserved:!!reservation});
+      } catch (e) {
+        const kind = e?.kind || null;
+        if (kind === 'capacity' || kind === 'unfittable') {
+          if (reservation) capacity.release(reservation);
+          releaseInFlight();
+          await markSkippable(i, e);
+          continue;
+        }
+        releaseInFlight();
+        await markFatal(i, e);
+        break;
       }
+
+      // A different worker may have failed while this serial COPY was reconciling.
+      // Do not start new DOWNLOAD/DELETE work after a fatal stop; the proven destId
+      // remains persisted for a safe resume.
+      if (fatalError || job.stopRequested) {
+        releaseInFlight();
+        if (job.stopRequested) pauseRequested = true;
+        break;
+      }
+
+      launchOwnedTransaction(i, releaseInFlight, reservation);
+    }
+
+    await Promise.all(Array.from(tasks));
+
+    if (fatalError) {
+      if (fatalIndex != null) job.currentIndex = fatalIndex;
+      saveQueueJob(job);
+      throw fatalError;
+    }
+
+    if (job.stopRequested || pauseRequested) {
+      job.stopRequested = false;
+      job.state = 'PAUSED_USER';
+      saveQueueJob(job);
+      return job;
     }
 
     const c = queueCounts(job);
     job.state = (c.skippedCapacity || c.unfittable || c.blocked) ? 'DONE_WITH_SKIPS' : 'DONE';
     job.completedAt = Date.now();
+    if (job.pipeline) job.pipeline.completedAt = job.completedAt;
     saveQueueJob(job);
     if (job.state === 'DONE') {
       try {
@@ -1718,9 +1955,12 @@ function sameOwnedIdentity(current, state) {
     let handleCleanupError = null;
     try { await idbDeleteHandle(`${QUEUE_HANDLE_PREFIX}${job.jobId}`); }
     catch (e) { handleCleanupError = e?.message || String(e); }
-    const probe = loadProbeState();
+    for (const item of job.items || []) {
+      if (item?.tx?.operationId) clearProbeState(item.tx);
+    }
+    const legacyProbe = loadProbeState();
     GM_setValue(QUEUE_KEY, null);
-    if (!probe || probe.queueJobId === job.jobId) GM_setValue(PROBE_KEY, null);
+    if (!legacyProbe || legacyProbe.queueJobId === job.jobId) GM_setValue(PROBE_KEY, null);
     return {cleared:true, handleCleanupError};
   }
 
@@ -2464,7 +2704,7 @@ function sameOwnedIdentity(current, state) {
       job.stopRequested = true;
       saveQueueJob(job);
       recordEvent('info', 'pause-requested', `停止予約: ${job.jobId}`);
-      write(`停止予約を受け付けました。\n現在のファイルの COPY → DL → VERIFY → DELETE を安全に完了した境界で停止します。\n\n${queueSummary(job)}`);
+      write(`停止予約を受け付けました。\n新しいCOPYを止め、進行中のDOWNLOAD/VERIFY/DELETEを安全に完了してから停止します。\n\n${queueSummary(job)}`);
       refreshQueueUi();
     });
 

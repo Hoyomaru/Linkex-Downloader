@@ -94,7 +94,7 @@ Compare each change against the v1.2.1-equivalent baseline using the same file a
 |---|---|---|---|
 | Checkpoint cadence | 2 MiB | 16 MiB or 1000 ms | throughput-neutral; keep |
 | UI update cadence | ~250 ms | 750 ms | throughput-neutral; keep |
-| Writer behavior | per stream chunk | 4 MiB buffered multi-chunk writes | candidate implemented; A/B pending |
+| Writer behavior | per stream chunk | 4 MiB buffered multi-chunk writes | strong positive signal; carry forward into pipeline benchmark |
 
 Do not keep a change that does not improve performance or at least remain neutral while preserving all safety tests.
 
@@ -149,10 +149,31 @@ Automatic deletion requires an independent local verification design, such as a 
 ## Current execution order
 
 - [x] P0: Add performance telemetry to support JSON and UI.
-- [ ] P0: A/B checkpoint and UI update cadence.
-- [ ] P0: Test buffered writer approach.
-- [ ] P0: Split download state by operation ID.
-- [ ] P1: Implement COPY=1 / DOWNLOAD=2 / DELETE=1.
+- [x] P0: A/B checkpoint and UI update cadence.
+- [x] P0: Test buffered writer approach.
+- [x] P0: Split download state by operation ID.
+- [x] P1: Implement COPY=1 / DOWNLOAD=2 / DELETE=1.
 - [ ] P1: Evaluate DOWNLOAD=4 and keep only if aggregate throughput improves.
 - [ ] P1: Gopeed PoC and 1/2/4/8/16 connection benchmark.
 - [ ] P1: Document and test external-mode deletion gate.
+
+
+### Buffered-writer follow-up
+
+Using the same 26-file / 6.37 GB workload, the corrected implementation labels produced two cadence runs around 38 MiB/s (38.52 and 38.11 MiB/s) and two buffered-writer runs around 66-68 MiB/s (67.58 and 65.88 MiB/s). The repeated separation is a strong positive signal for the 4 MiB writer buffer, so Phase B carries the buffered writer forward. Continue to treat CDN/path variance as material and judge the pipeline by repeated aggregate measurements rather than a single run.
+
+### Phase B implementation candidate
+
+`exp/v1.3-pipeline` layers a bounded safety-first pipeline on top of the buffered writer:
+
+- COPY lane remains strictly serial (1).
+- DOWNLOAD pool is 2.
+- DELETE lane is strictly serial (1).
+- At most 3 ownership-confirmed transactions may be in flight.
+- New COPY work uses a byte reservation budget seeded from Linkex usage and rechecks reported free space before reserving.
+- Download checkpoint/probe state is keyed by `operationId`; the old global key is only a migration fallback.
+- Queue-level concurrent mutations use a serialized commit chain.
+- A user pause stops new COPY work and drains already-started DOWNLOAD/VERIFY/DELETE work to safe boundaries.
+- Lease ownership is rechecked during long downloads at a low frequency, so lease loss cannot silently run through to DELETE.
+
+The destructive gate is unchanged: DELETE still requires `LOCAL_COMMITTED`, the ownership-confirmed `destId`, identity re-check, and the one-ID `select_all:false` request.
