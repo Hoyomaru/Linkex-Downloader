@@ -189,3 +189,10 @@ The support bundle now keeps the original `aggregateDownloadMBps` for single-wor
 - `transferWindowMs`, `pipelineWallMs`, and `queueWallMs` are included so the rate calculations remain auditable.
 
 A stop/fatal check is also repeated after the asynchronous capacity recheck and immediately before COPY. If stop/fatal arrives during that network request, the unused reservation is released and no new COPY starts.
+
+
+### DOWNLOAD=1 pipeline A/B
+
+`exp/v1.3-pipeline-dl1` is an A/B branch that changes only the DOWNLOAD worker count from 2 to 1. The in-flight bound remains 3 so COPY prefetch, DELETE overlap, reservation behavior, operation-scoped state, and commit serialization stay comparable with the DOWNLOAD=2 pipeline.
+
+Reason for the A/B: the first DOWNLOAD=2 run completed the 6.37 GB workload in about 100.8 s end-to-end, but its measured pool throughput (~62.0 MiB/s) was slightly below the previously repeated single buffered-writer transfer rate (~65.9-67.6 MiB/s). A one-worker pipeline can show whether most of the win comes from overlapping COPY/DELETE around one fast transfer rather than splitting bandwidth across two simultaneous downloads.

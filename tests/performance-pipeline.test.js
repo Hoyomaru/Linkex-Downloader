@@ -44,8 +44,8 @@ function loadRuntime() {
   return context.__pipelineTest;
 }
 
-test('pipeline configuration is COPY=1 / DOWNLOAD=2 / DELETE=1 and bounded', () => {
-  assert.match(SOURCE, /const PIPELINE_DOWNLOAD_WORKERS = 2;/);
+test('DL1 A/B pipeline configuration is COPY=1 / DOWNLOAD=1 / DELETE=1 and bounded', () => {
+  assert.match(SOURCE, /const PIPELINE_DOWNLOAD_WORKERS = 1;/);
   assert.match(SOURCE, /const PIPELINE_DELETE_WORKERS = 1;/);
   assert.match(SOURCE, /const PIPELINE_MAX_IN_FLIGHT = 3;/);
   assert.match(SOURCE, /const downloadSlots = createAsyncSemaphore\(PIPELINE_DOWNLOAD_WORKERS\);/);

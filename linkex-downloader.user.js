@@ -1195,7 +1195,7 @@ function sameOwnedIdentity(current, state) {
   const TAB_ID = `tab-${(globalThis.crypto?.randomUUID?.() || `${Date.now()}-${Math.random().toString(16).slice(2)}`)}`;
   let leaseTimer = null;
   let leaseLost = false;
-  const PIPELINE_DOWNLOAD_WORKERS = 2;
+  const PIPELINE_DOWNLOAD_WORKERS = 1;
   const PIPELINE_DELETE_WORKERS = 1;
   const PIPELINE_MAX_IN_FLIGHT = 3;
   let queueCommitTail = Promise.resolve();
