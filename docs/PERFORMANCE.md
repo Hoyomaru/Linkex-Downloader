@@ -189,3 +189,19 @@ The support bundle now keeps the original `aggregateDownloadMBps` for single-wor
 - `transferWindowMs`, `pipelineWallMs`, and `queueWallMs` are included so the rate calculations remain auditable.
 
 A stop/fatal check is also repeated after the asynchronous capacity recheck and immediately before COPY. If stop/fatal arrives during that network request, the unused reservation is released and no new COPY starts.
+
+
+### Pipeline DOWNLOAD=1 vs DOWNLOAD=2 A/B
+
+Same 26-file workload (6,372,761,319 transferred bytes), all runs completed with no download retry/resume:
+
+| Browser pipeline | Transfer sum / per-connection | Transfer wall window | Pool throughput | Pipeline wall | Queue wall | Queue effective |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| DOWNLOAD=1 | 62.64 MiB/s | 114.061 s | 53.28 MiB/s | 116.405 s | 116.684 s | 52.09 MiB/s |
+| DOWNLOAD=2 | 40.21 MiB/s weighted per-connection | 97.974 s | 62.03 MiB/s | 100.575 s | 100.848 s | 60.26 MiB/s |
+
+DOWNLOAD=2 reduces Queue wall time by 13.57% versus DOWNLOAD=1 and raises Queue effective throughput by 15.70%.
+
+The key result is not higher per-connection speed. With DOWNLOAD=1, actual network transfer time sums to 97.023 s but the first-to-last transfer window is 114.061 s, leaving about 17.038 s of no active network transfer between files. With DOWNLOAD=2, the pool transfer window falls to 97.974 s; overlapping setup and adjacent transfers fills most of those holes while keeping aggregate pool throughput around the same network ceiling.
+
+Decision for the browser candidate: keep COPY=1 / DOWNLOAD=2 / DELETE=1. There is no current evidence that increasing DOWNLOAD beyond 2 would raise the observed pool throughput enough to justify extra contention or safety complexity. The DL=1 branch remains an A/B reference only.
