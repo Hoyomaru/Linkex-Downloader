@@ -2097,16 +2097,24 @@ function sameOwnedIdentity(current, state) {
 
       let reservation = null;
       try {
+        let quotaPropagationRetries = 0;
         while (true) {
           try {
             reservation = await capacity.reserve(Number(item.source?.size || 0));
             break;
           } catch (e) {
             if (e?.kind !== 'capacity') throw e;
+            if (quotaPropagationRetries < 8) {
+              quotaPropagationRetries += 1;
+              onStatus?.(`Linkex容量反映待ち [${i+1}/${job.items.length}]\n早期DELETE済み容量の反映を再確認します… ${quotaPropagationRetries}/8`);
+              await sleep(300);
+              if (fatalError || job.stopRequested) throw new LinkexError('容量反映待ち中に停止しました。', {kind:'pause'});
+              continue;
+            }
             if (tasks.size === 0) throw e;
-            // Normally early DELETE releases reservation before a download task is launched.
-            // Waiting here is only a conservative fallback if Linkex reports delayed quota release.
+            // Conservative fallback: a truly constrained account may only become copyable later.
             await Promise.race(Array.from(tasks));
+            quotaPropagationRetries = 0;
             if (fatalError || job.stopRequested) throw new LinkexError('容量待機中に停止しました。', {kind:'pause'});
           }
         }

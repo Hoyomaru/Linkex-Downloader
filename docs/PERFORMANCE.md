@@ -240,3 +240,30 @@ One-file probe result: **FULL_PASS**.
 - The Range response Content-Length was 1,782,099,132 bytes, exactly CDN total minus the requested offset.
 
 Decision: signed CDN access is not tied to continued presence of the temporary Linkex destination, at least for the tested URL lifetime. This removes the active-download capacity coupling in principle. The next experiment should use real local writes with early deletion and a bounded multi-download pool; signed URLs should not be persisted, and recovery after a process/tab loss should obtain a new owned temporary copy and new signed URL before resuming a local partial file.
+
+
+## Early-delete DL=4 real-write pipeline
+
+After the one-file signed-URL probe returned FULL_PASS, `exp/v1.3-early-delete-pipeline-dl4` adds a real local-write benchmark mode.
+
+Experimental transaction order:
+
+`COPY -> ownership confirm -> signed URL (memory only) -> DELETE + confirmed absent -> DOWNLOAD/VERIFY -> DONE`
+
+The production browser mode remains unchanged and still deletes only after `LOCAL_COMMITTED`.
+
+Pipeline settings:
+
+- COPY workers: 1
+- early DELETE workers: 1 (serialized in the COPY scheduler)
+- DOWNLOAD workers: 4
+- max in-flight detached transactions: 5
+- signed URL persistence: none
+- local writer: existing 4 MiB buffered writer and the same final-size/EOF verification
+- one extra in-flight slot allows the next COPY/DELETE setup to overlap the four active downloads.
+
+Capacity is released immediately after the temporary destination is confirmed absent, before the download enters the worker pool. A short quota-propagation retry loop tolerates delayed Linkex usage accounting without immediately waiting for an entire download to finish.
+
+Recovery rule: if a detached download fails after confirmed early DELETE, the signed URL is not persisted. On a later Queue resume, the old operation is archived, a new ownership-safe COPY obtains a new signed URL, that new temporary copy is early-deleted, and the existing local partial file is resumed with Range. DELETE-uncertain states are reconciled before any new COPY and are never blindly replayed.
+
+Benchmark target: compare the same workload against the current browser candidate (COPY=1 / DOWNLOAD=2 / DELETE=1). Primary metrics are `poolDownloadMBps`, `pipelineEffectiveMBps`, `queueEffectiveMBps`, and queue wall time.
