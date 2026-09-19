@@ -224,3 +224,19 @@ The probe sequence is:
 9. Persist only the probe results, never the signed URL. CDN bytes are discarded and no local file is saved.
 
 A `FULL_PASS` means all three behaviors are confirmed: the in-flight stream survives deletion, a new GET works after deletion, and a new Range GET returns 206 after deletion. Only that result justifies a later capacity-decoupled architecture experiment.
+
+
+### Early-delete probe result (2026-09-19)
+
+One-file probe result: **FULL_PASS**.
+
+- Source metadata size: 1,783,148,262 bytes.
+- CDN Content-Length: 1,783,147,708 bytes.
+- The stream was opened with HTTP 200 and the first chunk was received before DELETE.
+- The owned temporary destination was deleted and confirmed absent about 691 ms after stream open.
+- The already-open stream then reached normal EOF after deletion with exactly 1,783,147,708 bytes.
+- Post-delete fresh GET returned HTTP 200 and delivered data.
+- Post-delete Range GET from offset 1,048,576 returned HTTP 206 and delivered data.
+- The Range response Content-Length was 1,782,099,132 bytes, exactly CDN total minus the requested offset.
+
+Decision: signed CDN access is not tied to continued presence of the temporary Linkex destination, at least for the tested URL lifetime. This removes the active-download capacity coupling in principle. The next experiment should use real local writes with early deletion and a bounded multi-download pool; signed URLs should not be persisted, and recovery after a process/tab loss should obtain a new owned temporary copy and new signed URL before resuming a local partial file.
