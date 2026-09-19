@@ -308,8 +308,10 @@ test('queue start and resume acquire the lease before shared Queue mutations', (
 
 test('runJob itself no longer acquires or releases the lease', () => {
   const runAt = SOURCE.indexOf('async function runJob(job, queueRoot, resume=false)');
-  const startAt = SOURCE.indexOf('async function startManifestQueue(', runAt);
-  const block = SOURCE.slice(runAt, startAt);
+  const probeAt = SOURCE.indexOf('async function startEarlyDeleteProbe(', runAt);
+  const manifestAt = SOURCE.indexOf('async function startManifestQueue(', runAt);
+  const endAt = probeAt > runAt ? probeAt : manifestAt;
+  const block = SOURCE.slice(runAt, endAt);
   assert.doesNotMatch(block, /await acquireLease\(\)/);
   assert.doesNotMatch(block, /releaseLease\(\)/);
   assert.match(block, /assertLease\(\)/);
