@@ -2083,7 +2083,7 @@ function sameOwnedIdentity(current, state) {
           break;
         }
       }
-      if (item.tx) {
+      if (item.tx && !['COPY_INTENT','COPY_REQUEST_SENT','NEEDS_RECONCILE','UNCERTAIN_NO_EVIDENCE','OWNERSHIP_CONFIRMED'].includes(item.tx.state)) {
         await markFatal(i, new LinkexError(`早期DELETE Queueの再開状態を安全に再構成できません: ${item.tx.state}`, {kind:'early_delete_resume_state'}));
         break;
       }
@@ -2899,6 +2899,7 @@ function sameOwnedIdentity(current, state) {
           <input id="lf-url" placeholder="https://l2e.click/d/xxxxxxxx" />
           <div class="primary-actions">
             <button id="lf-start" class="primary action-main" disabled>すべてダウンロード</button>
+            <button id="lf-start-early-delete" class="warn action-secondary" disabled>実験: 全件 早期DELETE DL=4</button>
             <button id="lf-select-mode" class="secondary action-secondary" disabled>ファイルを選ぶ</button>
           </div>
           <div id="lf-selection" class="selection" hidden>
@@ -2907,7 +2908,7 @@ function sameOwnedIdentity(current, state) {
             <div class="selection-actions"><button id="lf-select-all" class="secondary">全件選択</button><button id="lf-clear-all" class="secondary">全解除</button><button id="lf-select-visible" class="secondary">表示中を選択</button><button id="lf-clear-visible" class="secondary">表示中を解除</button></div>
             <div id="lf-file-list" class="file-list"></div>
             <div id="lf-selection-note" class="notice"></div>
-            <div class="row" style="margin-top:8px;margin-bottom:0"><button id="lf-start-selected" class="primary" disabled>選択をダウンロード</button><button id="lf-early-delete-probe" class="warn" disabled>1件で早期DELETE検証</button></div>
+            <div class="row" style="margin-top:8px;margin-bottom:0"><button id="lf-start-selected" class="primary" disabled>選択をダウンロード</button><button id="lf-start-selected-early-delete" class="warn" disabled>選択を早期DELETE DL=4</button><button id="lf-early-delete-probe" class="secondary" disabled>1件Probe</button></div>
           </div>
           <div id="lf-queue-actions" class="row" hidden><button id="lf-resume" class="primary" disabled>Queueを再開</button><button id="lf-pause" class="secondary" disabled>現在ファイル後に停止</button></div>
           <div class="progress-wrap">
@@ -2928,7 +2929,7 @@ function sameOwnedIdentity(current, state) {
               </details>
             </div>
           </details>
-          <div class="notice">通常DLの安全規則: copy/delete応答不明時は盲目的に再送しません。削除はLOCAL_COMMITTEDかつ所有権確定済みdestId 1件だけ。早期DELETE検証だけは専用1件Probeとして所有確認後・stream開始後に一時コピーを先に削除します。共有元は削除しません。診断ログはtoken・署名付きURLを伏せて書き出します。</div>
+          <div class="notice">通常DLはLOCAL_COMMITTED後に所有destIdを削除します。実験「早期DELETE DL=4」はFULL_PASS済みsigned URL挙動を使い、所有確認済み一時コピーをDL前に削除して容量を解放します。copy/delete不明時は盲目的に再送せず、共有元は削除しません。signed URLは永続化しません。</div>
         </div>
       </div>`;
     document.body.appendChild(root);
@@ -2941,8 +2942,10 @@ function sameOwnedIdentity(current, state) {
     const logDetails = root.querySelector('#lf-log-details');
     const analyzeBtn = root.querySelector('#lf-analyze');
     const startBtn = root.querySelector('#lf-start');
+    const earlyDeleteStartBtn = root.querySelector('#lf-start-early-delete');
     const selectModeBtn = root.querySelector('#lf-select-mode');
     const selectedStartBtn = root.querySelector('#lf-start-selected');
+    const selectedEarlyDeleteStartBtn = root.querySelector('#lf-start-selected-early-delete');
     const earlyDeleteProbeBtn = root.querySelector('#lf-early-delete-probe');
     const selectionPanel = root.querySelector('#lf-selection');
     const selectionMeta = root.querySelector('#lf-selection-meta');
@@ -3214,8 +3217,10 @@ function sameOwnedIdentity(current, state) {
       pauseBtn.hidden = !running;
       queueActions.hidden = resumeBtn.hidden && pauseBtn.hidden;
       startBtn.disabled = busy || !!active || !hasShareInput || !preferredHandleReady;
+      earlyDeleteStartBtn.disabled = busy || !!active || !hasShareInput || !preferredHandleReady;
       selectModeBtn.disabled = busy || !!active || !hasShareInput;
       selectedStartBtn.disabled = busy || !manifest?.files?.length || selectedIndexes.size === 0 || !!active || !preferredHandleReady;
+      selectedEarlyDeleteStartBtn.disabled = busy || !manifest?.files?.length || selectedIndexes.size === 0 || !!active || !preferredHandleReady;
       earlyDeleteProbeBtn.disabled = busy || !manifest?.files?.length || selectedIndexes.size !== 1 || !!active;
       const c = queueCounts(job);
       retryBtn.disabled = busy || !job || !(c.skippedCapacity || c.unfittable) || !isTerminal(job);
@@ -3301,7 +3306,9 @@ function sameOwnedIdentity(current, state) {
       refreshQueueUi();
       recordEvent('info', resume ? 'queue-resume' : 'queue-start', `${resume ? 'Queue再開' : 'Queue開始'}: ${job.jobId}`, {jobId:job.jobId, items:job.items?.length, folderName:job.folderName});
       try {
-        const result = await processQueue(job, queueRoot, t => write(`${t}\n\n${queueSummary(loadQueueJob())}`));
+        const result = job.kind === 'early-delete-pipeline'
+          ? await processEarlyDeletePipeline(job, queueRoot, t => write(`${t}\n\n${queueSummary(loadQueueJob())}`))
+          : await processQueue(job, queueRoot, t => write(`${t}\n\n${queueSummary(loadQueueJob())}`));
         if (result.state === 'PAUSED_USER') {
           write(`安全停止しました（現在ファイルの処理境界）。\n\n${queueSummary(result)}\n\n「Queueを再開」で続行できます。`, '');
           recordEvent('info', 'queue-paused-user', `安全停止: ${result.jobId}`);
@@ -3309,8 +3316,9 @@ function sameOwnedIdentity(current, state) {
           write(`全Queue走査完了（スキップあり）\n\n${queueSummary(result, {detail:true})}\n\n容量を空ける/プラン変更後は「容量スキップを再試行」が使えます。`, 'ok');
           recordEvent('info', 'queue-done-with-skips', `Queue完了（スキップあり）: ${result.jobId}`, {counts:queueCounts(result)});
         } else {
-          write(`全Queue成功${resume ? '（再開）' : ''}\n\n${queueSummary(result, {detail:true})}\n\nローカル検証済み・Linkex一時コピー削除確認済みです。`, 'ok');
-          recordEvent('info', 'queue-done', `Queue成功: ${result.jobId}`, {counts:queueCounts(result)});
+          const early = result.kind === 'early-delete-pipeline';
+          write(`全Queue成功${resume ? '（再開）' : ''}\n\n${queueSummary(result, {detail:true})}\n\n${early ? '早期DELETE: Linkex一時コピーは各DL開始前に削除確認済み。ローカルファイルも最終検証済みです。' : 'ローカル検証済み・Linkex一時コピー削除確認済みです。'}`, 'ok');
+          recordEvent('info', early ? 'early-delete-queue-done' : 'queue-done', `Queue成功: ${result.jobId}`, {counts:queueCounts(result), pipeline:result.pipeline || null});
         }
         return result;
       } catch (e) {
@@ -3322,6 +3330,76 @@ function sameOwnedIdentity(current, state) {
       }
     }
 
+
+
+    async function startEarlyDeletePipeline(selection = null, {baseDir = null, skipConfirm = false} = {}) {
+      if (!manifest || running) return;
+      const selected = selection == null ? null : Array.from(selection).sort((a,b) => a - b);
+      const chosenFiles = selected == null ? manifest.files : selected.map(index => manifest.files[index]).filter(Boolean);
+      if (!chosenFiles.length) { write('処理するファイルが選択されていません。', 'err'); return; }
+      const currentHref = String(globalThis.location?.href || '');
+      const currentPageTarget = detectSharePageTarget(currentHref);
+      if (isSharePageHost(currentHref) && (!currentPageTarget || currentPageTarget.shareToken !== manifest.shareToken)) {
+        write('共有ページが解析時点から変わっています。現在の共有をもう一度解析してください。', 'err');
+        return;
+      }
+      if (!resolveCredentials()) { write(credentialBootstrapMessage(), 'err'); return; }
+
+      const totalBytes = chosenFiles.reduce((sum, file) => sum + Number(file?.size || 0), 0);
+      const modeText = selected == null ? '全ファイル' : '選択ファイル';
+      if (!skipConfirm) {
+        const pageWindow = getNativePageWindow();
+        const warning = [
+          `実験: 早期DELETE並列ダウンロード DL=${EARLY_DELETE_DOWNLOAD_WORKERS}`,
+          '',
+          `${modeText} ${chosenFiles.length}件（合計 ${formatBytes(totalBytes)}）`,
+          '',
+          '各ファイルで COPY → 所有確認 → signed URL取得 → 一時コピーDELETE確認 → ローカルDL を行います。',
+          'DELETEはローカル保存完了より前です。今回のFULL_PASS検証結果を使う実験モードです。',
+          'signed URLは永続化せずメモリ上だけに保持します。',
+          'DL失敗/URL失効時は安全停止し、再開時は必要なら新しいCOPY/URLでRange再開します。',
+          '',
+          '開始しますか？'
+        ].join('\n');
+        if (!Reflect.apply(pageWindow.confirm, pageWindow, [warning])) return;
+      }
+
+      let chosenBaseDir = baseDir;
+      if (!chosenBaseDir) {
+        try { chosenBaseDir = await invokeDirectoryPicker({mode:'readwrite'}); }
+        catch (e) { if (e?.name !== 'AbortError') write(`保存先選択失敗: ${e?.message || e}`, 'err'); return; }
+      }
+
+      running = true;
+      try {
+        await acquireLease();
+        const activeJob = loadQueueJob();
+        if (activeJob && !isTerminal(activeJob)) throw new LinkexError('別の未完了Queueがあります。先に再開または整理してください。', {kind:'queue_conflict'});
+        await ensureHandlePermission(chosenBaseDir);
+        const job = createQueueFromManifest(manifest, selected);
+        job.kind = 'early-delete-pipeline';
+        job.experimental = {mode:'early-delete', downloadWorkers:EARLY_DELETE_DOWNLOAD_WORKERS, signedUrlPersistence:false, createdAt:Date.now()};
+        const queueRoot = await chosenBaseDir.getDirectoryHandle(job.folderName, {create:true});
+        await putQueueRootHandle(job, queueRoot);
+        saveQueueJob(job);
+        recordEvent('warn', 'early-delete-queue-created', `早期DELETE Queue作成: ${job.jobId}`, {
+          jobId:job.jobId,
+          items:job.items.length,
+          totalBytes:job.sourceTotalBytes,
+          downloadWorkers:EARLY_DELETE_DOWNLOAD_WORKERS
+        });
+        write(`早期DELETE Queue作成\n\n${queueSummary(job)}\n\nCOPY/DELETEは1本ずつ、ローカルDOWNLOADは最大${EARLY_DELETE_DOWNLOAD_WORKERS}本で処理します。`, 'ok');
+        await runJob(job, queueRoot, false);
+      } catch (e) {
+        console.error('[Early delete pipeline]', e);
+        write(`早期DELETE Queue停止: ${e?.message || e}\n\n${queueSummary(loadQueueJob())}\n\nDELETE不明時は再送せず停止します。再開可能な状態では新しいCOPY/URLからRange再開します。`, 'err');
+      } finally {
+        running = false;
+        releaseLease();
+        syncSharePageContext({initial:true});
+        refreshQueueUi();
+      }
+    }
 
     async function startEarlyDeleteProbe() {
       if (!manifest || running || preparing || selectedIndexes.size !== 1) return;
@@ -3453,6 +3531,30 @@ function sameOwnedIdentity(current, state) {
       } finally { running = false; releaseLease(); syncSharePageContext({initial:true}); refreshQueueUi(); }
     }
 
+    earlyDeleteStartBtn.addEventListener('click', async () => {
+      if (running || preparing) return;
+      const active = loadQueueJob();
+      if (active && !isTerminal(active)) { write('未完了Queueがあります。先に再開または整理してください。'); refreshQueueUi(); return; }
+      if (!resolveCredentials()) { write(credentialBootstrapMessage(), 'err'); return; }
+      preparing = true;
+      refreshQueueUi();
+      try {
+        const baseDir = await acquirePreferredBaseDirFromGesture();
+        await analyzeCurrentShare({announceSuccess:false});
+        preparing = false;
+        refreshQueueUi();
+        await startEarlyDeletePipeline(null, {baseDir, skipConfirm:false});
+      } catch (e) {
+        if (e?.name !== 'AbortError') {
+          if (e?.kind === 'filesystem') write(`保存先準備失敗: ${e?.message || e}`, 'err');
+          else handleAnalyzeFailure(e);
+        }
+      } finally {
+        preparing = false;
+        refreshQueueUi();
+      }
+    });
+
     startBtn.addEventListener('click', async () => {
       if (running || preparing) return;
       const active = loadQueueJob();
@@ -3493,6 +3595,24 @@ function sameOwnedIdentity(current, state) {
 
     earlyDeleteProbeBtn.addEventListener('click', async () => {
       await startEarlyDeleteProbe();
+    });
+
+    selectedEarlyDeleteStartBtn.addEventListener('click', async () => {
+      if (running || preparing || !manifest || !selectedIndexes.size) return;
+      if (!resolveCredentials()) { write(credentialBootstrapMessage(), 'err'); return; }
+      preparing = true;
+      refreshQueueUi();
+      try {
+        const baseDir = await acquirePreferredBaseDirFromGesture();
+        preparing = false;
+        refreshQueueUi();
+        await startEarlyDeletePipeline(new Set(selectedIndexes), {baseDir, skipConfirm:false});
+      } catch (e) {
+        if (e?.name !== 'AbortError') write(`保存先準備失敗: ${e?.message || e}`, 'err');
+      } finally {
+        preparing = false;
+        refreshQueueUi();
+      }
     });
 
     selectedStartBtn.addEventListener('click', async () => {
@@ -3552,7 +3672,9 @@ function sameOwnedIdentity(current, state) {
       job.stopRequested = true;
       saveQueueJob(job);
       recordEvent('info', 'pause-requested', `停止予約: ${job.jobId}`);
-      write(`停止予約を受け付けました。\n新しいCOPYを止め、進行中のDOWNLOAD/VERIFY/DELETEを安全に完了してから停止します。\n\n${queueSummary(job)}`);
+      write(job.kind === 'early-delete-pipeline'
+        ? `停止予約を受け付けました。\n新しいCOPY/早期DELETEを開始せず、進行中のDOWNLOAD/VERIFYを完了してから停止します。\n\n${queueSummary(job)}`
+        : `停止予約を受け付けました。\n新しいCOPYを止め、進行中のDOWNLOAD/VERIFY/DELETEを安全に完了してから停止します。\n\n${queueSummary(job)}`);
       refreshQueueUi();
     });
 
