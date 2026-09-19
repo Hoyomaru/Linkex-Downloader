@@ -22,8 +22,8 @@ test('early-delete order is ownership -> signed URL -> confirmed delete -> downl
   const end = SOURCE.indexOf('function assertEarlyDeleteProbeGuards', start);
   const block = SOURCE.slice(start, end);
   const copyAt = block.indexOf('await ensureCopyOwned');
-  const urlAt = block.indexOf('await refreshOwnedFileUrl');
-  const deleteAt = block.indexOf('await deleteOwnedTempForEarlyDeletePipeline');
+  const urlAt = block.indexOf('await refreshOwnedFileUrl', copyAt);
+  const deleteAt = block.indexOf('await deleteOwnedTempForEarlyDeletePipeline', urlAt);
   const releaseAt = block.indexOf('capacity.release(reservation)', deleteAt);
   const launchAt = block.indexOf('launchDetachedDownload(i, signedUrl', deleteAt);
   assert.ok(copyAt >= 0 && urlAt > copyAt);
