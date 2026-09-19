@@ -205,3 +205,22 @@ DOWNLOAD=2 reduces Queue wall time by 13.57% versus DOWNLOAD=1 and raises Queue 
 The key result is not higher per-connection speed. With DOWNLOAD=1, actual network transfer time sums to 97.023 s but the first-to-last transfer window is 114.061 s, leaving about 17.038 s of no active network transfer between files. With DOWNLOAD=2, the pool transfer window falls to 97.974 s; overlapping setup and adjacent transfers fills most of those holes while keeping aggregate pool throughput around the same network ceiling.
 
 Decision for the browser candidate: keep COPY=1 / DOWNLOAD=2 / DELETE=1. There is no current evidence that increasing DOWNLOAD beyond 2 would raise the observed pool throughput enough to justify extra contention or safety complexity. The DL=1 branch remains an A/B reference only.
+
+
+## Early-delete signed-URL survival probe
+
+`exp/v1.3-early-delete-probe` is an isolated one-file destructive experiment. It does **not** change the production `assertDeleteGuards()` rule: normal downloads still require `LOCAL_COMMITTED` before DELETE.
+
+The probe sequence is:
+
+1. Run the normal Linkex COPY and ownership reconciliation.
+2. Refresh the confirmed destination URL and re-check destination identity.
+3. Start one CDN GET and read the first data chunk.
+4. DELETE only the ownership-confirmed temporary `destId` using `select_all:false` and exactly one `file_ids` entry.
+5. Reconcile DELETE to confirmed absence; an uncertain DELETE is never blindly replayed.
+6. Continue the already-open CDN stream to normal EOF, verifying Content-Length when exposed.
+7. With the same in-memory signed URL, start a fresh GET after deletion and read one chunk.
+8. Start a fresh Range GET after deletion and require HTTP 206.
+9. Persist only the probe results, never the signed URL. CDN bytes are discarded and no local file is saved.
+
+A `FULL_PASS` means all three behaviors are confirmed: the in-flight stream survives deletion, a new GET works after deletion, and a new Range GET returns 206 after deletion. Only that result justifies a later capacity-decoupled architecture experiment.

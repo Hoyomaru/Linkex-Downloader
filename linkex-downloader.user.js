@@ -1751,6 +1751,281 @@ function sameOwnedIdentity(current, state) {
     throw lastErr || new LinkexError('ダウンロードに失敗しました。');
   }
 
+
+  function assertEarlyDeleteProbeGuards(job, index, tx) {
+    if (job?.kind !== 'early-delete-probe' || job.items?.length !== 1 || index !== 0) {
+      throw new LinkexError('早期DELETE検証は専用の1ファイルProbe Queueでのみ実行できます。', {kind:'probe_guard'});
+    }
+    if (!tx || tx.state === 'AMBIGUOUS_COPY') {
+      throw new LinkexError('早期DELETE検証: 所有権が曖昧です。', {kind:'probe_guard'});
+    }
+    const destId = String(tx.confirmedDest?.id || '');
+    if (!destId) throw new LinkexError('早期DELETE検証: confirmedDest.id がありません。', {kind:'probe_guard'});
+    if (!Array.isArray(tx.beforeIds)) throw new LinkexError('早期DELETE検証: コピー前ID集合がありません。', {kind:'probe_guard'});
+    if (tx.beforeIds.map(String).includes(destId)) {
+      throw new LinkexError('早期DELETE検証拒否: destId はコピー前から存在していました。', {kind:'probe_guard'});
+    }
+    return {destId};
+  }
+
+  async function deleteOwnedTempForEarlyDeleteProbe(api, job, index, onStatus) {
+    assertLease();
+    const item = job.items[index];
+    let tx = item.tx;
+    const guard = assertEarlyDeleteProbeGuards(job, index, tx);
+
+    if (['PROBE_DELETE_INTENT','PROBE_DELETE_REQUEST_SENT','PROBE_DELETE_UNCERTAIN'].includes(tx.state)) {
+      onStatus?.(`早期DELETE結果を照合中\n${item.source.remotePath}\nDELETE POST再送: NO`);
+      const rec = await reconcileDelete(api, tx, {
+        timeoutMs:30000,
+        onProgress:x => onStatus?.(`早期DELETE照合\n存在: ${x.exists ? 'YES' : 'NO'}\nPOST再送: NO`)
+      });
+      if (rec.status === 'ABSENT') {
+        tx = {
+          ...tx,
+          state:'PROBE_DELETE_CONFIRMED',
+          probe:{...(tx.probe||{}), deleteConfirmedAt:Date.now()},
+          delete:{...(tx.delete||{}), destId:guard.destId, confirmedAbsentAt:Date.now()}
+        };
+        persistItemTx(job, index, tx, 'PROBE_RUNNING');
+        return tx;
+      }
+      tx = {
+        ...tx,
+        state:'PROBE_DELETE_UNCERTAIN',
+        probe:{...(tx.probe||{}), deleteStillPresentAt:Date.now()}
+      };
+      persistItemTx(job, index, tx, 'BLOCKED');
+      throw new LinkexError('早期DELETE結果が不明でdestIdがまだ存在します。DELETEは再送しません。', {kind:'probe_delete_uncertain'});
+    }
+
+    if (tx.state !== 'PROBE_STREAM_OPEN') {
+      throw new LinkexError(`早期DELETE検証: stream開始前には削除できません (state=${tx.state})`, {kind:'probe_guard'});
+    }
+
+    const current = await findOwnedRootFile(api, guard.destId);
+    if (!current) {
+      throw new LinkexError('早期DELETE検証: DELETE前にdestIdが消失しました。外部変更の可能性があるため検証を中止します。', {kind:'probe_external_change'});
+    }
+    if (!sameOwnedIdentity(current, tx)) {
+      throw new LinkexError('早期DELETE検証拒否: 現在のdestId identityが所有権確定時と一致しません。', {kind:'probe_guard'});
+    }
+
+    tx = {
+      ...tx,
+      state:'PROBE_DELETE_INTENT',
+      probe:{...(tx.probe||{}), deleteIntendedAt:Date.now()},
+      delete:{destId:guard.destId, intendedAt:Date.now(), requestSent:false, experimentalEarlyDelete:true}
+    };
+    persistItemTx(job, index, tx, 'PROBE_RUNNING');
+    onStatus?.(`早期DELETE送信\n${item.source.remotePath}\ndestId: ${guard.destId}\n所有確認済み1件だけ削除します…`);
+
+    try {
+      assertLease();
+      const result = await api.deleteSingleFile(guard.destId);
+      tx = {
+        ...tx,
+        state:'PROBE_DELETE_REQUEST_SENT',
+        delete:{...(tx.delete||{}), requestSent:true, response:result ?? {}, requestCompletedAt:Date.now()}
+      };
+      persistItemTx(job, index, tx, 'PROBE_RUNNING');
+    } catch (e) {
+      tx = {
+        ...tx,
+        state:'PROBE_DELETE_UNCERTAIN',
+        delete:{...(tx.delete||{}), requestSent:true, requestError:{message:e?.message || String(e), kind:e?.kind || null}, requestFailedAt:Date.now()}
+      };
+      persistItemTx(job, index, tx, 'PROBE_RUNNING');
+    }
+
+    return await deleteOwnedTempForEarlyDeleteProbe(api, job, index, onStatus);
+  }
+
+  async function readProbeFirstChunk(reader) {
+    while (true) {
+      const {done, value} = await reader.read();
+      if (done) return {done:true, bytes:0};
+      if (value?.byteLength) return {done:false, bytes:value.byteLength};
+    }
+  }
+
+  async function consumeProbeStreamToEof(reader, initialBytes, expectedTotal, onStatus) {
+    let bytes = Number(initialBytes || 0);
+    const startedAt = Date.now();
+    let lastUi = 0;
+    while (true) {
+      assertLease();
+      const {done, value} = await reader.read();
+      if (done) break;
+      if (value?.byteLength) bytes += value.byteLength;
+      const now = Date.now();
+      if (now - lastUi >= 1000) {
+        onStatus?.(`DELETE後も既存streamをEOFまで確認中…\n受信: ${formatBytes(bytes)}${Number.isFinite(expectedTotal) ? ` / ${formatBytes(expectedTotal)}` : ''}`);
+        lastUi = now;
+      }
+    }
+    if (Number.isFinite(expectedTotal) && bytes !== expectedTotal) {
+      throw new LinkexError(`DELETE後streamのサイズ不一致: ${bytes}/${expectedTotal}`, {kind:'probe_stream_size', actual:bytes, expected:expectedTotal});
+    }
+    return {bytes, durationMs:Math.max(0, Date.now() - startedAt), eof:true};
+  }
+
+  async function probeSignedUrlRequest(url, {rangeOffset = null} = {}) {
+    const headers = rangeOffset == null ? {} : {'Range': `bytes=${Math.max(0, Number(rangeOffset || 0))}-`};
+    const res = await fetch(url, {method:'GET', headers, cache:'no-store', credentials:'omit'});
+    const status = Number(res.status || 0);
+    const contentLengthRaw = res.headers.get('Content-Length');
+    const contentLength = contentLengthRaw == null ? null : Number(contentLengthRaw);
+    let firstChunkBytes = 0;
+    try {
+      if (res.body) {
+        const reader = res.body.getReader();
+        const first = await readProbeFirstChunk(reader);
+        firstChunkBytes = first.bytes;
+        try { await reader.cancel(); } catch {}
+      }
+    } finally {
+      try { await res.body?.cancel(); } catch {}
+    }
+    return {
+      status,
+      ok:res.ok,
+      firstChunkBytes,
+      contentLength:Number.isFinite(contentLength) ? contentLength : null,
+      rangeRequested:rangeOffset != null,
+      rangeOffset:rangeOffset == null ? null : Number(rangeOffset),
+      rangeAccepted:rangeOffset == null ? null : status === 206
+    };
+  }
+
+  async function processEarlyDeleteProbe(job, onStatus) {
+    if (!job || job.kind !== 'early-delete-probe' || job.items?.length !== 1) {
+      throw new LinkexError('早期DELETE検証Queueではありません。', {kind:'probe_guard'});
+    }
+    assertLease();
+    const creds = resolveCredentials();
+    if (!creds) throw new LinkexError(credentialBootstrapMessage(), {kind:'auth'});
+    const api = new LinkexApi({token:creds.token});
+    const item = job.items[0];
+
+    if (item.tx?.probe?.deleteConfirmedAt && item.tx?.state !== 'PROBE_DONE') {
+      throw new LinkexError('早期DELETE後に中断されたProbeは安全に再開できません。署名URLを保存していないため、診断ログ保存後にQueueを破棄して再試行してください。', {kind:'probe_not_resumable'});
+    }
+
+    job.state = 'PROBE_RUNNING';
+    job.lastError = null;
+    job.probe = {
+      schemaVersion:1,
+      kind:'early-delete-signed-url-survival',
+      startedAt:Date.now(),
+      savesLocalFile:false,
+      normalDeleteGuardBypassed:false
+    };
+    saveQueueJob(job);
+
+    let tx = item.tx;
+    if (!tx) tx = await ensureCopyOwned(api, job, 0, onStatus);
+    else if (!['OWNERSHIP_CONFIRMED','PROBE_STREAM_OPEN'].includes(tx.state)) {
+      tx = await ensureCopyOwned(api, job, 0, onStatus);
+    }
+    tx = item.tx;
+
+    const owned = await refreshOwnedFileUrl(api, tx.confirmedDest?.id);
+    if (!sameOwnedIdentity(owned, tx)) {
+      throw new LinkexError('早期DELETE検証: URL取得時にdestId identity変化を検出しました。', {kind:'ownership_lost'});
+    }
+    const signedUrl = owned.url;
+
+    onStatus?.(`事前streamを開始しています…\n${item.source.remotePath}`);
+    const initialRes = await fetch(signedUrl, {method:'GET', cache:'no-store', credentials:'omit'});
+    if (!(initialRes.status === 200 || initialRes.status === 206) || !initialRes.body) {
+      try { await initialRes.body?.cancel(); } catch {}
+      throw new LinkexError(`事前stream開始失敗: CDN HTTP ${initialRes.status}`, {kind:'probe_cdn_status', status:initialRes.status});
+    }
+    const rawLength = initialRes.headers.get('Content-Length');
+    const expectedTotal = rawLength == null ? null : Number(rawLength);
+    const knownTotal = Number.isFinite(expectedTotal) && expectedTotal >= 0 ? expectedTotal : null;
+    const reader = initialRes.body.getReader();
+    const first = await readProbeFirstChunk(reader);
+    if (first.done && knownTotal !== 0) {
+      throw new LinkexError('事前streamがデータ受信前にEOFになりました。', {kind:'probe_stream'});
+    }
+
+    tx = {
+      ...item.tx,
+      state:'PROBE_STREAM_OPEN',
+      probe:{
+        ...(item.tx.probe||{}),
+        streamOpenedAt:Date.now(),
+        preDeleteHttpStatus:initialRes.status,
+        preDeleteExpectedBytes:knownTotal,
+        preDeleteFirstChunkBytes:first.bytes
+      }
+    };
+    persistItemTx(job, 0, tx, 'PROBE_RUNNING');
+
+    let streamResult;
+    try {
+      tx = await deleteOwnedTempForEarlyDeleteProbe(api, job, 0, onStatus);
+      onStatus?.('Linkex一時コピーの削除確認済み。既存CDN streamが生存するか確認します…');
+      streamResult = await consumeProbeStreamToEof(reader, first.bytes, knownTotal, onStatus);
+    } catch (e) {
+      try { await reader.cancel(); } catch {}
+      throw e;
+    }
+
+    tx = {
+      ...item.tx,
+      state:'PROBE_POST_DELETE_TESTS',
+      probe:{
+        ...(item.tx.probe||{}),
+        inFlightAfterDelete:{
+          passed:true,
+          eof:true,
+          bytes:streamResult.bytes,
+          expectedBytes:knownTotal,
+          durationMs:streamResult.durationMs,
+          completedAt:Date.now()
+        }
+      }
+    };
+    persistItemTx(job, 0, tx, 'PROBE_RUNNING');
+
+    onStatus?.('DELETE後の新規GETを確認しています…');
+    const fresh = await probeSignedUrlRequest(signedUrl);
+    const rangeOffset = knownTotal != null && knownTotal > 1 ? Math.min(1024 * 1024, knownTotal - 1) : 0;
+    onStatus?.(`DELETE後の新規Range GETを確認しています…\noffset: ${rangeOffset}`);
+    const range = await probeSignedUrlRequest(signedUrl, {rangeOffset});
+
+    const freshPassed = fresh.ok && [200,206].includes(fresh.status) && (fresh.firstChunkBytes > 0 || knownTotal === 0);
+    const rangePassed = range.ok && range.status === 206 && (range.firstChunkBytes > 0 || knownTotal === 0);
+    const verdict = streamResult.eof && freshPassed && rangePassed ? 'FULL_PASS' : (streamResult.eof ? 'PARTIAL_PASS' : 'FAIL');
+
+    const result = {
+      verdict,
+      inFlightAfterDelete:true,
+      freshGetAfterDelete:freshPassed,
+      rangeGetAfterDelete:rangePassed,
+      fresh,
+      range,
+      signedUrlPersisted:false,
+      localFileSaved:false,
+      tempDeleteConfirmed:true,
+      completedAt:Date.now()
+    };
+    tx = {
+      ...item.tx,
+      state:'PROBE_DONE',
+      probe:{...(item.tx.probe||{}), result}
+    };
+    persistItemTx(job, 0, tx, 'DONE');
+    job.state = 'PROBE_DONE';
+    job.completedAt = Date.now();
+    job.probe = {...job.probe, result};
+    saveQueueJob(job);
+    return job;
+  }
+
   async function ensureDeleted(api, job, index, onStatus) {
     assertLease();
     const item = job.items[index];
@@ -2119,6 +2394,7 @@ function sameOwnedIdentity(current, state) {
       generatedAt: new Date().toISOString(),
       signatureSelfTest: runSignatureSelfTest().map(x => ({name:x.name, ok:x.ok, actual:x.actual, expected:x.expected})),
       performance: redactForExport(buildPerformanceSummary(queue)),
+      earlyDeleteProbe: redactForExport(queue?.kind === 'early-delete-probe' ? (queue.probe || queue.items?.[0]?.tx?.probe || null) : null),
       queue: redactForExport(queue),
       events: redactForExport(loadEventLog())
     };
@@ -2207,7 +2483,7 @@ function sameOwnedIdentity(current, state) {
             <div class="selection-actions"><button id="lf-select-all" class="secondary">全件選択</button><button id="lf-clear-all" class="secondary">全解除</button><button id="lf-select-visible" class="secondary">表示中を選択</button><button id="lf-clear-visible" class="secondary">表示中を解除</button></div>
             <div id="lf-file-list" class="file-list"></div>
             <div id="lf-selection-note" class="notice"></div>
-            <div class="row" style="margin-top:8px;margin-bottom:0"><button id="lf-start-selected" class="primary" disabled>選択をダウンロード</button></div>
+            <div class="row" style="margin-top:8px;margin-bottom:0"><button id="lf-start-selected" class="primary" disabled>選択をダウンロード</button><button id="lf-early-delete-probe" class="warn" disabled>1件で早期DELETE検証</button></div>
           </div>
           <div id="lf-queue-actions" class="row" hidden><button id="lf-resume" class="primary" disabled>Queueを再開</button><button id="lf-pause" class="secondary" disabled>現在ファイル後に停止</button></div>
           <div class="progress-wrap">
@@ -2228,7 +2504,7 @@ function sameOwnedIdentity(current, state) {
               </details>
             </div>
           </details>
-          <div class="notice">安全規則: copy/delete応答不明時は盲目的に再送しません。削除はLOCAL_COMMITTEDかつ所有権確定済みdestId 1件だけ。実行中は別端末からLinkexを変更しないでください。診断ログはtoken・署名付きURLを伏せて書き出します。</div>
+          <div class="notice">通常DLの安全規則: copy/delete応答不明時は盲目的に再送しません。削除はLOCAL_COMMITTEDかつ所有権確定済みdestId 1件だけ。早期DELETE検証だけは専用1件Probeとして所有確認後・stream開始後に一時コピーを先に削除します。共有元は削除しません。診断ログはtoken・署名付きURLを伏せて書き出します。</div>
         </div>
       </div>`;
     document.body.appendChild(root);
@@ -2243,6 +2519,7 @@ function sameOwnedIdentity(current, state) {
     const startBtn = root.querySelector('#lf-start');
     const selectModeBtn = root.querySelector('#lf-select-mode');
     const selectedStartBtn = root.querySelector('#lf-start-selected');
+    const earlyDeleteProbeBtn = root.querySelector('#lf-early-delete-probe');
     const selectionPanel = root.querySelector('#lf-selection');
     const selectionMeta = root.querySelector('#lf-selection-meta');
     const fileFilter = root.querySelector('#lf-file-filter');
@@ -2306,7 +2583,7 @@ function sameOwnedIdentity(current, state) {
     if (prefs.collapsed) root.classList.add('collapsed');
     collapseBtn.textContent = prefs.collapsed ? '+' : '−';
 
-    function isTerminal(job) { return job && ['DONE','DONE_WITH_SKIPS'].includes(job.state); }
+    function isTerminal(job) { return job && ['DONE','DONE_WITH_SKIPS','PROBE_DONE'].includes(job.state); }
 
     function preferredDirectoryLabel() {
       if (!preferredHandleReady) return '読み込み中…';
@@ -2506,14 +2783,16 @@ function sameOwnedIdentity(current, state) {
       const active = job && !isTerminal(job);
       const busy = running || preparing;
       const hasShareInput = !!detectSharePageTarget(globalThis.location?.href || '') || !!String(input.value || '').trim();
-      resumeBtn.disabled = busy || !active;
-      resumeBtn.hidden = running || !active;
+      const probeActive = active && job?.kind === 'early-delete-probe';
+      resumeBtn.disabled = busy || !active || probeActive;
+      resumeBtn.hidden = running || !active || probeActive;
       pauseBtn.disabled = !running || !activeRunJob || !!activeRunJob.stopRequested;
       pauseBtn.hidden = !running;
       queueActions.hidden = resumeBtn.hidden && pauseBtn.hidden;
       startBtn.disabled = busy || !!active || !hasShareInput || !preferredHandleReady;
       selectModeBtn.disabled = busy || !!active || !hasShareInput;
       selectedStartBtn.disabled = busy || !manifest?.files?.length || selectedIndexes.size === 0 || !!active || !preferredHandleReady;
+      earlyDeleteProbeBtn.disabled = busy || !manifest?.files?.length || selectedIndexes.size !== 1 || !!active;
       const c = queueCounts(job);
       retryBtn.disabled = busy || !job || !(c.skippedCapacity || c.unfittable) || !isTerminal(job);
       abandonBtn.disabled = busy || !active;
@@ -2619,6 +2898,87 @@ function sameOwnedIdentity(current, state) {
       }
     }
 
+
+    async function startEarlyDeleteProbe() {
+      if (!manifest || running || preparing || selectedIndexes.size !== 1) return;
+      if (!resolveCredentials()) { write(credentialBootstrapMessage(), 'err'); return; }
+      const manifestIndex = Array.from(selectedIndexes)[0];
+      const source = manifest.files?.[manifestIndex];
+      if (!source) return;
+      const currentHref = String(globalThis.location?.href || '');
+      const currentPageTarget = detectSharePageTarget(currentHref);
+      if (isSharePageHost(currentHref) && (!currentPageTarget || currentPageTarget.shareToken !== manifest.shareToken)) {
+        write('共有ページが解析時点から変わっています。現在の共有をもう一度解析してください。', 'err');
+        return;
+      }
+
+      const pageWindow = getNativePageWindow();
+      const warning = [
+        '実験: 早期DELETE / signed URL 生存検証',
+        '',
+        'Downloaderが作成して所有確認した一時コピー1件を、ローカル保存完了前にLinkexから削除します。',
+        '共有元ファイルは削除しません。',
+        'CDNデータは保存せず読み捨てます。',
+        '',
+        '確認項目:',
+        '1. DELETE前に開始したstreamがDELETE後もEOFまで続くか',
+        '2. DELETE後に同じsigned URLで新規GETできるか',
+        '3. DELETE後に同じsigned URLで新規Range GET(206)できるか',
+        '',
+        `対象: ${source.remotePath || source.name}`,
+        `サイズ: ${formatBytes(source.size)}`,
+        '',
+        'この1件で検証しますか？'
+      ].join('\n');
+      if (!Reflect.apply(pageWindow.confirm, pageWindow, [warning])) return;
+
+      running = true;
+      try {
+        await acquireLease();
+        const activeJob = loadQueueJob();
+        if (activeJob && !isTerminal(activeJob)) {
+          throw new LinkexError('別の未完了Queueがあります。先に状態を整理してください。', {kind:'queue_conflict'});
+        }
+        const job = createQueueFromManifest(manifest, new Set([manifestIndex]));
+        job.kind = 'early-delete-probe';
+        job.folderName = '(probe stream is discarded)';
+        job.state = 'READY';
+        saveQueueJob(job);
+        activeRunJob = job;
+        refreshQueueUi();
+        recordEvent('warn', 'early-delete-probe-start', `早期DELETE検証開始: ${source.remotePath || source.name}`, {jobId:job.jobId, sourceSize:source.size});
+        write(`早期DELETE検証を開始します。\n${source.remotePath || source.name}\n\nローカル保存は行いません。`, 'ok');
+        const result = await processEarlyDeleteProbe(job, t => write(`${t}\n\n${queueSummary(loadQueueJob())}`));
+        const probe = result.probe?.result || result.items?.[0]?.tx?.probe?.result || {};
+        write([
+          `早期DELETE検証完了: ${probe.verdict || 'UNKNOWN'}`,
+          '',
+          `既存stream継続: ${probe.inFlightAfterDelete ? 'PASS' : 'FAIL'}`,
+          `DELETE後 fresh GET: ${probe.freshGetAfterDelete ? 'PASS' : 'FAIL'}`,
+          `DELETE後 Range GET(206): ${probe.rangeGetAfterDelete ? 'PASS' : 'FAIL'}`,
+          '',
+          'Linkex一時コピーは削除確認済みです。',
+          '「診断ログを保存」で結果を送ってください。'
+        ].join('\n'), probe.verdict === 'FULL_PASS' ? 'ok' : '');
+        recordEvent('info', 'early-delete-probe-done', `早期DELETE検証: ${probe.verdict || 'UNKNOWN'}`, {result:probe});
+      } catch (e) {
+        const job = loadQueueJob();
+        if (job && job.kind === 'early-delete-probe' && !isTerminal(job)) {
+          job.state = 'PROBE_BLOCKED';
+          job.lastError = {message:e?.message || String(e), kind:e?.kind || null, at:Date.now()};
+          saveQueueJob(job);
+        }
+        console.error('[Early delete probe]', e);
+        write(`早期DELETE検証停止: ${e?.message || e}\n\n${queueSummary(loadQueueJob())}\n\nDELETE送信結果が不明な場合は自動再送しません。診断ログ保存後、必要ならQueueを安全に破棄してください。`, 'err');
+        recordEvent('error', 'early-delete-probe-stop', `早期DELETE検証停止: ${e?.message || e}`, {kind:e?.kind || null});
+      } finally {
+        activeRunJob = null;
+        running = false;
+        releaseLease();
+        refreshQueueUi();
+      }
+    }
+
     async function startManifestQueue(selection = null, {baseDir = null, skipConfirm = false} = {}) {
       if (!manifest || running) return;
       const selected = selection == null ? null : Array.from(selection).sort((a,b) => a - b);
@@ -2705,6 +3065,10 @@ function sameOwnedIdentity(current, state) {
         write(`ファイルを選択してください。\n${manifest.files.length}件 / ${formatBytes(manifest.totalBytes)}\n選択後に「選択をダウンロード」を押します。`, 'ok');
       } catch (e) { handleAnalyzeFailure(e); }
       finally { preparing = false; refreshQueueUi(); }
+    });
+
+    earlyDeleteProbeBtn.addEventListener('click', async () => {
+      await startEarlyDeleteProbe();
     });
 
     selectedStartBtn.addEventListener('click', async () => {
@@ -2829,6 +3193,8 @@ function sameOwnedIdentity(current, state) {
       if (!job) write('保存済みQueueはありません。');
       else if (job.state === 'DONE') write(`前回Queueは完了済みです。\n\n${queueSummary(job, {detail:true})}`, 'ok');
       else if (job.state === 'DONE_WITH_SKIPS') write(`前回Queueはスキップありで走査完了しています。\n\n${queueSummary(job, {detail:true})}`, 'ok');
+      else if (job.state === 'PROBE_DONE') write(`早期DELETE検証は完了済みです。\n\n${queueSummary(job, {detail:true})}\n\n診断ログを保存してください。`, 'ok');
+      else if (job.kind === 'early-delete-probe') write(`中断された早期DELETE検証があります。\n\n${queueSummary(job)}\n\nこのProbeは自動再開しません。診断ログ保存後、「Queueを安全に破棄」で整理してください。`, 'err');
       else write(`未完了Queueがあります。\n\n${queueSummary(job)}\n\n「Queueを再開」で状態照合から続けられます。`);
     });
 
@@ -2856,6 +3222,8 @@ function sameOwnedIdentity(current, state) {
     if (existing) {
       if (existing.state === 'DONE') write(`前回Full Queueは完了済みです。\n\n${queueSummary(existing, {detail:true})}\n\n別共有は「すべてダウンロード」から開始できます。`, 'ok');
       else if (existing.state === 'DONE_WITH_SKIPS') write(`前回Full Queueはスキップありで走査完了しています。\n\n${queueSummary(existing, {detail:true})}\n\n容量条件を変えた場合は「容量スキップを再試行」が使えます。`, 'ok');
+      else if (existing.state === 'PROBE_DONE') write(`前回の早期DELETE検証は完了しています。\n\n${queueSummary(existing, {detail:true})}\n\n診断ログを保存してください。`, 'ok');
+      else if (existing.kind === 'early-delete-probe') write(`中断された早期DELETE検証を検出しました。\n\n${queueSummary(existing)}\n\n自動再開はしません。診断ログ保存後、「Queueを安全に破棄」で整理してください。`, 'err');
       else write(`未完了Full Queueを検出しました。\n\n${queueSummary(existing)}\n\n「Queueを再開」で状態照合から続けられます。`, '');
     }
     recordEvent('info', 'startup', `Linkex Downloader v${VERSION} 起動`);
