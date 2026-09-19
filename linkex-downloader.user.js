@@ -922,16 +922,20 @@
   return saveProbeState({...current, state:'LOCAL_COMMITTED', download:{...(current.download||{}), destId, downloadedBytes:downloaded, expectedCdnBytes:expected, sizeVerified, verificationMethod, streamComplete, sourceMetaSize:Number(state.source?.size || 0), verifiedAt:Date.now(), localName}});
 }
 
-async function downloadOwnedFile({api, state, handle, onProgress = () => {}, onPhase = () => {}}) {
+async function downloadOwnedFile({api, state, handle, detachedUrl = null, onProgress = () => {}, onPhase = () => {}}) {
     const destId = state?.confirmedDest?.id;
     if (!destId || state.state === 'AMBIGUOUS_COPY') throw new LinkexError('所有権確定済みdestIdがありません。', {kind:'ownership'});
     await ensureHandlePermission(handle);
 
     let localFile = await handle.getFile();
     let offset = localFile.size;
-    let owned = await refreshOwnedFileUrl(api, destId);
-    if (!sameOwnedIdentity(owned, state)) throw new LinkexError('確定済みdestIdのidentityが所有権確定時から変化しました。自動処理を停止します。', {kind:'ownership_lost', destId});
-    let url = owned.url;
+    let owned = null;
+    let url = detachedUrl ? String(detachedUrl) : '';
+    if (!url) {
+      owned = await refreshOwnedFileUrl(api, destId);
+      if (!sameOwnedIdentity(owned, state)) throw new LinkexError('確定済みdestIdのidentityが所有権確定時から変化しました。自動処理を停止します。', {kind:'ownership_lost', destId});
+      url = owned.url;
+    }
     let retried403 = false;
 
     while (true) {
@@ -939,6 +943,9 @@ async function downloadOwnedFile({api, state, handle, onProgress = () => {}, onP
 
       if (res.status === 403 && !retried403) {
         try { await res.body?.cancel(); } catch {}
+        if (detachedUrl) {
+          throw new LinkexError('早期DELETE後のsigned URLが403になりました。再COPYで新しいURLを取得して再開してください。', {kind:'signed_url_expired', status:403});
+        }
         owned = await refreshOwnedFileUrl(api, destId);
         if (!sameOwnedIdentity(owned, state)) throw new LinkexError('URL再取得時にdestIdのidentity変化を検出しました。自動処理を停止します。', {kind:'ownership_lost', destId});
         url = owned.url;
@@ -1198,6 +1205,8 @@ function sameOwnedIdentity(current, state) {
   const PIPELINE_DOWNLOAD_WORKERS = 2;
   const PIPELINE_DELETE_WORKERS = 1;
   const PIPELINE_MAX_IN_FLIGHT = 3;
+  const EARLY_DELETE_DOWNLOAD_WORKERS = 4;
+  const EARLY_DELETE_MAX_IN_FLIGHT = EARLY_DELETE_DOWNLOAD_WORKERS + 1;
   let queueCommitTail = Promise.resolve();
 
   function commitQueueJob(job, mutate = null) {
@@ -1442,7 +1451,7 @@ function sameOwnedIdentity(current, state) {
       else if (s === 'SKIPPED_CAPACITY' || s === 'BLOCKED_CAPACITY') c.skippedCapacity++;
       else if (s === 'UNFITTABLE') c.unfittable++;
       else if (['BLOCKED','ERROR'].includes(s)) c.blocked++;
-      else if (['COPYING','COPIED','DOWNLOADING','LOCAL_COMMITTED','DELETING'].includes(s)) c.active++;
+      else if (['COPYING','COPIED','DOWNLOADING','LOCAL_COMMITTED','DELETING','EARLY_DELETE_INTENT','EARLY_DELETE_REQUEST_SENT','EARLY_DELETE_CONFIRMED','EARLY_DELETE_DOWNLOADING'].includes(s)) c.active++;
       else c.pending++;
     }
     return c;
@@ -1751,6 +1760,421 @@ function sameOwnedIdentity(current, state) {
     throw lastErr || new LinkexError('ダウンロードに失敗しました。');
   }
 
+
+
+  function assertEarlyDeletePipelineGuards(job, index, tx) {
+    if (job?.kind !== 'early-delete-pipeline') {
+      throw new LinkexError('早期DELETE並列DL専用Queueではありません。', {kind:'early_delete_guard'});
+    }
+    if (!tx || tx.state === 'AMBIGUOUS_COPY') {
+      throw new LinkexError('早期DELETE並列DL: COPY所有権が確定していません。', {kind:'early_delete_guard'});
+    }
+    const destId = String(tx.confirmedDest?.id || '');
+    if (!destId) throw new LinkexError('早期DELETE並列DL: confirmedDest.id がありません。', {kind:'early_delete_guard'});
+    if (!Array.isArray(tx.beforeIds)) throw new LinkexError('早期DELETE並列DL: コピー前ID集合がありません。', {kind:'early_delete_guard'});
+    if (tx.beforeIds.map(String).includes(destId)) {
+      throw new LinkexError('早期DELETE並列DL拒否: destId はCOPY前から存在していました。', {kind:'early_delete_guard'});
+    }
+    return {destId};
+  }
+
+  async function deleteOwnedTempForEarlyDeletePipeline(api, job, index, onStatus) {
+    assertLease();
+    const item = job.items[index];
+    let tx = item.tx;
+    const guard = assertEarlyDeletePipelineGuards(job, index, tx);
+
+    if (['EARLY_DELETE_INTENT','EARLY_DELETE_REQUEST_SENT','EARLY_DELETE_UNCERTAIN'].includes(tx.state)) {
+      onStatus?.(`早期DELETE結果照合 [${index+1}/${job.items.length}]\n${item.source.remotePath}\nDELETE POST再送: NO`);
+      const rec = await reconcileDelete(api, tx, {
+        timeoutMs:30000,
+        onProgress:x => onStatus?.(`早期DELETE照合 [${index+1}/${job.items.length}]\n存在: ${x.exists ? 'YES' : 'NO'}\n再送: NO`)
+      });
+      if (rec.status === 'ABSENT') {
+        tx = {
+          ...tx,
+          state:'EARLY_DELETE_CONFIRMED',
+          earlyDelete:{...(tx.earlyDelete||{}), confirmedAbsentAt:Date.now()},
+          delete:{...(tx.delete||{}), destId:guard.destId, confirmedAbsentAt:Date.now(), experimentalEarlyDelete:true}
+        };
+        tx = perfPhaseEnd(tx, 'delete', Date.now(), {outcome:'early-confirmed-absent'});
+        persistItemTx(job, index, tx, 'EARLY_DELETE_CONFIRMED');
+        return tx;
+      }
+      tx = {...tx, state:'EARLY_DELETE_UNCERTAIN', earlyDelete:{...(tx.earlyDelete||{}), lastSeenAt:Date.now()}};
+      persistItemTx(job, index, tx, 'BLOCKED');
+      throw new LinkexError('早期DELETE結果が不明でdestIdがまだ存在します。安全のためDELETEを再送しません。', {kind:'early_delete_uncertain'});
+    }
+
+    if (tx.state !== 'OWNERSHIP_CONFIRMED') {
+      throw new LinkexError(`早期DELETE並列DL: 所有確定直後以外ではDELETEを開始できません (state=${tx.state})`, {kind:'early_delete_guard'});
+    }
+
+    const current = await findOwnedRootFile(api, guard.destId);
+    if (!current) {
+      throw new LinkexError('早期DELETE前にdestIdが消失しました。外部変更の可能性があるため停止します。', {kind:'early_delete_external_change'});
+    }
+    if (!sameOwnedIdentity(current, tx)) {
+      throw new LinkexError('早期DELETE拒否: 現在のdestId identityが所有権確定時と一致しません。', {kind:'early_delete_guard'});
+    }
+
+    tx = perfPhaseStart(tx, 'delete');
+    tx = {
+      ...tx,
+      state:'EARLY_DELETE_INTENT',
+      earlyDelete:{...(tx.earlyDelete||{}), intendedAt:Date.now(), signedUrlInMemoryOnly:true},
+      delete:{destId:guard.destId, intendedAt:Date.now(), requestSent:false, experimentalEarlyDelete:true}
+    };
+    persistItemTx(job, index, tx, 'EARLY_DELETE_INTENT');
+    onStatus?.(`EARLY DELETE [${index+1}/${job.items.length}]\n${item.source.remotePath}\ndestId: ${guard.destId}\n所有確認済み一時コピー1件だけ削除します…`);
+
+    try {
+      assertLease();
+      const result = await api.deleteSingleFile(guard.destId);
+      tx = {
+        ...tx,
+        state:'EARLY_DELETE_REQUEST_SENT',
+        delete:{...(tx.delete||{}), requestSent:true, response:result ?? {}, requestCompletedAt:Date.now()}
+      };
+      persistItemTx(job, index, tx, 'EARLY_DELETE_REQUEST_SENT');
+    } catch (e) {
+      tx = {
+        ...tx,
+        state:'EARLY_DELETE_UNCERTAIN',
+        delete:{...(tx.delete||{}), requestSent:true, requestError:{message:e?.message || String(e), kind:e?.kind || null}, requestFailedAt:Date.now()}
+      };
+      persistItemTx(job, index, tx, 'EARLY_DELETE_UNCERTAIN');
+    }
+    return await deleteOwnedTempForEarlyDeletePipeline(api, job, index, onStatus);
+  }
+
+  function canRearmEarlyDeleteItem(item) {
+    const tx = item?.tx;
+    if (!tx || tx.state === 'DONE') return false;
+    return !!tx.delete?.confirmedAbsentAt && ['EARLY_DELETE_CONFIRMED','DOWNLOAD_READY','DOWNLOADING','DOWNLOAD_PAUSED','VERIFY_FAILED','LOCAL_COMMITTED'].includes(tx.state);
+  }
+
+  function rearmEarlyDeleteItem(job, index) {
+    const item = job.items[index];
+    const previous = item.tx;
+    if (!canRearmEarlyDeleteItem(item)) return false;
+    item.earlyDeleteHistory = [...(item.earlyDeleteHistory || []), {
+      operationId:previous.operationId,
+      confirmedDestId:previous.confirmedDest?.id || null,
+      deleteConfirmedAbsentAt:previous.delete?.confirmedAbsentAt || null,
+      download:previous.download ? {
+        downloadedBytes:Number(previous.download.downloadedBytes || 0),
+        expectedCdnBytes:previous.download.expectedCdnBytes == null ? null : Number(previous.download.expectedCdnBytes),
+        verificationMethod:previous.download.verificationMethod || null,
+        verifiedAt:previous.download.verifiedAt || null
+      } : null,
+      archivedAt:Date.now()
+    }].slice(-5);
+    clearProbeState(previous);
+    item.tx = null;
+    item.state = 'PENDING';
+    item.lastError = null;
+    saveQueueJob(job);
+    return true;
+  }
+
+  async function ensureDetachedDownloaded(api, job, index, queueRoot, signedUrl, onStatus) {
+    assertLease();
+    const item = job.items[index];
+    let tx = item.tx;
+    if (tx.state === 'LOCAL_COMMITTED' || tx.state === 'DONE') return tx;
+    if (tx.state !== 'EARLY_DELETE_CONFIRMED') {
+      throw new LinkexError(`早期DELETE確認前にはDLを開始できません (state=${tx.state})`, {kind:'early_delete_state'});
+    }
+    if (!signedUrl) throw new LinkexError('signed URLがメモリ上にありません。再COPYが必要です。', {kind:'signed_url_missing'});
+
+    const handle = await getLocalFileHandle(queueRoot, item);
+    await ensureHandlePermission(handle);
+    const local = await handle.getFile();
+    tx = {
+      ...tx,
+      state:'DOWNLOAD_READY',
+      download:{
+        ...(tx.download||{}),
+        destId:tx.confirmedDest.id,
+        localName:local.name,
+        downloadedBytes:local.size,
+        startedAt:tx.download?.startedAt || Date.now(),
+        detachedAfterDelete:true,
+        signedUrlPersisted:false,
+        updatedAt:Date.now()
+      }
+    };
+    tx = perfPhaseStart(tx, 'download');
+    persistItemTx(job, index, tx, 'EARLY_DELETE_DOWNLOADING');
+
+    let lastErr = null;
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      assertLease();
+      item.attempts.download = (item.attempts.download || 0) + 1;
+      saveQueueJob(job);
+      try {
+        onStatus?.(`EARLY-DELETE DOWNLOADING [${index+1}/${job.items.length}]\n${item.source.remotePath}\nattempt ${attempt} / pool ${EARLY_DELETE_DOWNLOAD_WORKERS}`);
+        let downloadEndedAt = null;
+        let verifyStartedAt = null;
+        let verifyEndedAt = null;
+        const result = await downloadOwnedFile({
+          api,
+          state:tx,
+          handle,
+          detachedUrl:signedUrl,
+          onProgress:x => {
+            const pct = x.expectedTotal ? Math.min(100, x.written / x.expectedTotal * 100) : null;
+            const rateText = x.averageBytesPerSecond > 0 ? `\n平均 ${formatTransferRate(x.averageBytesPerSecond)} / 瞬間 ${formatTransferRate(x.instantBytesPerSecond)}` : '';
+            onStatus?.(`EARLY-DELETE DOWNLOADING [${index+1}/${job.items.length}]\n${item.source.remotePath}\n${formatBytes(x.written)}${x.expectedTotal ? ` / ${formatBytes(x.expectedTotal)}` : ''}${pct == null ? '' : ` (${pct.toFixed(1)}%)`}${rateText}\n${x.resumed ? 'Range resume' : 'full/restart'} · temp already deleted`);
+          },
+          onPhase:x => {
+            if (x?.phase === 'download-end') downloadEndedAt = Number(x.at || Date.now());
+            if (x?.phase === 'verify-start') verifyStartedAt = Number(x.at || Date.now());
+            if (x?.phase === 'verify-end') verifyEndedAt = Number(x.at || Date.now());
+          }
+        });
+        tx = syncTxFromProbe(job, index);
+        if (tx.state !== 'LOCAL_COMMITTED') throw new LinkexError(`DL後stateがLOCAL_COMMITTEDではありません: ${tx.state}`, {kind:'state'});
+        const t = result?.telemetry || tx.download?.telemetry || {};
+        tx = perfPhaseEnd(tx, 'download', downloadEndedAt || Date.now(), {
+          transferredBytes:Number(t.transferredBytes || 0),
+          transferDurationMs:Number(t.durationMs || 0),
+          averageBytesPerSecond:Number(t.averageBytesPerSecond || 0),
+          averageMBps:Number(t.averageMBps || 0),
+          peakBytesPerSecond:Number(t.peakBytesPerSecond || 0),
+          resumed:!!result?.resumed,
+          attempts:Number(item.attempts.download || 0),
+          detachedAfterDelete:true
+        });
+        if (verifyStartedAt) {
+          const end = verifyEndedAt || Date.now();
+          tx = perfPhaseSet(tx, 'verify', {
+            startedAt:verifyStartedAt,
+            endedAt:end,
+            durationMs:Math.max(0, end - verifyStartedAt),
+            verificationMethod:result?.verificationMethod || tx.download?.verificationMethod || null
+          });
+        }
+        tx = {...tx, download:{...(tx.download||{}), telemetry:t, detachedAfterDelete:true, signedUrlPersisted:false}};
+        persistItemTx(job, index, tx, 'LOCAL_COMMITTED');
+        return tx;
+      } catch (e) {
+        lastErr = e;
+        tx = syncTxFromProbe(job, index) || tx;
+        if (attempt < 3 && ['network','cdn','range_416'].includes(e?.kind || 'network')) {
+          onStatus?.(`早期DELETE後のDL一時失敗。同じsigned URLでRange再開します (${attempt}/3)\n${e?.message || e}`);
+          await sleep(1000 * attempt);
+          continue;
+        }
+        break;
+      }
+    }
+    throw lastErr || new LinkexError('早期DELETE後のダウンロードに失敗しました。');
+  }
+
+  async function processEarlyDeletePipeline(job, queueRoot, onStatus) {
+    if (!job || job.kind !== 'early-delete-pipeline' || !queueRoot) {
+      throw new LinkexError('早期DELETE並列Queueまたは保存先がありません。', {kind:'state'});
+    }
+    await ensureHandlePermission(queueRoot);
+    const creds = resolveCredentials();
+    if (!creds) throw new LinkexError(credentialBootstrapMessage(), {kind:'auth'});
+    const api = new LinkexApi({token:creds.token});
+    const downloadSlots = createAsyncSemaphore(EARLY_DELETE_DOWNLOAD_WORKERS);
+    const inFlightSlots = createAsyncSemaphore(EARLY_DELETE_MAX_IN_FLIGHT);
+    const capacity = await createCapacityReservation(api);
+    const tasks = new Set();
+    let fatalError = null;
+    let fatalIndex = null;
+    let pauseRequested = false;
+
+    job.state = 'RUNNING';
+    job.lastError = null;
+    job.pipeline = {
+      schemaVersion:1,
+      mode:'early-delete',
+      copyWorkers:1,
+      earlyDeleteWorkers:1,
+      downloadWorkers:EARLY_DELETE_DOWNLOAD_WORKERS,
+      maxInFlight:EARLY_DELETE_MAX_IN_FLIGHT,
+      signedUrlPersistence:false,
+      startedAt:Date.now()
+    };
+    saveQueueJob(job);
+
+    const markFatal = async (index, error) => {
+      const kind = error?.kind || null;
+      if (!fatalError) { fatalError = error; fatalIndex = index; }
+      await commitQueueJob(job, () => {
+        const item = job.items[index];
+        item.lastError = {message:error?.message || String(error), kind, at:Date.now()};
+        item.state = item.tx?.state === 'DONE' ? 'DONE' : 'BLOCKED';
+        job.state = 'PAUSED';
+        job.lastError = {message:error?.message || String(error), kind, index, at:Date.now()};
+      });
+    };
+
+    const markSkippable = async (index, error) => {
+      const kind = error?.kind || null;
+      await commitQueueJob(job, () => {
+        const item = job.items[index];
+        item.lastError = {message:error?.message || String(error), kind, at:Date.now()};
+        item.state = kind === 'unfittable' ? 'UNFITTABLE' : 'SKIPPED_CAPACITY';
+      });
+      const item = job.items[index];
+      onStatus?.(`${kind === 'unfittable' ? '単一ファイル上限' : '現在のCOPY可能容量不足'}でスキップ [${index+1}/${job.items.length}]\n${item.source.remotePath}\n次へ進みます。`);
+    };
+
+    const launchDetachedDownload = (index, signedUrl, releaseInFlight) => {
+      const item = job.items[index];
+      const task = (async () => {
+        const releaseDownload = await downloadSlots.acquire();
+        try {
+          assertLease();
+          await ensureDetachedDownloaded(api, job, index, queueRoot, signedUrl, onStatus);
+          await commitQueueJob(job, () => {
+            let tx = item.tx;
+            if (tx.state !== 'LOCAL_COMMITTED') throw new LinkexError(`完了前state異常: ${tx.state}`, {kind:'state'});
+            tx = {...tx, state:'DONE'};
+            tx = perfPhaseEnd(tx, 'total', Date.now(), {outcome:'done-early-delete'});
+            item.tx = tx;
+            item.state = 'DONE';
+            compactCompletedItem(job, item);
+          });
+          onStatus?.(`完了 [${index+1}/${job.items.length}]\n${item.source.remotePath}\nローカル検証済み / Linkex一時コピーはDL前に削除確認済み`);
+        } catch (e) {
+          await markFatal(index, e);
+        } finally {
+          releaseDownload();
+          releaseInFlight();
+        }
+      })();
+      tasks.add(task);
+      task.finally(() => tasks.delete(task));
+      return task;
+    };
+
+    for (let i = 0; i < job.items.length; i++) {
+      assertLease();
+      if (fatalError) break;
+      if (job.stopRequested) { pauseRequested = true; break; }
+
+      await commitQueueJob(job, () => { job.currentIndex = i; });
+      const item = job.items[i];
+      if (item.state === 'DONE' || item.tx?.state === 'DONE') {
+        compactCompletedItem(job, item);
+        saveQueueJob(job);
+        continue;
+      }
+      if (['SKIPPED_CAPACITY','UNFITTABLE'].includes(item.state)) continue;
+
+      if (canRearmEarlyDeleteItem(item)) {
+        onStatus?.(`再開準備 [${i+1}/${job.items.length}]\n前回の一時コピーは削除済み。新しいCOPY/URLを取得してローカルpartialへRange再開します。`);
+        rearmEarlyDeleteItem(job, i);
+      }
+      if (item.tx && ['EARLY_DELETE_INTENT','EARLY_DELETE_REQUEST_SENT','EARLY_DELETE_UNCERTAIN'].includes(item.tx.state)) {
+        // DELETE uncertainty must be reconciled before any new COPY.
+        try {
+          await deleteOwnedTempForEarlyDeletePipeline(api, job, i, onStatus);
+          rearmEarlyDeleteItem(job, i);
+        } catch (e) {
+          await markFatal(i, e);
+          break;
+        }
+      }
+      if (item.tx) {
+        await markFatal(i, new LinkexError(`早期DELETE Queueの再開状態を安全に再構成できません: ${item.tx.state}`, {kind:'early_delete_resume_state'}));
+        break;
+      }
+
+      const releaseInFlight = await inFlightSlots.acquire();
+      if (fatalError || job.stopRequested) {
+        releaseInFlight();
+        if (job.stopRequested) pauseRequested = true;
+        break;
+      }
+
+      let reservation = null;
+      try {
+        while (true) {
+          try {
+            reservation = await capacity.reserve(Number(item.source?.size || 0));
+            break;
+          } catch (e) {
+            if (e?.kind !== 'capacity') throw e;
+            if (tasks.size === 0) throw e;
+            // Normally early DELETE releases reservation before a download task is launched.
+            // Waiting here is only a conservative fallback if Linkex reports delayed quota release.
+            await Promise.race(Array.from(tasks));
+            if (fatalError || job.stopRequested) throw new LinkexError('容量待機中に停止しました。', {kind:'pause'});
+          }
+        }
+
+        if (fatalError || job.stopRequested) {
+          capacity.release(reservation);
+          releaseInFlight();
+          if (job.stopRequested) pauseRequested = true;
+          break;
+        }
+
+        let tx = await ensureCopyOwned(api, job, i, onStatus, {capacityReserved:true});
+        assertLease();
+        const owned = await refreshOwnedFileUrl(api, tx.confirmedDest?.id);
+        if (!sameOwnedIdentity(owned, tx)) {
+          throw new LinkexError('signed URL取得時にdestId identity変化を検出しました。', {kind:'ownership_lost'});
+        }
+        const signedUrl = owned.url; // Memory-only; never persisted.
+        tx = {
+          ...item.tx,
+          earlyDelete:{...(item.tx.earlyDelete||{}), signedUrlObtainedAt:Date.now(), signedUrlPersisted:false}
+        };
+        persistItemTx(job, i, tx, 'COPIED');
+
+        await deleteOwnedTempForEarlyDeletePipeline(api, job, i, onStatus);
+        capacity.release(reservation);
+        reservation = null;
+
+        // A deleted temporary file no longer consumes Linkex capacity. The signed URL stays only
+        // in this closure; one extra in-flight slot is allowed to overlap COPY/DELETE with DL=4.
+        launchDetachedDownload(i, signedUrl, releaseInFlight);
+      } catch (e) {
+        if (reservation) capacity.release(reservation);
+        releaseInFlight();
+        if (['capacity','unfittable'].includes(e?.kind)) {
+          await markSkippable(i, e);
+          continue;
+        }
+        if (e?.kind === 'pause') {
+          pauseRequested = true;
+          break;
+        }
+        await markFatal(i, e);
+        break;
+      }
+    }
+
+    await Promise.allSettled(Array.from(tasks));
+    if (fatalError) {
+      job.state = 'PAUSED';
+      job.lastError = {message:fatalError?.message || String(fatalError), kind:fatalError?.kind || null, index:fatalIndex, at:Date.now()};
+      saveQueueJob(job);
+      throw fatalError;
+    }
+    if (pauseRequested || job.stopRequested) {
+      job.stopRequested = false;
+      job.state = 'PAUSED_USER';
+      saveQueueJob(job);
+      return job;
+    }
+
+    const counts = queueCounts(job);
+    job.completedAt = Date.now();
+    job.pipeline = {...(job.pipeline||{}), completedAt:job.completedAt};
+    job.state = (counts.skippedCapacity || counts.unfittable) ? 'DONE_WITH_SKIPS' : 'DONE';
+    saveQueueJob(job);
+    return job;
+  }
 
   function assertEarlyDeleteProbeGuards(job, index, tx) {
     if (job?.kind !== 'early-delete-probe' || job.items?.length !== 1 || index !== 0) {
