@@ -6,8 +6,8 @@ const fs = require('node:fs');
 
 const SOURCE = fs.readFileSync('linkex-downloader.user.js', 'utf8');
 
-test('early-delete pipeline is COPY=1 / early DELETE=1 / DOWNLOAD=4 with four prefetch slots', () => {
-  assert.match(SOURCE, /const EARLY_DELETE_DOWNLOAD_WORKERS = 4;/);
+test('early-delete pipeline is COPY=1 / early DELETE=1 / DOWNLOAD=6 with six prefetch slots', () => {
+  assert.match(SOURCE, /const EARLY_DELETE_DOWNLOAD_WORKERS = 6;/);
   assert.match(SOURCE, /const EARLY_DELETE_MAX_IN_FLIGHT = EARLY_DELETE_DOWNLOAD_WORKERS \* 2;/);
   const start = SOURCE.indexOf('async function processEarlyDeletePipeline');
   const end = SOURCE.indexOf('function assertEarlyDeleteProbeGuards', start);

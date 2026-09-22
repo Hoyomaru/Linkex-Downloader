@@ -289,3 +289,25 @@ This is slower than the previous DOWNLOAD=2 browser pipeline (62.03 MiB/s pool, 
 Post-run timing analysis shows a starvation pattern rather than a destructive-action failure. Within the 130.091 s transfer window, no transfer was active for about 46.489 s. The first 16 setup transactions were fast (COPY ~251 ms median, ownership reconciliation ~236 ms, URL-refresh-to-delete gap ~464 ms, DELETE ~478 ms). From item 17 onward those control-plane phases stepped to approximately COPY 0.99 s, reconciliation 1.00 s, URL-refresh-to-delete gap 1.98 s, and DELETE 2.02 s. Because maxInFlight=5 allowed only one prefetched detached URL beyond the four download workers, that setup slowdown drained the download pool.
 
 Next isolated A/B: keep DOWNLOAD=4 and every destructive guard unchanged, but raise early-delete maxInFlight from 5 to 8. This allows up to four memory-only signed URLs to wait behind four active downloads. The signed URLs are still never persisted. If this does not recover utilization, the next target is control-plane request reduction/pacing rather than higher download concurrency.
+
+
+### Early-delete prefetch=8 result (2026-09-22)
+
+With DOWNLOAD=4 unchanged and maxInFlight increased from 5 to 8, the same 26-file / 6.37 GB workload completed safely.
+
+- transferred bytes: 6,372,761,319
+- transfer window: 81.779 s
+- pool throughput: 74.32 MiB/s
+- pipeline wall: 83.829 s
+- pipeline effective: 72.50 MiB/s
+- queue wall: 84.187 s
+- queue effective: 72.19 MiB/s
+- completed: 26/26, no capacity skips, no blocked items
+
+Compared with the first early-delete DL=4 run (maxInFlight=5), queue wall improved from 132.571 s to 84.187 s and queue effective throughput improved from 45.84 MiB/s to 72.19 MiB/s. Compared with the previous browser DOWNLOAD=2 candidate, queue wall is 16.52% shorter and queue effective throughput is 19.79% higher.
+
+Concurrency analysis of the transfer window: DOWNLOAD=4 was reached, zero-active time fell to about 1.269 s, and average active download concurrency was about 2.73. This confirms that the earlier regression was primarily starvation from an insufficient detached-URL prefetch window, not an inherent penalty from early DELETE.
+
+Control-plane phase timings were also stable in this run (COPY median ~252 ms, ownership reconciliation median ~237 ms, DELETE median ~478 ms), so the previous late-run multi-second slowdown appears transient rather than a required behavior.
+
+Next isolated experiment: raise active DOWNLOAD workers from 4 to 6 while preserving a full extra worker-pool worth of detached URL prefetch (maxInFlight=12). All ownership and destructive-action guards remain unchanged.
