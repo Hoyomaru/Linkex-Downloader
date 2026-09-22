@@ -1209,10 +1209,16 @@ let detachedDownloadWorkerUrl = null;
     };
   }
 
+  function resolveDownloadWorkerConstructor() {
+    if (typeof globalThis.Worker === 'function') return globalThis.Worker;
+    if (typeof unsafeWindow !== 'undefined' && typeof unsafeWindow?.Worker === 'function') return unsafeWindow.Worker;
+    return null;
+  }
+
   function canUseDetachedDownloadWorker({detachedUrl, interruptAfterBytes}) {
     return !!detachedUrl &&
       !(Number.isFinite(Number(interruptAfterBytes)) && Number(interruptAfterBytes) > 0) &&
-      typeof globalThis.Worker === 'function' &&
+      !!resolveDownloadWorkerConstructor() &&
       typeof globalThis.Blob === 'function' &&
       typeof globalThis.URL?.createObjectURL === 'function';
   }
@@ -1232,7 +1238,9 @@ let detachedDownloadWorkerUrl = null;
     if (!destId) throw new LinkexError('Worker DL対象のdestIdがありません。', {kind:'ownership'});
     let worker;
     try {
-      worker = new Worker(getDetachedDownloadWorkerUrl());
+      const WorkerCtor = resolveDownloadWorkerConstructor();
+      if (!WorkerCtor) throw new Error('Worker constructor unavailable');
+      worker = new WorkerCtor(getDetachedDownloadWorkerUrl());
     } catch (e) {
       throw new LinkexError(`Web Worker起動失敗: ${e?.message || e}`, {kind:'worker_start'});
     }
@@ -1395,7 +1403,7 @@ let detachedDownloadWorkerUrl = null;
       } catch (e) {
         // CSP / userscript sandbox / handle-clone failures fall back to the proven inline path.
         // Network/CDN/filesystem errors remain real transfer errors and are handled by the normal Range retry layer.
-        if (!['worker_unavailable','worker_start','range_416'].includes(e?.kind)) throw e;
+        if (!['worker_unavailable','worker_start','range_416','network'].includes(e?.kind)) throw e;
         console.warn('[Linkex Downloader] Worker path unavailable; falling back to inline transfer.', e);
       }
     }
