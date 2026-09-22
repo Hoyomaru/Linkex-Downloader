@@ -33,16 +33,16 @@ signed CDN URL をメモリ上だけで取得
 
 ## Version / 配布状態
 
-- `main` source: **v1.3.0**（release commit準備済み / 公開前）
-- 最新公開安定版: **v1.2.1**
-- 最新公開tag: **`v1.2.1`**
-- GitHub Release: **v1.2.1 公開済み（2026-09-17）**
-- Release commit: `ac698e0d3d8f6a6e6ba876cf2ea64e8cc98e1ac5`
+- `main` source: **v1.3.0**（公開済み / 実機確認済み）
+- 最新公開安定版: **v1.3.0**
+- 最新公開tag: **`v1.3.0`**
+- GitHub Release: **v1.3.0 公開済み（2026-09-22）**
+- Release commit: `ba62b74475f107a8b749249585eb6c690e54743a`
 - 現行CI: **GitHub Actions (`.github/workflows/ci.yml`)** — userscript構文、回帰テスト、repository整合性、Release Asset生成を検証
 - License: **MIT**
 
 > [!NOTE]
-> v1.3.0のrelease commitを準備中です。公開Stable / tag / GitHub Releaseはまだv1.2.1のままです。v1.3.0では通常の「すべてダウンロード」「選択をダウンロード」がDL=8高速パイプラインを使用し、「互換: 保存後DELETE」で従来のLOCAL_COMMITTED後DELETE方式へ戻せます。
+> v1.3.0では通常の「すべてダウンロード」「選択をダウンロード」がDL=8高速パイプラインを使用します。「互換: 保存後DELETE」で従来のLOCAL_COMMITTED後DELETE方式へ戻せます。
 
 最新の正式配布先は GitHub Releases です。
 
@@ -78,7 +78,7 @@ signed CDN URL をメモリ上だけで取得
 
 ## 実機確認状況
 
-v1.2.1 までの開発過程で、以下が実機確認済みとして記録されています。
+v1.3.0 までの開発過程で、以下が実機確認済みとして記録されています。
 
 - 共有リンク解析
 - 再帰的な全ファイル列挙
@@ -135,15 +135,15 @@ Node.js / Python等の外部ランタイムは不要です。
 ### GitHub Releaseから導入する場合（推奨）
 
 1. Chrome / Edge に Tampermonkey をインストールします。
-2. GitHub Releases から最新の公開安定版 **v1.2.1** を開きます。
-3. Release Assets の `linkex_downloader_v1.2.1.user.js` を取得します。
+2. GitHub Releases から最新の公開安定版 **v1.3.0** を開きます。
+3. Release Assets の `linkex_downloader_v1.3.0.user.js` を取得します。
 4. Tampermonkeyで新規スクリプトを作成し、userscript全文を貼り付けて保存します。
 5. Linkexへログインした状態で `https://disk.linkex.io/` を一度開きます。
 6. 共有ページ `https://l2e.click/d/...` を開き、右下にLinkex Downloaderパネルが表示されれば導入完了です。
 
-ZIP Asset `linkex_downloader_v1.2.1.zip` は同じuserscriptを1ファイルだけ含む補助配布物です。リポジトリ直下のversion固定コピーは今後作成しません。
+ZIP Asset `linkex_downloader_v1.3.0.zip` は同じuserscriptを1ファイルだけ含む補助配布物です。リポジトリ直下のversion固定コピーは今後作成しません。
 
-`linkex-downloader.user.js` は `main` の正本です。現在はv1.2.1 Releaseと同じversionですが、今後の開発では公開安定版より先行する場合があります。
+`linkex-downloader.user.js` は `main` の正本です。現在はv1.3.0 Releaseと同じversionですが、今後の開発では公開安定版より先行する場合があります。
 
 ## 更新
 

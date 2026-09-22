@@ -8,17 +8,17 @@
 
 2026-09-22 時点:
 
-- `main` source: **v1.3.0**（release commit準備済み / 公開前）
-- 最新公開Stable: **v1.2.1**
-- 最新公開tag: **`v1.2.1`**
-- v1.2.1: GitHub Release公開済み
-- Release commit: `ac698e0d3d8f6a6e6ba876cf2ea64e8cc98e1ac5`
+- `main` source: **v1.3.0**（公開済み / 実機確認済み）
+- 最新公開Stable: **v1.3.0**
+- 最新公開tag: **`v1.3.0`**
+- v1.3.0: GitHub Release公開済み
+- Release commit: `ba62b74475f107a8b749249585eb6c690e54743a`
 - License: **MIT**
 - CI: `.github/workflows/ci.yml`
 
-## v1.3.0 公開前Release Prep
+## v1.3.0 公開実績
 
-2026-09-22のrelease prep branchで、userscript metadata / runtime versionをv1.3.0へ更新し、回帰テスト・repository consistency・deterministic Release Asset生成が成功しています。tag / GitHub Releaseはまだ作成していません。
+GitHub Release `v1.3.0` は2026-09-22に公開済みです。tagはrelease commit `ba62b74475f107a8b749249585eb6c690e54743a` を指し、回帰テスト・repository consistency・deterministic Release Asset生成を通過しています。
 
 最終userscript build:
 
@@ -27,7 +27,7 @@ linkex_downloader_v1.3.0.user.js  195935 bytes  sha256:da98dd43f852ff893d738d6c1
 linkex_downloader_v1.3.0.zip       45410 bytes  sha256:d7999606b499df161fd981db78a16521d5f38d49185ecc1745d1410fee7e14bc
 ```
 
-v1.3.0はnormal-order DL=8 / maxInFlight=16 early-delete pipelineを標準操作へ昇格し、従来のLOCAL_COMMITTED後DELETEパイプラインを互換fallbackとして残します。reload recoveryは新operation / new destId / replacement DELETE / Range resume / context change / final local verifyまで実機FULL_PASS済みです。
+v1.3.0はnormal-order DL=8 / maxInFlight=16 early-delete pipelineを標準操作へ昇格し、従来のLOCAL_COMMITTED後DELETEパイプラインを互換fallbackとして残します。reload recoveryは新operation / new destId / replacement DELETE / Range resume / context change / final local verifyまで実機FULL_PASS済みです。公開Asset digestは生成時SHA-256と一致確認済みです。
 
 ## v1.2.1 公開実績
 

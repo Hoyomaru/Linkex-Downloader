@@ -94,3 +94,40 @@ jobs:
             echo "$NAME $REMOTE"
           done
           gh release view "$TAG" --json tagName,isDraft,isPrerelease,url
+
+
+  sync_release_notes:
+    if: "${{ startsWith(github.event.head_commit.message, 'release: sync published v') }}"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Resolve version
+        id: version
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION="$(python - <<'PY'
+          import re
+          from pathlib import Path
+          s = Path("linkex-downloader.user.js").read_text(encoding="utf-8")
+          m = re.search(r"^// @version\s+([^\s]+)\s*$", s, flags=re.M)
+          r = re.search(r"const VERSION = '([^']+)';", s)
+          if not m or not r or m.group(1) != r.group(1):
+              raise SystemExit("version markers missing or mismatched")
+          print(m.group(1))
+          PY
+          )"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          test "${{ github.event.head_commit.message }}" = "release: sync published v$VERSION"
+          test -f "docs/releases/v$VERSION.md"
+
+      - name: Sync published release notes
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          TAG="v$VERSION"
+          gh release edit "$TAG" --notes-file "docs/releases/$TAG.md"
+          gh release view "$TAG" --json tagName,isDraft,isPrerelease,url

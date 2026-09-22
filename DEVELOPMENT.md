@@ -10,13 +10,13 @@ READMEは利用者向け、CHANGELOGは変更履歴、`docs/ARCHITECTURE.md` は
 
 2026-09-22 時点で確認した状態です。
 
-- `main` source: **v1.3.0**（release commit準備済み / 公開前）
-- 最新公開Stable: **v1.2.1**
+- `main` source: **v1.3.0**（公開済み / 実機確認済み）
+- 最新公開Stable: **v1.3.0**
 - userscript metadata `@version`: **1.3.0**
 - `const VERSION`: **1.3.0**
-- 最新公開Git tag: **`v1.2.1`**
-- GitHub Release: **v1.2.1 公開済み**
-- Release commit: `ac698e0d3d8f6a6e6ba876cf2ea64e8cc98e1ac5`
+- 最新公開Git tag: **`v1.3.0`**
+- GitHub Release: **v1.3.0 公開済み**
+- Release commit: `ba62b74475f107a8b749249585eb6c690e54743a`
 - 現行 GitHub Actions: **CIあり**（userscript構文 + Node回帰テスト + repository整合性 + Release Asset生成検証）
 - Runtime: Tampermonkey userscript
 - Targets: `https://disk.linkex.io/*`, `https://l2e.click/d/*`, `https://www.l2e.click/d/*`
@@ -25,7 +25,7 @@ READMEは利用者向け、CHANGELOGは変更履歴、`docs/ARCHITECTURE.md` は
 - Main API origin: `https://prod.linksvc.xyz`
 - 実機確認ブラウザ: Chromium系（Chrome / Edge）
 - License: **MIT**
-- v1.3.0 release prep: normal-order DL=8 / maxInFlight=16 early-delete pipeline。reload recovery FULL_PASS済み。公開Stable / tagはまだv1.2.1。
+- v1.3.0: normal-order DL=8 / maxInFlight=16 early-delete pipelineを公開。reload recovery FULL_PASS済み。
 
 ### リポジトリ直下
 
@@ -48,7 +48,8 @@ Linkex-Downloader/
    └─ releases/
       ├─ v1.1.0.md
       ├─ v1.2.0.md
-      └─ v1.2.1.md
+      ├─ v1.2.1.md
+      └─ v1.3.0.md
 ```
 
 `linkex-downloader.user.js` が唯一のtracked userscript正本です。version固定 `.user.js` / `.zip` はGit管理せず、release対象commitから `tools/build_release_assets.py` で生成してGitHub Releaseへ添付します。過去のv1.0.0 / v1.1.0配布物は各GitHub Release Assetとして保持し、リポジトリ直下からは削除します。
@@ -170,7 +171,7 @@ Share Page Modeでは `l2e.click` が別originのためdisk Local Storageを直�
 
 ## 利用API
 
-現行main（v1.2.1 release candidate）で確認できる範囲です。
+現行main（v1.3.0）で確認できる範囲です。
 
 | 用途 | Method | Path | 認証 | 書込 |
 |---|---|---|---|---|
