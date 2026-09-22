@@ -1207,7 +1207,8 @@ let detachedDownloadWorkerUrl = null;
           }
         });
       } catch (error) {
-        await fail(error, error?.name === 'NotAllowedError' ? 'filesystem' : 'network');
+        const workerEnvironmentFsError = ['NotAllowedError','SecurityError','InvalidStateError','DataCloneError'].includes(String(error?.name || ''));
+        await fail(error, workerEnvironmentFsError ? 'worker_filesystem' : 'network');
       }
     };
   }
@@ -1407,7 +1408,7 @@ let detachedDownloadWorkerUrl = null;
       } catch (e) {
         // CSP / userscript sandbox / handle-clone failures fall back to the proven inline path.
         // Network/CDN/filesystem errors remain real transfer errors and are handled by the normal Range retry layer.
-        if (!['worker_unavailable','worker_start','range_416','network'].includes(e?.kind)) throw e;
+        if (!['worker_unavailable','worker_start','worker_filesystem','range_416','network'].includes(e?.kind)) throw e;
         console.warn('[Linkex Downloader] Worker path unavailable; falling back to inline transfer.', e);
         recordEvent('warn', 'worker-fallback', 'Web Workerからinline転送へフォールバック', {
           kind:e?.kind || null,
