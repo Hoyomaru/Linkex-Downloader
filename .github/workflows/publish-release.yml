@@ -1,0 +1,96 @@
+name: Publish Release
+
+on:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: write
+
+jobs:
+  publish:
+    if: startsWith(github.event.head_commit.message, 'release: publish v')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Resolve version
+        id: version
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION="$(python - <<'PY'
+          import re
+          from pathlib import Path
+          s = Path("linkex-downloader.user.js").read_text(encoding="utf-8")
+          m = re.search(r"^// @version\s+([^\s]+)\s*$", s, flags=re.M)
+          r = re.search(r"const VERSION = '([^']+)';", s)
+          if not m or not r or m.group(1) != r.group(1):
+              raise SystemExit("version markers missing or mismatched")
+          print(m.group(1))
+          PY
+          )"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          test "${{ github.event.head_commit.message }}" = "release: publish v$VERSION"
+          test -f "docs/releases/v$VERSION.md"
+
+      - name: Validate release source
+        run: |
+          set -euo pipefail
+          node --check linkex-downloader.user.js
+          node --test tests/*.test.js
+          python tools/check_repo_consistency.py
+          python tools/build_release_assets.py --output-dir dist
+
+      - name: Create or verify tag
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          TAG="v$VERSION"
+          REMOTE_SHA="$(git ls-remote --tags origin "refs/tags/$TAG^{}" | awk '{print $1}')"
+          if [ -z "$REMOTE_SHA" ]; then
+            REMOTE_SHA="$(git ls-remote --tags origin "refs/tags/$TAG" | awk '{print $1}')"
+          fi
+          if [ -n "$REMOTE_SHA" ]; then
+            test "$REMOTE_SHA" = "$GITHUB_SHA"
+          else
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git tag -a "$TAG" "$GITHUB_SHA" -m "Linkex Downloader $TAG"
+            git push origin "$TAG"
+          fi
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          TAG="v$VERSION"
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "Release $TAG already exists; keeping existing release."
+          else
+            gh release create "$TAG"               "dist/linkex_downloader_v$VERSION.user.js"               "dist/linkex_downloader_v$VERSION.zip"               --verify-tag               --title "Linkex Downloader $TAG"               --notes-file "docs/releases/$TAG.md"
+          fi
+
+      - name: Verify release asset digests
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.version.outputs.version }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          TAG="v$VERSION"
+          for FILE in "dist/linkex_downloader_v$VERSION.user.js" "dist/linkex_downloader_v$VERSION.zip"; do
+            NAME="$(basename "$FILE")"
+            LOCAL="sha256:$(sha256sum "$FILE" | awk '{print $1}')"
+            REMOTE="$(gh api "repos/$REPO/releases/tags/$TAG" --jq ".assets[] | select(.name == \"$NAME\") | .digest")"
+            test -n "$REMOTE"
+            test "$LOCAL" = "$REMOTE"
+            echo "$NAME $REMOTE"
+          done
+          gh release view "$TAG" --json tagName,isDraft,isPrerelease,url
