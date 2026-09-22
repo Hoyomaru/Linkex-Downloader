@@ -138,7 +138,7 @@ test('recovery UI requires one selection and uses the normal persisted Queue res
   assert.match(SOURCE, /id="lf-early-delete-recovery"/);
   assert.match(SOURCE, /selectedIndexes\.size !== 1/);
   assert.match(SOURCE, /recoveryProbe:true/);
-  assert.match(SOURCE, /「Queueを再開」で新しいCOPY\/URLを取得し、Range resumeを検証します/);
+  assert.match(SOURCE, /再読み込み後、「Queueを再開」を1回だけ押し、完了まで操作せず待ってください/);
 });
 
 
