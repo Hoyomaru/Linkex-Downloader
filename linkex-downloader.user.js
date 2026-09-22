@@ -3909,7 +3909,7 @@ const transientSignedUrls = new Map();
       </style>
       <div class="box">
         <div class="hd">
-          <div class="hd-left"><div class="title">Linkex Downloader v${VERSION}</div><div class="badge">SAFE QUEUE</div></div>
+          <div class="hd-left"><div class="title">Linkex Downloader v${VERSION}</div><div class="badge">PERF TEST</div></div>
           <button id="lf-collapse" class="mini" title="最小化/展開">−</button>
         </div>
         <div class="body">
@@ -3943,11 +3943,11 @@ const transientSignedUrls = new Map();
               <div class="row" style="margin-bottom:0"><button id="lf-abandon" class="secondary" disabled>Queueを安全に破棄</button></div>
               <details id="lf-log-details" class="log">
                 <summary>ログを表示</summary>
-                <div id="lf-status" class="status">共有ページでは「すべてダウンロード」だけで解析からQueue開始まで進めます。\n高速モードは COPY/所有確認 → signed URL → 所有一時copy DELETE → 最大8並列DL/VERIFY。中断時は新COPY/URLからRange再開します。</div>
+                <div id="lf-status" class="status">共有ページでは「すべてダウンロード」だけで解析からQueue開始まで進めます。\nPERF TEST: COPY/所有確認 → signed URL → Web Worker stream開始 → 所有一時copy DELETEを並行 → DL/VERIFY。中断時は安全照合後にRange再開します。</div>
               </details>
             </div>
           </details>
-          <div class="notice">TEST BUILD: stream→DELETE parallel / Web Worker / manifest-6. v1.3の標準は高速DL=8です.Downloaderが所有確認した一時copyだけをsigned URL取得後に先に削除し、ローカルDLを最大8並列で進めます。中断時は新しいCOPY/URLから既存partialへRange再開します。「互換: 保存後DELETE」は従来方式です。</div>
+          <div class="notice">TEST BUILD: ${BUILD_TAG} / manifest-6 / item-journal. 高速モードはCDN streamの最初のchunk確認後に、所有確認済み一時copyのDELETEをDLと並行実行します。ローカルDLは最大8並列。中断時はDELETE状態を照合し、必要に応じて同じ所有copyまたは新COPYからRange再開します。「互換: 保存後DELETE」は従来方式です。</div>
         </div>
       </div>`;
     document.body.appendChild(root);
@@ -4952,7 +4952,7 @@ const transientSignedUrls = new Map();
       }
       else write(`未完了Full Queueを検出しました。\n\n${queueSummary(existing)}\n\n「Queueを再開」で状態照合から続けられます。`, '');
     }
-    recordEvent('info', 'startup', `Linkex Downloader v${VERSION} 起動`);
+    recordEvent('info', 'startup', `Linkex Downloader v${VERSION} / ${BUILD_TAG} 起動`, {buildTag:BUILD_TAG});
     return root;
   }
 
