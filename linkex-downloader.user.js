@@ -1304,6 +1304,23 @@ let detachedDownloadWorkerUrl = null;
           }
           if (data.type === 'error') {
             const details = data.error || {};
+            const partial = await handle.getFile();
+            const current = loadProbeState(state) || state;
+            const pausedAt = Date.now();
+            const telemetry = current.download?.telemetry || {};
+            saveProbeState({
+              ...current,
+              state:'DOWNLOAD_PAUSED',
+              download:{
+                ...(current.download||{}),
+                destId,
+                downloadedBytes:Number(partial.size || 0),
+                expectedCdnBytes:current.download?.expectedCdnBytes ?? null,
+                telemetry:{...telemetry, worker:true, interrupted:true},
+                lastError:String(details.message || 'Worker DL失敗'),
+                updatedAt:pausedAt
+              }
+            });
             fail(new LinkexError(details.message || 'Worker DL失敗', {
               kind:details.kind || 'worker',
               status:details.status ?? null
@@ -1378,8 +1395,8 @@ let detachedDownloadWorkerUrl = null;
       } catch (e) {
         // CSP / userscript sandbox / handle-clone failures fall back to the proven inline path.
         // Network/CDN/filesystem errors remain real transfer errors and are handled by the normal Range retry layer.
-        if (!['worker_unavailable','worker_start'].includes(e?.kind)) throw e;
-        console.warn('[Linkex Downloader] Worker unavailable; falling back to inline transfer.', e);
+        if (!['worker_unavailable','worker_start','range_416'].includes(e?.kind)) throw e;
+        console.warn('[Linkex Downloader] Worker path unavailable; falling back to inline transfer.', e);
       }
     }
 
