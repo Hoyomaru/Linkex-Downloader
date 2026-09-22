@@ -66,9 +66,15 @@ test('download probe state is operation-scoped rather than a shared worker slot'
   assert.equal(api.loadProbeState('op-b').download.downloadedBytes, 22);
 });
 
-test('capacity is reserved before new COPY work and released only after confirmed transaction completion', () => {
+test('capacity uses a local reservation ledger and refreshes usage only when it would block', () => {
   assert.match(SOURCE, /async function createCapacityReservation\(api\)/);
-  assert.match(SOURCE, /const effectiveFree = Math\.min\(availableBytes, reportedFree\);/);
+  const start = SOURCE.indexOf('async function createCapacityReservation(api)');
+  const end = SOURCE.indexOf('function loadQueueJob()', start);
+  const block = SOURCE.slice(start, end);
+  const shortageAt = block.indexOf('if (needed > availableBytes');
+  const refreshAt = block.indexOf('const usage = await api.getUsage()', shortageAt);
+  assert.ok(shortageAt > 0 && refreshAt > shortageAt);
+  assert.equal((block.match(/api\.getUsage\(\)/g) || []).length, 2, 'one initial usage request plus shortage refresh');
   assert.match(SOURCE, /reservation = await capacity\.reserve\(item\.source\?\.size \|\| 0\);/);
   assert.match(SOURCE, /capacity\.release\(reservation \|\| Number\(item\.source\?\.size \|\| 0\)\);/);
 });
