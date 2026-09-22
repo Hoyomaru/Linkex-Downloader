@@ -345,7 +345,23 @@
           'X-LinkInflu-Sign': signed.signature
         };
         if (auth && this.token) headers.Authorization = `Bearer ${this.token}`;
+        const requestStartedAt = Date.now();
+        const hiddenAtStart = !!globalThis.document?.hidden;
         res = await gmRequest({method:upperMethod, url:API_BASE + path, headers, data:body === undefined ? undefined : bodyText});
+        const requestEndedAt = Date.now();
+        const requestDurationMs = Math.max(0, requestEndedAt - requestStartedAt);
+        if (requestDurationMs >= 5000) {
+          recordEvent('warn', 'api-slow', `${upperMethod} ${pathname} took ${requestDurationMs} ms`, {
+            method:upperMethod,
+            pathname,
+            attempt,
+            durationMs:requestDurationMs,
+            status:Number(res?.status || 0),
+            hiddenAtStart,
+            hiddenAtEnd:!!globalThis.document?.hidden,
+            visibilityState:String(globalThis.document?.visibilityState || 'unknown')
+          });
+        }
         if (res.status >= 200 && res.status < 300) break;
         if (attempt >= maxAttempts || !isRetryableReadStatus(res.status)) break;
         const retryAfter = parseRetryAfterMs(res.responseHeaders);
@@ -4875,7 +4891,34 @@ const transientSignedUrls = new Map();
       void refreshPreferredDirectoryState({reloadHandle:false});
       syncSharePageContext({initial:true});
     });
+
+    let runtimeHeartbeatAt = Date.now();
+    const logLifecycle = (type, extra = {}) => recordEvent('info', 'lifecycle', type, {
+      hidden:!!globalThis.document?.hidden,
+      visibilityState:String(globalThis.document?.visibilityState || 'unknown'),
+      ...extra
+    });
+    globalThis.document?.addEventListener?.('visibilitychange', () => {
+      logLifecycle('visibilitychange');
+    });
+    globalThis.addEventListener?.('freeze', () => logLifecycle('freeze'));
+    globalThis.addEventListener?.('resume', () => logLifecycle('resume'));
+    globalThis.addEventListener?.('pageshow', event => logLifecycle('pageshow', {persisted:!!event?.persisted}));
+    setInterval(() => {
+      const now = Date.now();
+      const gapMs = Math.max(0, now - runtimeHeartbeatAt);
+      runtimeHeartbeatAt = now;
+      if (gapMs >= 5000) {
+        recordEvent('warn', 'runtime-stall', `userscript event loop gap ${gapMs} ms`, {
+          gapMs,
+          hidden:!!globalThis.document?.hidden,
+          visibilityState:String(globalThis.document?.visibilityState || 'unknown')
+        });
+      }
+    }, 1000);
+
     globalThis.addEventListener?.('pagehide', event => {
+      logLifecycle('pagehide', {persisted:!!event?.persisted});
       // Reload/navigation destroys this JS context. Drop only our own lease so the
       // replacement context can reconcile the persisted Queue immediately.
       // A BFCache page can return alive, so keep its lease until normal expiry.
