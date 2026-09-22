@@ -20,7 +20,7 @@ test('early-delete pipeline keeps COPY serialized while DELETE=2 and DOWNLOAD=8 
   assert.match(block, /earlyDeleteWorkers:EARLY_DELETE_DELETE_WORKERS/);
 });
 
-test('early-delete preparation launches guarded DELETE/DOWNLOAD task without awaiting it before the next COPY', () => {
+test('early-delete opens the download stream before destructive DELETE and still lets the next COPY prepare', () => {
   const start = SOURCE.indexOf('async function processEarlyDeletePipeline');
   const end = SOURCE.indexOf('function assertEarlyDeleteProbeGuards', start);
   const block = SOURCE.slice(start, end);
@@ -32,14 +32,39 @@ test('early-delete preparation launches guarded DELETE/DOWNLOAD task without awa
   const launchStart = block.indexOf('const launchEarlyDeleteTransaction');
   const loopStart = block.indexOf('for (let i = 0;', launchStart);
   const launchBlock = block.slice(launchStart, loopStart);
-  assert.match(launchBlock, /await deleteOwnedTempForEarlyDeletePipeline/);
+  const downloadStartAt = launchBlock.indexOf('const downloadPromise = ensureDetachedDownloaded');
+  const barrierAt = launchBlock.indexOf('streamReady.then', downloadStartAt);
+  const deleteAt = launchBlock.indexOf('await deleteOwnedTempForEarlyDeletePipeline', barrierAt);
+  const downloadJoinAt = launchBlock.indexOf('const downloadResult = await downloadSettled', deleteAt);
+  assert.ok(downloadStartAt >= 0, 'download must be started without awaiting completion');
+  assert.ok(barrierAt > downloadStartAt, 'DELETE barrier must wait for stream-ready');
+  assert.ok(deleteAt > barrierAt, 'DELETE starts only after stream-ready');
+  assert.ok(downloadJoinAt > deleteAt, 'download completion is joined after DELETE has started');
+  assert.match(launchBlock, /first non-empty chunk/);
   assert.match(launchBlock, /capacity\.release\(reservation\)/);
-  assert.match(launchBlock, /await ensureDetachedDownloaded/);
-  assert.ok(launchBlock.indexOf('await deleteOwnedTempForEarlyDeletePipeline') < launchBlock.indexOf('await ensureDetachedDownloaded'));
 
   const loopBlock = block.slice(loopStart);
   const afterSigned = loopBlock.slice(loopBlock.indexOf('let signedUrl'));
   assert.doesNotMatch(afterSigned.slice(0, afterSigned.indexOf('launchEarlyDeleteTransaction')), /await deleteOwnedTempForEarlyDeletePipeline/);
+});
+
+test('early-delete concurrent state uses nested delete.phase so Worker checkpoints cannot overwrite destructive-action state', () => {
+  assert.match(SOURCE, /function earlyDeletePhase\(tx\)/);
+  assert.match(SOURCE, /delete:\{[\s\S]*phase:'INTENT'/);
+  assert.match(SOURCE, /phase:'REQUEST_SENT'/);
+  assert.match(SOURCE, /phase:'UNCERTAIN'/);
+  assert.match(SOURCE, /phase:'CONFIRMED'/);
+  assert.match(SOURCE, /needsEarlyDeleteReconcile\(item\.tx\)/);
+  assert.match(SOURCE, /item\.tx\?\.state === 'LOCAL_COMMITTED' && item\.tx\?\.delete\?\.confirmedAbsentAt/);
+});
+
+test('COPY ownership reuses a conservative root snapshot after the first file', () => {
+  assert.match(SOURCE, /const transientRootSnapshots = new Map\(\);/);
+  assert.match(SOURCE, /rememberTransientRootSnapshot\(tx\.operationId, rec\.root\)/);
+  assert.match(SOURCE, /let rootBaselineIds = null;/);
+  assert.match(SOURCE, /beforeIdsHint:rootBaselineIds/);
+  assert.match(SOURCE, /if \(reconciledRootIds\) rootBaselineIds = reconciledRootIds;/);
+  assert.match(SOURCE, /const beforeRoot = hintedBeforeIds \? null : await listAllRoot\(api\);/);
 });
 
 test('fresh ownership signed URL is memory-only and persisted confirmedDest is identity-only', () => {
