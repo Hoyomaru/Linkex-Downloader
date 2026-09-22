@@ -351,3 +351,23 @@ Compared with DOWNLOAD=6 / maxInFlight=12, queue effective throughput improved o
 The transfer timeline never exceeded six simultaneous active transfers even though the worker cap was eight; average active transfer concurrency was about 2.94 and there was no zero-active gap inside the transfer window. The workload order contains several small files before the largest files, including a ~1.48 GB file near the end. Thus this run establishes a practical DL=8 cap result for the existing order, but it does not actually exercise eight long-lived concurrent streams.
 
 Next isolated ceiling experiment: keep DOWNLOAD=8 and maxInFlight=16 unchanged, but process items in descending source-size order. This changes only scheduling order, not local paths, source IDs, ownership checks, signed URL persistence, DELETE guards, or verification. The goal is to force long-lived transfers to overlap and determine whether real 7–8 stream concurrency can raise aggregate throughput beyond the ~75 MiB/s queue-effective plateau.
+
+
+### Early-delete DL=8 size-desc result (2026-09-22)
+
+The same 26-file / 6.37 GB workload completed safely with DOWNLOAD=8, maxInFlight=16, and descending source-size scheduling.
+
+- transferred bytes: 6,372,761,319
+- transfer window: 78.546 s
+- pool throughput: 77.38 MiB/s
+- pipeline wall: 80.601 s
+- pipeline effective: 75.40 MiB/s
+- queue wall: 80.890 s
+- queue effective: 75.13 MiB/s
+- completed: 26/26, no capacity skips, no blocked items
+
+The scheduler successfully forced real eight-way transfer overlap. Reconstructing all 26 transfer intervals gives about 50.855 s at eight simultaneous active downloads and average active concurrency about 6.48 across the transfer window, with no zero-active gap.
+
+Despite that much higher concurrency, throughput barely changed versus the normal-order DL=8 run: queue effective 74.93 -> 75.13 MiB/s (+0.27%), queue wall 81.105 -> 80.890 s (-0.27%), and pool 77.14 -> 77.38 MiB/s (+0.31%). This confirms that the browser/CDN/network path is effectively saturated around 75 MiB/s queue-effective / 77 MiB/s transfer-pool for this workload.
+
+Conclusion: size-desc scheduling is not worth adopting for normal operation. DOWNLOAD=8 is only ~1.4% faster than DOWNLOAD=6 and ~4.1% faster than DOWNLOAD=4 in this workload. The next release gate should be recovery validation rather than more concurrency: interrupt after confirmed early DELETE, restart/reload, obtain a new COPY/signed URL, early-delete the new temporary destination, and verify Range resume into the existing local partial file.
