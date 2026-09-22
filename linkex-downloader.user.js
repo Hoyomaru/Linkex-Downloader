@@ -1811,6 +1811,7 @@ const transientSignedUrls = new Map();
   const EARLY_DELETE_MAX_IN_FLIGHT = EARLY_DELETE_DOWNLOAD_WORKERS * 2;
   let queueCommitTail = Promise.resolve();
   let lastFullQueuePersistAt = 0;
+  const dirtyQueueIndexCache = new Map();
 
   function commitQueueJob(job, mutate = null) {
     const run = queueCommitTail.then(() => {
@@ -1909,11 +1910,18 @@ const transientSignedUrls = new Map();
   }
 
   function loadDirtyQueueIndexes(job) {
+    const jobId = String(job?.jobId || '');
     const key = queueDirtyIndexKey(job);
-    if (!key) return [];
+    if (!jobId || !key) return [];
+    const cached = dirtyQueueIndexCache.get(jobId);
+    if (cached) return [...cached];
     const value = GM_getValue(key, []);
-    if (!Array.isArray(value)) return [];
-    return [...new Set(value.map(Number).filter(x => Number.isInteger(x) && x >= 0 && x < (job?.items?.length || 0)))];
+    const normalized = Array.isArray(value)
+      ? value.map(Number).filter(x => Number.isInteger(x) && x >= 0 && x < (job?.items?.length || 0))
+      : [];
+    const set = new Set(normalized);
+    dirtyQueueIndexCache.set(jobId, set);
+    return [...set];
   }
 
   function saveQueueItemJournal(job, index) {
@@ -1932,10 +1940,16 @@ const transientSignedUrls = new Map();
       updatedAt:Date.now()
     };
     GM_setValue(key, entry);
-    const dirty = loadDirtyQueueIndexes(job);
-    if (!dirty.includes(Number(index))) {
-      dirty.push(Number(index));
-      GM_setValue(dirtyKey, dirty);
+    const jobId = String(job.jobId || '');
+    let dirty = dirtyQueueIndexCache.get(jobId);
+    if (!dirty) {
+      dirty = new Set(loadDirtyQueueIndexes(job));
+      dirtyQueueIndexCache.set(jobId, dirty);
+    }
+    const numericIndex = Number(index);
+    if (!dirty.has(numericIndex)) {
+      dirty.add(numericIndex);
+      GM_setValue(dirtyKey, [...dirty]);
     }
     return entry;
   }
@@ -1967,6 +1981,7 @@ const transientSignedUrls = new Map();
     }
     const dirtyKey = queueDirtyIndexKey(job);
     if (dirtyKey) GM_setValue(dirtyKey, null);
+    dirtyQueueIndexCache.delete(String(job.jobId || ''));
   }
 
   function loadQueueJob() {
@@ -2660,7 +2675,7 @@ const transientSignedUrls = new Map();
     const item = job.items[index];
     let tx = item.tx;
     if (tx.state === 'LOCAL_COMMITTED' || tx.state === 'DONE') return tx;
-    if (!['OWNERSHIP_CONFIRMED','EARLY_DELETE_CONFIRMED','DOWNLOAD_READY','DOWNLOAD_PAUSED'].includes(tx.state)) {
+    if (!['OWNERSHIP_CONFIRMED','EARLY_DELETE_CONFIRMED','DOWNLOAD_READY','DOWNLOADING','DOWNLOAD_PAUSED','VERIFY_FAILED'].includes(tx.state)) {
       throw new LinkexError(`DL開始可能状態ではありません (state=${tx.state})`, {kind:'early_delete_state'});
     }
     if (!signedUrl) throw new LinkexError('signed URLがメモリ上にありません。再COPYが必要です。', {kind:'signed_url_missing'});
@@ -3030,7 +3045,7 @@ const transientSignedUrls = new Map();
         rearmEarlyDeleteItem(job, i);
       }
 
-      if (item.tx && !['COPY_INTENT','COPY_REQUEST_SENT','NEEDS_RECONCILE','UNCERTAIN_NO_EVIDENCE','OWNERSHIP_CONFIRMED'].includes(item.tx.state)) {
+      if (item.tx && !['COPY_INTENT','COPY_REQUEST_SENT','NEEDS_RECONCILE','UNCERTAIN_NO_EVIDENCE','OWNERSHIP_CONFIRMED','DOWNLOAD_READY','DOWNLOADING','DOWNLOAD_PAUSED','VERIFY_FAILED'].includes(item.tx.state)) {
         await markFatal(i, new LinkexError(`早期DELETE Queueの再開状態を安全に再構成できません: ${item.tx.state}`, {kind:'early_delete_resume_state'}));
         break;
       }
