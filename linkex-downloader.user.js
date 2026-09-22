@@ -3388,7 +3388,18 @@ function sameOwnedIdentity(current, state) {
         await ensureHandlePermission(chosenBaseDir);
         const job = createQueueFromManifest(manifest, selected);
         job.kind = 'early-delete-pipeline';
-        job.experimental = {mode:'early-delete', downloadWorkers:EARLY_DELETE_DOWNLOAD_WORKERS, signedUrlPersistence:false, createdAt:Date.now()};
+        // Benchmark scheduler: longest files first. Local paths and manifestIndex stay unchanged;
+        // only processing order changes, so destructive ownership guards are unaffected.
+        job.items.sort((a, b) => Number(b?.source?.size || 0) - Number(a?.source?.size || 0) || Number(a?.manifestIndex || 0) - Number(b?.manifestIndex || 0));
+        job.items.forEach((item, index) => { item.index = index; });
+        job.currentIndex = 0;
+        job.experimental = {
+          mode:'early-delete',
+          downloadWorkers:EARLY_DELETE_DOWNLOAD_WORKERS,
+          queueOrder:'size-desc',
+          signedUrlPersistence:false,
+          createdAt:Date.now()
+        };
         const queueRoot = await chosenBaseDir.getDirectoryHandle(job.folderName, {create:true});
         await putQueueRootHandle(job, queueRoot);
         saveQueueJob(job);
@@ -3396,9 +3407,10 @@ function sameOwnedIdentity(current, state) {
           jobId:job.jobId,
           items:job.items.length,
           totalBytes:job.sourceTotalBytes,
-          downloadWorkers:EARLY_DELETE_DOWNLOAD_WORKERS
+          downloadWorkers:EARLY_DELETE_DOWNLOAD_WORKERS,
+          queueOrder:'size-desc'
         });
-        write(`早期DELETE Queue作成\n\n${queueSummary(job)}\n\nCOPY/DELETEは1本ずつ、ローカルDOWNLOADは最大${EARLY_DELETE_DOWNLOAD_WORKERS}本で処理します。`, 'ok');
+        write(`早期DELETE Queue作成\n\n${queueSummary(job)}\n\nCOPY/DELETEは1本ずつ、ローカルDOWNLOADは最大${EARLY_DELETE_DOWNLOAD_WORKERS}本。\n実験スケジュール: 大きいファイルから先に処理します。`, 'ok');
         await runJob(job, queueRoot, false);
       } catch (e) {
         console.error('[Early delete pipeline]', e);

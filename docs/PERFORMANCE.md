@@ -331,3 +331,23 @@ Compared with DOWNLOAD=4 / maxInFlight=8, pool throughput improved only about 2.
 Transfer-window concurrency analysis: there was effectively no zero-active gap; average active concurrency was about 3.07, and six simultaneous transfers were reached for about 8.16 s. Setup remained mostly stable (COPY median ~253 ms, ownership reconciliation median ~239 ms, DELETE median ~481 ms), with one isolated COPY outlier around 1.98 s.
 
 This points to diminishing returns beyond DOWNLOAD=4, but there is still a small measurable gain at DOWNLOAD=6. One final isolated ceiling check uses DOWNLOAD=8 with maxInFlight=16. If that produces little or no further improvement, DOWNLOAD=6 (or DOWNLOAD=4 for a lower-concurrency default) is the practical range for this workload.
+
+
+### Early-delete DL=8 result (2026-09-22)
+
+The same 26-file / 6.37 GB workload completed safely with DOWNLOAD=8 and maxInFlight=16.
+
+- transferred bytes: 6,372,761,319
+- transfer window: 78.788 s
+- pool throughput: 77.14 MiB/s
+- pipeline wall: 80.828 s
+- pipeline effective: 75.19 MiB/s
+- queue wall: 81.105 s
+- queue effective: 74.93 MiB/s
+- completed: 26/26, no capacity skips, no blocked items
+
+Compared with DOWNLOAD=6 / maxInFlight=12, queue effective throughput improved only about 1.37% and queue wall fell about 1.35%. Relative to the older browser DOWNLOAD=2 candidate, queue effective throughput is about 24.34% higher and queue wall about 19.58% shorter.
+
+The transfer timeline never exceeded six simultaneous active transfers even though the worker cap was eight; average active transfer concurrency was about 2.94 and there was no zero-active gap inside the transfer window. The workload order contains several small files before the largest files, including a ~1.48 GB file near the end. Thus this run establishes a practical DL=8 cap result for the existing order, but it does not actually exercise eight long-lived concurrent streams.
+
+Next isolated ceiling experiment: keep DOWNLOAD=8 and maxInFlight=16 unchanged, but process items in descending source-size order. This changes only scheduling order, not local paths, source IDs, ownership checks, signed URL persistence, DELETE guards, or verification. The goal is to force long-lived transfers to overlap and determine whether real 7–8 stream concurrency can raise aggregate throughput beyond the ~75 MiB/s queue-effective plateau.

@@ -97,3 +97,16 @@ test('real-write experimental UI supports all or selected files', () => {
   assert.match(SOURCE, /startEarlyDeletePipeline\(null, \{baseDir, skipConfirm:false\}\)/);
   assert.match(SOURCE, /startEarlyDeletePipeline\(new Set\(selectedIndexes\), \{baseDir, skipConfirm:false\}\)/);
 });
+
+
+test('DL8 size-desc experiment only reorders processing and preserves manifest/local identity', () => {
+  const start = SOURCE.indexOf('const job = createQueueFromManifest(manifest, selected);');
+  const end = SOURCE.indexOf('const queueRoot = await chosenBaseDir.getDirectoryHandle', start);
+  assert.ok(start > 0 && end > start);
+  const block = SOURCE.slice(start, end);
+  assert.match(block, /job\.items\.sort\(\(a, b\) => Number\(b\?\.source\?\.size/);
+  assert.match(block, /item\.index = index/);
+  assert.match(block, /queueOrder:'size-desc'/);
+  assert.doesNotMatch(block, /localSegments\s*=/);
+  assert.doesNotMatch(block, /manifestIndex\s*=/);
+});
