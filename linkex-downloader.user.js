@@ -955,10 +955,433 @@
   return saveProbeState({...current, state:'LOCAL_COMMITTED', download:{...(current.download||{}), destId, downloadedBytes:downloaded, expectedCdnBytes:expected, sizeVerified, verificationMethod, streamComplete, sourceMetaSize:Number(state.source?.size || 0), verifiedAt:Date.now(), localName}});
 }
 
-async function downloadOwnedFile({api, state, handle, detachedUrl = null, interruptAfterBytes = null, onForcedInterrupt = null, onProgress = () => {}, onPhase = () => {}}) {
+let detachedDownloadWorkerUrl = null;
+
+  function detachedDownloadWorkerBootstrap() {
+    const mergeChunks = (chunks, totalBytes) => {
+      if (!totalBytes) return new Uint8Array(0);
+      if (chunks.length === 1 && chunks[0]?.byteLength === totalBytes) return chunks[0];
+      const merged = new Uint8Array(totalBytes);
+      let offset = 0;
+      for (const chunk of chunks) {
+        if (!chunk?.byteLength) continue;
+        merged.set(chunk, offset);
+        offset += chunk.byteLength;
+      }
+      if (offset !== totalBytes) throw new Error(`buffer size mismatch: ${offset}/${totalBytes}`);
+      return merged;
+    };
+
+    self.onmessage = async event => {
+      const msg = event?.data || {};
+      if (msg.type !== 'download') return;
+      const {
+        url,
+        handle,
+        checkpointBytes,
+        checkpointIntervalMs,
+        uiIntervalMs,
+        writeBufferBytes
+      } = msg;
+
+      let reader = null;
+      let writable = null;
+      let transferStartedAt = 0;
+      let transferStartBytes = 0;
+      let received = 0;
+      let written = 0;
+      let expectedTotal = null;
+      let verificationMethod = 'stream-eof';
+      let resumed = false;
+      let instantBytesPerSecond = 0;
+      let peakBytesPerSecond = 0;
+
+      const fail = async (error, fallbackKind = 'network') => {
+        try { await reader?.cancel(); } catch {}
+        try { await writable?.close(); } catch {}
+        self.postMessage({
+          type:'error',
+          error:{
+            message:String(error?.message || error || 'worker download failed'),
+            kind:error?.kind || fallbackKind,
+            status:error?.status ?? null
+          }
+        });
+      };
+
+      try {
+        const localFile = await handle.getFile();
+        let offset = Number(localFile.size || 0);
+        const headers = offset > 0 ? {'Range': `bytes=${offset}-`} : {};
+        const res = await fetch(String(url), {
+          method:'GET',
+          headers,
+          cache:'no-store',
+          credentials:'omit'
+        });
+
+        if (res.status === 403) {
+          const error = new Error('早期DELETE後のsigned URLが403になりました。再COPYで新しいURLを取得して再開してください。');
+          error.kind = 'signed_url_expired';
+          error.status = 403;
+          throw error;
+        }
+        if (res.status === 416) {
+          const error = new Error('Range 416');
+          error.kind = 'range_416';
+          error.status = 416;
+          throw error;
+        }
+        if (!(res.status === 200 || res.status === 206)) {
+          const error = new Error(`CDN HTTP ${res.status}`);
+          error.kind = 'cdn';
+          error.status = res.status;
+          throw error;
+        }
+        if (!res.body) {
+          const error = new Error('CDN response bodyがストリームではありません。');
+          error.kind = 'protocol';
+          throw error;
+        }
+
+        const rawRemaining = res.headers.get('Content-Length');
+        const remaining = rawRemaining === null ? null : Number(rawRemaining);
+        const hasKnownLength = remaining !== null && Number.isFinite(remaining) && remaining >= 0;
+        resumed = offset > 0 && res.status === 206;
+        let base = resumed ? offset : 0;
+        if (offset > 0 && res.status === 200) {
+          offset = 0;
+          base = 0;
+          resumed = false;
+        }
+
+        expectedTotal = hasKnownLength ? base + remaining : null;
+        verificationMethod = hasKnownLength ? 'content-length' : 'stream-eof';
+        transferStartedAt = Date.now();
+        transferStartBytes = base;
+        received = base;
+        written = base;
+        let lastRateAt = transferStartedAt;
+        let lastRateBytes = base;
+        let lastUiAt = 0;
+        let lastCheckpointAt = transferStartedAt;
+        let nextCheckpoint = written + Number(checkpointBytes || 0);
+        let bufferedChunks = [];
+        let bufferedBytes = 0;
+
+        writable = await handle.createWritable({keepExistingData:resumed});
+        if (resumed) await writable.seek(base);
+        else await writable.truncate(0);
+        reader = res.body.getReader();
+
+        const flush = async () => {
+          if (!bufferedBytes) return;
+          const batchBytes = bufferedBytes;
+          const batch = mergeChunks(bufferedChunks, batchBytes);
+          await writable.write(batch);
+          written += batchBytes;
+          bufferedChunks = [];
+          bufferedBytes = 0;
+        };
+
+        self.postMessage({
+          type:'started',
+          transferStartedAt,
+          transferStartBytes,
+          expectedTotal,
+          resumed,
+          verificationMethod
+        });
+
+        while (true) {
+          const {done, value} = await reader.read();
+          if (done) break;
+          if (!value?.byteLength) continue;
+
+          bufferedChunks.push(value);
+          bufferedBytes += value.byteLength;
+          received += value.byteLength;
+          let now = Date.now();
+
+          if (bufferedBytes >= Number(writeBufferBytes || 0) || now - lastCheckpointAt >= Number(checkpointIntervalMs || 0)) {
+            await flush();
+            now = Date.now();
+          }
+
+          const elapsedMs = Math.max(1, now - transferStartedAt);
+          const transferredBytes = Math.max(0, received - transferStartBytes);
+          const averageBytesPerSecond = transferredBytes * 1000 / elapsedMs;
+          if (now - lastRateAt >= 250) {
+            const deltaMs = Math.max(1, now - lastRateAt);
+            instantBytesPerSecond = Math.max(0, received - lastRateBytes) * 1000 / deltaMs;
+            peakBytesPerSecond = Math.max(peakBytesPerSecond, instantBytesPerSecond);
+            lastRateAt = now;
+            lastRateBytes = received;
+          }
+
+          if (written >= nextCheckpoint || now - lastCheckpointAt >= Number(checkpointIntervalMs || 0)) {
+            if (bufferedBytes) {
+              await flush();
+              now = Date.now();
+            }
+            self.postMessage({
+              type:'checkpoint',
+              written,
+              received,
+              expectedTotal,
+              transferStartedAt,
+              transferStartBytes,
+              transferredBytes,
+              elapsedMs:Math.max(1, now - transferStartedAt),
+              averageBytesPerSecond,
+              instantBytesPerSecond,
+              peakBytesPerSecond,
+              resumed,
+              verificationMethod
+            });
+            nextCheckpoint = written + Number(checkpointBytes || 0);
+            lastCheckpointAt = now;
+          }
+
+          if (now - lastUiAt >= Number(uiIntervalMs || 0)) {
+            self.postMessage({
+              type:'progress',
+              written:received,
+              expectedTotal,
+              transferStartedAt,
+              transferStartBytes,
+              transferredBytes,
+              elapsedMs,
+              averageBytesPerSecond,
+              instantBytesPerSecond,
+              peakBytesPerSecond,
+              resumed
+            });
+            lastUiAt = now;
+          }
+        }
+
+        await flush();
+        await writable.close();
+        writable = null;
+        const finalFile = await handle.getFile();
+        const actual = Number(finalFile.size || 0);
+        if (actual !== written) {
+          const error = new Error(`ローカル書き込み検証失敗: file=${actual} / written=${written}`);
+          error.kind = 'verify';
+          throw error;
+        }
+        if (hasKnownLength && actual !== expectedTotal) {
+          const error = new Error(`サイズ検証失敗: local=${actual} / CDN=${expectedTotal}`);
+          error.kind = 'verify';
+          throw error;
+        }
+
+        const transferEndedAt = Date.now();
+        const durationMs = Math.max(0, transferEndedAt - transferStartedAt);
+        const transferredBytes = Math.max(0, actual - transferStartBytes);
+        const averageBytesPerSecond = durationMs > 0 ? transferredBytes * 1000 / durationMs : 0;
+        peakBytesPerSecond = Math.max(peakBytesPerSecond, instantBytesPerSecond, averageBytesPerSecond);
+
+        self.postMessage({
+          type:'done',
+          actual,
+          expectedTotal,
+          verificationMethod,
+          resumed,
+          localName:finalFile.name,
+          telemetry:{
+            transferStartedAt,
+            transferEndedAt,
+            transferStartBytes,
+            transferredBytes,
+            durationMs,
+            averageBytesPerSecond,
+            instantBytesPerSecond,
+            peakBytesPerSecond,
+            resumed,
+            worker:true
+          }
+        });
+      } catch (error) {
+        await fail(error, error?.name === 'NotAllowedError' ? 'filesystem' : 'network');
+      }
+    };
+  }
+
+  function canUseDetachedDownloadWorker({detachedUrl, interruptAfterBytes}) {
+    return !!detachedUrl &&
+      !(Number.isFinite(Number(interruptAfterBytes)) && Number(interruptAfterBytes) > 0) &&
+      typeof globalThis.Worker === 'function' &&
+      typeof globalThis.Blob === 'function' &&
+      typeof globalThis.URL?.createObjectURL === 'function';
+  }
+
+  function getDetachedDownloadWorkerUrl() {
+    if (detachedDownloadWorkerUrl) return detachedDownloadWorkerUrl;
+    if (!canUseDetachedDownloadWorker({detachedUrl:'worker-check', interruptAfterBytes:null})) {
+      throw new LinkexError('Web Workerを利用できません。', {kind:'worker_unavailable'});
+    }
+    const source = `(${detachedDownloadWorkerBootstrap.toString()})();`;
+    detachedDownloadWorkerUrl = URL.createObjectURL(new Blob([source], {type:'text/javascript'}));
+    return detachedDownloadWorkerUrl;
+  }
+
+  async function downloadOwnedFileInWorker({state, handle, detachedUrl, onProgress = () => {}, onPhase = () => {}}) {
+    const destId = state?.confirmedDest?.id;
+    if (!destId) throw new LinkexError('Worker DL対象のdestIdがありません。', {kind:'ownership'});
+    let worker;
+    try {
+      worker = new Worker(getDetachedDownloadWorkerUrl());
+    } catch (e) {
+      throw new LinkexError(`Web Worker起動失敗: ${e?.message || e}`, {kind:'worker_start'});
+    }
+
+    return await new Promise((resolve, reject) => {
+      let settled = false;
+      const finish = (fn, value) => {
+        if (settled) return;
+        settled = true;
+        try { worker.terminate(); } catch {}
+        fn(value);
+      };
+      const fail = error => finish(reject, error instanceof Error ? error : new LinkexError(String(error || 'Worker DL失敗'), {kind:'worker'}));
+
+      worker.onerror = event => {
+        fail(new LinkexError(`Web Worker実行失敗: ${event?.message || 'unknown error'}`, {kind:'worker_start'}));
+      };
+
+      worker.onmessage = event => {
+        void (async () => {
+          const data = event?.data || {};
+          if (data.type === 'started') {
+            assertLease();
+            return;
+          }
+          if (data.type === 'progress') {
+            assertLease();
+            onProgress({
+              written:Number(data.written || 0),
+              expectedTotal:data.expectedTotal == null ? null : Number(data.expectedTotal),
+              resumed:!!data.resumed,
+              sourceMetaSize:Number(state.source?.size || 0),
+              averageBytesPerSecond:Number(data.averageBytesPerSecond || 0),
+              instantBytesPerSecond:Number(data.instantBytesPerSecond || 0),
+              peakBytesPerSecond:Number(data.peakBytesPerSecond || 0)
+            });
+            return;
+          }
+          if (data.type === 'checkpoint') {
+            assertLease();
+            const now = Date.now();
+            const current = loadProbeState(state) || state;
+            const transferredBytes = Number(data.transferredBytes || 0);
+            const averageBytesPerSecond = Number(data.averageBytesPerSecond || 0);
+            saveProbeState({
+              ...current,
+              state:'DOWNLOADING',
+              download:{
+                ...(current.download||{}),
+                destId,
+                downloadedBytes:Number(data.written || 0),
+                expectedCdnBytes:data.expectedTotal == null ? null : Number(data.expectedTotal),
+                telemetry:{
+                  transferStartedAt:Number(data.transferStartedAt || 0),
+                  transferStartBytes:Number(data.transferStartBytes || 0),
+                  transferredBytes,
+                  elapsedMs:Number(data.elapsedMs || 0),
+                  averageBytesPerSecond,
+                  averageMBps:bytesPerSecondToMBps(averageBytesPerSecond),
+                  instantBytesPerSecond:Number(data.instantBytesPerSecond || 0),
+                  peakBytesPerSecond:Number(data.peakBytesPerSecond || 0),
+                  resumed:!!data.resumed,
+                  worker:true
+                },
+                updatedAt:now
+              }
+            });
+            return;
+          }
+          if (data.type === 'error') {
+            const details = data.error || {};
+            fail(new LinkexError(details.message || 'Worker DL失敗', {
+              kind:details.kind || 'worker',
+              status:details.status ?? null
+            }));
+            return;
+          }
+          if (data.type !== 'done') return;
+
+          assertLease();
+          const transferEndedAt = Number(data.telemetry?.transferEndedAt || Date.now());
+          onPhase({phase:'download-end', at:transferEndedAt});
+          const verifyStartedAt = Date.now();
+          onPhase({phase:'verify-start', at:verifyStartedAt});
+
+          const expectedTotal = data.expectedTotal == null ? null : Number(data.expectedTotal);
+          const actual = Number(data.actual || 0);
+          const verificationMethod = data.verificationMethod || (expectedTotal == null ? 'stream-eof' : 'content-length');
+          const telemetry = {
+            ...(data.telemetry || {}),
+            averageMBps:bytesPerSecondToMBps(Number(data.telemetry?.averageBytesPerSecond || 0)),
+            worker:true
+          };
+          const currentBeforeCommit = loadProbeState(state) || state;
+          saveProbeState({...currentBeforeCommit, download:{...(currentBeforeCommit.download||{}), telemetry}});
+          const done = commitVerifiedDownload(state, {
+            destId,
+            downloadedBytes:actual,
+            expectedCdnBytes:expectedTotal,
+            localName:data.localName || state.source?.name || 'download',
+            verificationMethod
+          });
+          onPhase({phase:'verify-end', at:Date.now()});
+          finish(resolve, {
+            verified:true,
+            resumed:!!data.resumed,
+            totalBytes:expectedTotal ?? actual,
+            localBytes:actual,
+            finalFile:await handle.getFile(),
+            state:done,
+            verificationMethod,
+            metadataSize:Number(state.source?.size || 0),
+            telemetry,
+            worker:true
+          });
+        })().catch(fail);
+      };
+
+      try {
+        worker.postMessage({
+          type:'download',
+          url:String(detachedUrl),
+          handle,
+          checkpointBytes:CHECKPOINT_BYTES,
+          checkpointIntervalMs:CHECKPOINT_INTERVAL_MS,
+          uiIntervalMs:UI_UPDATE_INTERVAL_MS,
+          writeBufferBytes:WRITE_BUFFER_BYTES
+        });
+      } catch (e) {
+        fail(new LinkexError(`WorkerへのFileSystemHandle転送失敗: ${e?.message || e}`, {kind:'worker_start'}));
+      }
+    });
+  }
+
+  async function downloadOwnedFile({api, state, handle, detachedUrl = null, interruptAfterBytes = null, onForcedInterrupt = null, onProgress = () => {}, onPhase = () => {}}) {
     const destId = state?.confirmedDest?.id;
     if (!destId || state.state === 'AMBIGUOUS_COPY') throw new LinkexError('所有権確定済みdestIdがありません。', {kind:'ownership'});
     await ensureHandlePermission(handle);
+
+    if (canUseDetachedDownloadWorker({detachedUrl, interruptAfterBytes})) {
+      try {
+        return await downloadOwnedFileInWorker({state, handle, detachedUrl, onProgress, onPhase});
+      } catch (e) {
+        // CSP / userscript sandbox / handle-clone failures fall back to the proven inline path.
+        // Network/CDN/filesystem errors remain real transfer errors and are handled by the normal Range retry layer.
+        if (!['worker_unavailable','worker_start'].includes(e?.kind)) throw e;
+        console.warn('[Linkex Downloader] Worker unavailable; falling back to inline transfer.', e);
+      }
+    }
 
     let localFile = await handle.getFile();
     let offset = localFile.size;
