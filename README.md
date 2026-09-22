@@ -1,8 +1,8 @@
 # Linkex Downloader
 
-Linkex の共有リンクから、共有内のファイルを **1件ずつ安全にローカルへ保存する** Tampermonkey userscript です。
+Linkex の共有リンクから、共有内のファイルを **所有権確認付きでローカルへ高速保存する** Tampermonkey userscript です。
 
-Linkex の自分のストレージを一時作業領域として利用し、各ファイルごとに「一時コピー → 所有権確認 → ローカル保存 → 検証 → 一時コピー削除」を行います。
+v1.3候補では、Linkex の自分のストレージを一時作業領域として利用し、各ファイルを「一時コピー → 所有権確認 → signed URL取得 → 所有済み一時コピー削除 → ローカル保存/検証」の順で処理します。Linkex側のCOPY/DELETE制御は1件ずつ直列、ローカルDOWNLOADは最大8並列です。
 
 > [!IMPORTANT]
 > 本ツールは **Linkex公式とは無関係の非公式ツール** です。Linkex側のWeb/API仕様変更により動作しなくなる可能性があります。
@@ -20,16 +20,16 @@ Linkex 自領域へ一時コピー
   ↓
 コピー先 ID を一意に確定
   ↓
-署名付き CDN URL からローカルへダウンロード
+signed CDN URL をメモリ上だけで取得
   ↓
-ローカル保存を検証
+自分で作成した一時コピー ID だけ削除・不在確認
   ↓
-自分で作成した一時コピー ID だけ削除
+最大8並列でローカルへダウンロード / 検証
   ↓
-次のファイル
+中断時は新COPY / 新URLから既存partialへRange再開
 ```
 
-一時コピーは1件ずつ処理するため、Linkexのストレージ容量を使い回しながら共有内の複数ファイルを順番に保存できます。
+一時コピーはLinkex上で1件ずつ所有確認・削除確認するため、Linkex容量を使い回せます。削除確認後のsigned URLはメモリ上だけでDOWNLOAD workerへ渡し、最大8本を並列転送します。
 
 ## Version / 配布状態
 
@@ -40,6 +40,9 @@ Linkex 自領域へ一時コピー
 - Release commit: `ac698e0d3d8f6a6e6ba876cf2ea64e8cc98e1ac5`
 - 現行CI: **GitHub Actions (`.github/workflows/ci.yml`)** — userscript構文、回帰テスト、repository整合性、Release Asset生成を検証
 - License: **MIT**
+
+> [!NOTE]
+> `feat/v1.3-dl8-release-candidate` はv1.3候補です。公開Stableはまだv1.2.1のままです。候補版では通常の「すべてダウンロード」「選択をダウンロード」がDL=8高速パイプラインを使用し、「互換: 保存後DELETE」で従来のLOCAL_COMMITTED後DELETE方式へ戻せます。
 
 最新の正式配布先は GitHub Releases です。
 
@@ -55,10 +58,10 @@ Linkex 自領域へ一時コピー
 - `disk.linkex.io` 上での従来の共有URL手入力解析も継続対応
 - 共有フォルダの再帰走査
 - 全ファイルmanifest作成
-- Linkex自領域へ1件ずつ一時コピー
+- Linkex自領域へのCOPY / ownership確認 / early DELETEを1件ずつ直列実行
 - コピー前後のID差分による `destId` 所有権確定
-- signed CDN URLからのローカル保存
-- Range Requestによる途中再開
+- signed CDN URLを永続化せずメモリ上だけで受け渡し、ローカルDOWNLOADを最大8並列実行
+- Range Requestによる途中再開。early DELETE後の再読み込みでは新COPY / 新signed URLを取得して既存partialから再開
 - signed URL失効時（403）のURL再取得
 - Content-Lengthがある場合はCDN実サイズ一致、ない場合はstream正常EOF＋実書込byte数でローカル保存検証
 - 検証済み一時コピー1件だけの自動削除
@@ -196,8 +199,10 @@ Linkex_<共有名>_<日時>_<job-id末尾>/
 |---|---|
 | **すべてダウンロード** | 現在の共有を必要なら自動解析し、保存先準備後にFull Queueをそのまま開始 |
 | **ファイルを選ぶ** | 共有を解析してファイル選択UIを展開 |
-| **選択をダウンロード** | チェック済みファイルだけでQueue開始 |
-| **Queueを再開** | 保存済み未完了Queueを実状態照合から再開（未完了時のみ表示） |
+| **選択をダウンロード** | チェック済みファイルだけでDL=8高速Queue開始 |
+| **互換: 保存後DELETE** | 従来の「DL → VERIFY → LOCAL_COMMITTED → DELETE」方式で全件処理 |
+| **互換: 選択 保存後DELETE** | 従来方式でチェック済みファイルだけ処理 |
+| **Queueを再開** | 保存済み未完了Queueを実状態照合から再開（early DELETE後は必要なら新COPY/URL + Range resume） |
 | **現在ファイル後に停止** | 現在ファイルの安全な処理境界後に停止予約（実行中のみ表示） |
 | **詳細** | 保存先変更、再解析、署名テスト、診断ログ保存、状態再表示、容量skip再試行、安全破棄、折りたたみログ表示を格納 |
 | **− / +** | パネルを最小化/展開 |
@@ -206,7 +211,7 @@ Linkex_<共有名>_<日時>_<job-id末尾>/
 
 **現在ファイル後に停止** は即時強制停止ではありません。
 
-現在処理中の1ファイルについて、安全に完了可能な `COPY → DL → VERIFY → DELETE` の境界まで処理してから `PAUSED_USER` になります。
+高速DL=8では新しいCOPY/early DELETEの開始を止め、すでに開始済みのDOWNLOAD/VERIFYを安全にsettleさせてから `PAUSED_USER` になります。互換モードでは従来どおり現在ファイルの `COPY → DL → VERIFY → DELETE` 境界まで進めます。
 
 その後 **Queueを再開** で続行できます。
 
@@ -229,16 +234,19 @@ Queue作成時に保存pathを確定し、再開途中で名前を変えない�
 
 ### 絶対に維持する安全条件
 
-- ローカル保存が `LOCAL_COMMITTED` になるまでLinkex側を削除しない
-- Downloader自身が作成したと証明できる `destId` だけ削除する
+- **共有元ファイルは削除しない**
+- Downloader自身が新規作成したと証明できる `destId` だけ削除する
 - DELETEは常に `select_all:false` かつ確定済み `file_ids:[destId]` の1件だけ
+- 高速モードのearly DELETEは、ownership確定・`beforeIds` 新規性確認・fresh signed URL取得・削除直前identity再確認をすべて通った一時copyに限定する
+- signed URLは永続化せずメモリ上だけに保持する
 - COPY応答不明時はcopy POSTを盲目的に再送しない
-- DELETE応答不明時はdelete POSTを盲目的に再送しない
+- DELETE応答不明時はdelete POSTを盲目的に再送せず、`destId` の存在/不在を先に照合する
 - コピー前から存在したIDは削除しない
-- ダウンロードしたIDと所有権確定IDが一致しない場合は削除しない
-- ローカル検証サイズとCDN実サイズが一致しない場合は削除しない
-- 所有権が曖昧な場合は自動処理を停止する
+- early DELETE後にDLが中断した場合、削除済み`destId`からURL再取得せず、新しいCOPY / ownership / signed URL / early DELETEを行って既存partialへRange再開する
+- ローカル完全性はCDN実サイズまたはstream EOFで最終検証する
+- ownershipが曖昧な場合は自動処理を停止する
 - leaseを失った場合は処理を停止する
+- **互換モードでは従来どおり `LOCAL_COMMITTED` 前DELETEを禁止する**
 
 ## COPY所有権の確定
 
@@ -256,11 +264,13 @@ Queue作成時に保存pathを確定し、再開途中で名前を変えない�
 ## ダウンロードと再開
 
 - signed CDN URLを所有権確定済み `destId` から取得
+- 高速モードではURL取得後に所有一時copyをDELETE確認し、URLはメモリ上だけでDOWNLOAD workerへ渡す
 - 既存ローカルファイルサイズを使ってRange resume
 - 約2 MiBごとにcheckpoint
-- 403時は同じ `destId` からURLを再取得
+- 高速モードで403 / reload等によりURLを失った場合は、削除済み`destId`を再利用せず新しいCOPY / URLからRange resume
+- 互換モードの403は同じ所有`destId`からURLを再取得
 - Range要求に200が返った場合は0 byteから安全に書き直し
-- network/CDN/range系の一時エラーは最大3回再試行
+- network/CDN/range系の一時エラーは安全条件を満たす範囲で再試行
 
 ### サイズ検証
 
@@ -292,9 +302,10 @@ Linkex側が `size_exceeded` を返した場合も同様に扱います。
 Queue状態は永続化されます。
 
 - ページ再読み込み後: 未完了Queueを検出して再開可能
-- Download中断: 既存ローカルサイズからRange再開
+- 高速モードで一時copy削除後にDownload中断: 旧signed URLを永続化せず、新しいCOPY / ownership / URL / early DELETEを経て既存ローカルサイズからRange再開
 - COPY結果不明: copyを再送する前にLinkex実状態をreconcile
 - DELETE結果不明: deleteを再送せずLinkex実状態をreconcile
+- real page exit時は自分自身のleaseだけ解放し、別tab leaseは奪わない
 - 危険な曖昧状態: `PAUSED` / `BLOCKED` で停止
 
 保存先DirectoryHandleもIndexedDBへ保存します。ただしブラウザ再起動等でpermission再確認が必要になる場合があります。

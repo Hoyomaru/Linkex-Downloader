@@ -4,6 +4,24 @@
 
 ## [Unreleased]
 
+### Added
+
+- ownership-confirmed一時copyをsigned URL取得後に先行DELETEし、ローカルDOWNLOADを最大8並列で実行するv1.3高速パイプライン
+- early DELETE後の中断/ページ再読み込みに対し、新しいCOPY / signed URLを取得して既存partialへRange resumeする復旧経路
+- real page exit時に自分自身のleaseだけ解放し、reload直後の安全なQueue再開を可能にするlease handoff
+- 従来の`LOCAL_COMMITTED → DELETE`方式を「互換: 保存後DELETE」として残すfallback
+
+### Changed
+
+- v1.3候補では「すべてダウンロード」「選択をダウンロード」をnormal-order DL=8 / maxInFlight=16高速パイプラインへ切替
+- signed URLは高速モードで永続化せず、削除確認済みtransactionのDOWNLOAD taskへメモリ上だけで渡す
+
+### Safety
+
+- early DELETEでも共有元は削除せず、`beforeIds`に存在しないownership-confirmed `destId` 1件だけを対象にする
+- COPY / DELETE結果不明時の盲目的なwrite再送禁止を維持
+- reload recovery実機検証で、context change・新operation・新destId・replacement DELETE・Range resume・最終local verifyの全条件FULL_PASSを確認
+
 ## [1.2.1] - 2026-09-17
 
 ### Fixed

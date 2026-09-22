@@ -8,7 +8,7 @@
 
 Linkex Downloader は、`https://disk.linkex.io/*` と `https://l2e.click/d/*`（`www`含む）上で動作する Tampermonkey userscript です。共有ページでは現在URLからshare tokenを自動検出し、自ストレージページでは従来の手入力導線も維持します。
 
-共有リンク内のファイルを直接 CDN から取得するのではなく、各ファイルを一度自分の Linkex ストレージへコピーし、そのコピー先 ID の所有権を確認した後にダウンロードします。ローカル保存を検証できた場合だけ、自分で作成したと証明できる一時コピーを削除します。
+共有リンク内のファイルを直接 CDN から取得するのではなく、各ファイルを一度自分の Linkex ストレージへコピーし、そのコピー先 ID のownershipを確認します。v1.3候補の高速モードではsigned URLをメモリ上に取得した後、所有確認済み一時copyを先にDELETE・不在確認してLinkex容量を解放し、そのURLから最大8並列でローカル保存します。中断時は新しいCOPY / URLを作り、既存partialへRange resumeします。従来のLOCAL_COMMITTED後DELETE方式も互換モードとして残します。
 
 ```mermaid
 flowchart TD
@@ -21,14 +21,16 @@ flowchart TD
     G --> H[コピー前後ID差分を照合]
     H -->|一意に証明| I[OWNERSHIP_CONFIRMED]
     H -->|曖昧| X[安全停止]
-    I --> J[signed CDN URL取得]
-    J --> K[ローカルへRange対応DL]
-    K --> L[Content-Length / stream EOFで検証]
-    L --> M[LOCAL_COMMITTED]
-    M --> N[DELETE安全条件を再検証]
+    I --> J[fresh signed CDN URL取得 / memory-only]
+    J --> N[early DELETE安全条件を再検証]
     N --> O[確定destId 1件だけ削除]
     O --> P[Linkex上で不在を確認]
-    P --> Q[DONE]
+    P --> K[最大8並列 Range対応DL]
+    K --> L[Content-Length / stream EOFで検証]
+    L --> M[LOCAL_COMMITTED]
+    M --> Q[DONE]
+    K -->|中断/URL失効| R[新COPY / 新URLでpartialからresume]
+    R --> N
 ```
 
 ## コンポーネント
@@ -43,8 +45,8 @@ flowchart TD
 | 共有解析 | 共有URL解析、フォルダ再帰、manifest生成 | `parseShareToken()`, `buildManifest()` |
 | 所有権確定 | コピー前後の root ID 差分から `destId` を確定 | `reconcileCopy()`, `isPlausibleCopy()` |
 | ダウンロード | signed URL、Range resume、checkpoint、Content-Length / stream EOF検証 | `downloadOwnedFile()` |
-| 削除安全ゲート | `LOCAL_COMMITTED` 後の単一ID削除と結果照合 | `assertDeleteGuards()`, `ensureDeleted()` |
-| Queue | 1ファイルずつ直列処理、容量skip、pause/resume | `createQueueFromManifest()`, `processQueue()` |
+| 削除安全ゲート | 高速モードのownership-confirmed early DELETEと、互換モードの`LOCAL_COMMITTED`後DELETE | `assertEarlyDeletePipelineGuards()`, `deleteOwnedTempForEarlyDeletePipeline()`, `assertDeleteGuards()`, `ensureDeleted()` |
+| Queue | COPY/early DELETEは直列、ローカルDOWNLOAD最大8並列、容量skip、pause/resume | `createQueueFromManifest()`, `processEarlyDeletePipeline()`, `processQueue()` |
 | 排他 | 別タブとの二重実行防止 | `acquireLease()`, `assertLease()` |
 | 永続化 | Queue/transaction/設定/ログ/DirectoryHandle保存 | GM storage, IndexedDB |
 | UI/診断 | 右下パネル、進捗、署名テスト、support JSON | `createPanel()`, `downloadSupportBundle()` |
@@ -129,21 +131,23 @@ manifest を基に `createQueueFromManifest()` が Full Queue を作成します
 
 新規IDが複数ある場合は、名前などから推測して続行せず `AMBIGUOUS_COPY` として停止します。
 
-### 4. Download transaction
+### 4. Fast early-delete / Download transaction
 
-1. 所有権確定済み `destId` から現在の signed URL を取得。
-2. 既存ローカルファイルサイズを offset として Range GET。
-3. Range が 200 で無視された場合は0 byteから書き直し。
-4. 403時はURLを再取得して1回リトライ。
-5. 約2 MiBごとにcheckpoint。
-6. `Content-Length` が得られる場合は最終ローカルサイズと CDN 実サイズを厳密照合。得られない場合はstreamの正常EOF、stream実書込byte数、最終ローカルサイズの一致を照合。
-7. どちらかの検証方式が成立した場合だけ `LOCAL_COMMITTED`。
+1. 所有権確定済み `destId` をfresh取得し、ownership snapshotとidentityが一致することを確認。
+2. signed URLを取得し、永続化せずメモリ上だけに保持。
+3. `assertEarlyDeletePipelineGuards()` で新規ID・ownership・ambiguityなしを確認。
+4. 削除直前にもown root上の同じ `destId` / identityを確認。
+5. DELETEを1回だけ送信し、不明時は再送せずpresenceをreconcile。absence確認後にLinkex容量reservationを解放。
+6. 最大8 workerでローカルへDL。既存partialがあればRange GET。
+7. DELETE後のsigned URLが403/失効、またはreloadでURLを失った場合は削除済みdestIdからURL再取得せず、新しいCOPY / ownership / URL / early DELETEを行って同じpartialへRange resume。
+8. `Content-Length` が得られる場合は最終ローカルサイズと CDN 実サイズを厳密照合。得られない場合はstream正常EOF、stream実書込byte数、最終ローカルサイズの一致を照合。
+9. 検証成立時だけ `LOCAL_COMMITTED` / DONE。
 
 Linkex metadata の `size` は実CDNサイズと一致しないケースが確認されているため、ローカル完全性判定には使いません。
 
-### 5. Delete transaction
+### 5. Compatibility Delete transaction
 
-`assertDeleteGuards()` で以下を確認した後だけ DELETE へ進みます。
+互換モードでは `assertDeleteGuards()` で以下を確認した後だけ、ローカル保存完了後のDELETEへ進みます。
 
 - transaction が `LOCAL_COMMITTED`
 - `confirmedDest.id` が存在
@@ -239,7 +243,7 @@ Queue開始/再開時に lease を取得します。
 3. **Linkex metadata size と CDN実サイズを用途別に分ける。** 前者はidentity、後者はローカル完全性確認。
 4. **ローカルパスはQueue作成時に固定する。** 再開時のパス変動を避ける。
 5. **File System Access API handleを永続化する。** ページ再読み込み後のresumeを可能にする。
-6. **単一ファイル直列処理。** 一時ストレージ消費と所有権判定の複雑化を抑える。
+6. **control-planeは直列、data-planeは最大8並列。** COPY/ownership/early DELETEは1件ずつ進め、削除確認後のローカル転送だけ並列化する。
 
 ## 変更時に必ず確認する場所
 

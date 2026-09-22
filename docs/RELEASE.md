@@ -134,16 +134,18 @@ python tools/build_release_assets.py --output-dir <temporary directory>
 
 少なくとも次をレビューします。
 
-- `LOCAL_COMMITTED` 前に削除しない
-- Downloader自身が作成したと証明できる `destId` だけ削除
+- 共有元ファイルを削除しない
+- Downloader自身が新規作成したと証明できる `destId` だけ削除
+- 高速モードのearly DELETEはownership・新規ID・fresh signed URL・削除直前identity確認を必須にし、signed URLを永続化しない
+- 互換モードでは従来どおり `LOCAL_COMMITTED` 前に削除しない
 - DELETEは `select_all:false` + 単一 `file_ids:[destId]`
 - COPY / DELETE結果不明時はwriteを盲目的に再送しない
 - `beforeIds` に含まれるIDを削除しない
-- ダウンロードIDと所有権確定IDを一致確認
-- Content-Length検証では `download.sizeVerified === true` かつ `downloadedBytes === expectedCdnBytes >= 0`
+- 高速モードはsigned URL取得元IDとownership確定IDを一致確認。互換モードはダウンロードIDとownership確定IDを一致確認
+- ローカル完了時はContent-Length検証で `download.sizeVerified === true` かつ `downloadedBytes === expectedCdnBytes >= 0`
 - Content-Lengthがない場合は `verificationMethod === 'stream-eof'`、`streamComplete === true`、stream実書込byte数と最終ローカルサイズ一致を満たし、いずれも `verifiedAt` がある場合だけdelete可能
-- 削除直前identityを再確認
-- lease喪失時は停止
+- early DELETE / compatibility DELETEとも削除直前identityを再確認
+- lease喪失時は停止。real page exitでは自分自身のleaseだけ解放し、別tab leaseは奪わない
 - page URL変更で既存Queueの `shareToken` / queueRootを変更しない
 
 ### 4. 実機確認
@@ -152,13 +154,14 @@ Chromium系 + Tampermonkeyで少なくとも次を確認します。
 
 - `disk.linkex.io` でcredential bridge準備
 - `l2e.click/d/...` 共有ページでパネル表示
-- 初回 `すべてダウンロード` → 保存先picker → 自動解析 → Full Queue開始
+- 初回 `すべてダウンロード` → 保存先picker → 自動解析 → DL=8高速Full Queue開始
 - 次の共有で保存先permissionが残っていれば1クリック開始
 - 選択ダウンロード
-- CDN download / Range / 403 URL更新
+- 最大8並列CDN download / Range / early DELETE後の新COPY・新URL復旧
 - ローカルsize verification
-- 所有済み一時copyだけdelete
+- 所有済み一時copyだけearly deleteし、不在確認後にDOWNLOAD開始
 - `現在ファイル後に停止` → `Queueを再開`
+- early DELETE後にpartialを残してreload → 新contextでQueue再開 → 新COPY/new dest delete → Range resume → final verify
 - 詳細ログは通常折りたたみ、error時だけ自動展開
 - Share A → B遷移でstale manifestを開始しない
 
