@@ -67,8 +67,8 @@ test('probe URL is memory-only and support bundle exports results separately', (
   assert.match(SOURCE, /signedUrlPersisted:false/);
 });
 
-test('probe UI requires exactly one selected file and does not ask for a local directory', () => {
-  assert.match(SOURCE, /earlyDeleteProbeBtn\.disabled = .*selectedIndexes\.size !== 1/);
+test('release UI hides signed-URL fault injection while the probe helper stays local-directory independent', () => {
+  assert.doesNotMatch(SOURCE, /id="lf-early-delete-probe"/);
   const start = SOURCE.indexOf('async function startEarlyDeleteProbe');
   const end = SOURCE.indexOf('async function startManifestQueue', start);
   const block = SOURCE.slice(start, end);
