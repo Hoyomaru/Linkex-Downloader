@@ -1794,6 +1794,9 @@ const transientSignedUrls = new Map();
   // --- Production full queue: all files, safe sequential transactions ---
   const QUEUE_KEY = 'linkexQueueFullV1';
   const QUEUE_HANDLE_PREFIX = 'queue-full:';
+  const QUEUE_ITEM_JOURNAL_PREFIX = 'linkexQueueItemJournalV1:';
+  const QUEUE_DIRTY_INDEX_PREFIX = 'linkexQueueDirtyIndexesV1:';
+  const QUEUE_FULL_PERSIST_INTERVAL_MS = 5000;
   const LEASE_KEY = 'linkexQueueFullLeaseV1';
   const TAB_ID = `tab-${(globalThis.crypto?.randomUUID?.() || `${Date.now()}-${Math.random().toString(16).slice(2)}`)}`;
   let leaseTimer = null;
@@ -1807,6 +1810,7 @@ const transientSignedUrls = new Map();
   // so COPY / ownership / URL refresh / DELETE can run ahead of active downloads.
   const EARLY_DELETE_MAX_IN_FLIGHT = EARLY_DELETE_DOWNLOAD_WORKERS * 2;
   let queueCommitTail = Promise.resolve();
+  let lastFullQueuePersistAt = 0;
 
   function commitQueueJob(job, mutate = null) {
     const run = queueCommitTail.then(() => {
@@ -1894,14 +1898,96 @@ const transientSignedUrls = new Map();
     };
   }
 
-    function loadQueueJob() {
+    function queueItemJournalKey(job, index) {
+    const jobId = String(job?.jobId || '');
+    return jobId ? `${QUEUE_ITEM_JOURNAL_PREFIX}${jobId}:${Number(index)}` : null;
+  }
+
+  function queueDirtyIndexKey(job) {
+    const jobId = String(job?.jobId || '');
+    return jobId ? `${QUEUE_DIRTY_INDEX_PREFIX}${jobId}` : null;
+  }
+
+  function loadDirtyQueueIndexes(job) {
+    const key = queueDirtyIndexKey(job);
+    if (!key) return [];
+    const value = GM_getValue(key, []);
+    if (!Array.isArray(value)) return [];
+    return [...new Set(value.map(Number).filter(x => Number.isInteger(x) && x >= 0 && x < (job?.items?.length || 0)))];
+  }
+
+  function saveQueueItemJournal(job, index) {
+    const item = job?.items?.[index];
+    const key = queueItemJournalKey(job, index);
+    const dirtyKey = queueDirtyIndexKey(job);
+    if (!item || !key || !dirtyKey) return null;
+    const entry = {
+      schemaVersion:1,
+      jobId:job.jobId,
+      index:Number(index),
+      itemState:item.state || null,
+      tx:item.tx || null,
+      attempts:item.attempts ? {...item.attempts} : null,
+      lastError:item.lastError || null,
+      updatedAt:Date.now()
+    };
+    GM_setValue(key, entry);
+    const dirty = loadDirtyQueueIndexes(job);
+    if (!dirty.includes(Number(index))) {
+      dirty.push(Number(index));
+      GM_setValue(dirtyKey, dirty);
+    }
+    return entry;
+  }
+
+  function applyQueueItemJournals(job) {
+    if (!job?.jobId || !Array.isArray(job.items)) return job;
+    const queueSavedAt = Number(job.updatedAt || 0);
+    for (const index of loadDirtyQueueIndexes(job)) {
+      const key = queueItemJournalKey(job, index);
+      const entry = key ? GM_getValue(key, null) : null;
+      if (!entry || entry.jobId !== job.jobId || Number(entry.index) !== index) continue;
+      if (Number(entry.updatedAt || 0) <= queueSavedAt) continue;
+      const item = job.items[index];
+      if (!item) continue;
+      item.state = entry.itemState || item.state;
+      item.tx = entry.tx ?? item.tx;
+      item.attempts = entry.attempts ? {...entry.attempts} : item.attempts;
+      item.lastError = entry.lastError ?? item.lastError;
+      job.currentIndex = Math.max(Number(job.currentIndex || 0), index);
+    }
+    return job;
+  }
+
+  function clearQueueItemJournals(job) {
+    if (!job?.jobId) return;
+    for (const index of loadDirtyQueueIndexes(job)) {
+      const key = queueItemJournalKey(job, index);
+      if (key) GM_setValue(key, null);
+    }
+    const dirtyKey = queueDirtyIndexKey(job);
+    if (dirtyKey) GM_setValue(dirtyKey, null);
+  }
+
+  function loadQueueJob() {
     const value = GM_getValue(QUEUE_KEY, null);
-    return value && typeof value === 'object' ? value : null;
+    if (!value || typeof value !== 'object') return null;
+    return applyQueueItemJournals(value);
   }
 
   function saveQueueJob(job) {
     job.updatedAt = Date.now();
     GM_setValue(QUEUE_KEY, job);
+    lastFullQueuePersistAt = job.updatedAt;
+    clearQueueItemJournals(job);
+    return job;
+  }
+
+  function saveQueueJobLazy(job) {
+    if (!job) return job;
+    if (Date.now() - lastFullQueuePersistAt >= QUEUE_FULL_PERSIST_INTERVAL_MS) {
+      return saveQueueJob(job);
+    }
     return job;
   }
 
@@ -2099,8 +2185,11 @@ const transientSignedUrls = new Map();
     const item = job.items[index];
     item.tx = tx;
     if (itemState) item.state = itemState;
-    saveQueueJob(job);
+    // The operation-scoped probe and item journal are the durable write-ahead log.
+    // Avoid serializing the entire multi-thousand-item Queue on every phase transition.
     saveProbeState(tx);
+    saveQueueItemJournal(job, index);
+    saveQueueJobLazy(job);
     return tx;
   }
 
@@ -2109,7 +2198,8 @@ const transientSignedUrls = new Map();
     const tx = loadProbeState(current);
     if (tx && tx.operationId === current?.operationId) {
       job.items[index].tx = tx;
-      saveQueueJob(job);
+      saveQueueItemJournal(job, index);
+      saveQueueJobLazy(job);
     }
     return job.items[index].tx;
   }
@@ -2601,7 +2691,8 @@ const transientSignedUrls = new Map();
     for (let attempt = 1; attempt <= 3; attempt++) {
       assertLease();
       item.attempts.download = (item.attempts.download || 0) + 1;
-      saveQueueJob(job);
+      saveQueueItemJournal(job, index);
+      saveQueueJobLazy(job);
       try {
         onStatus?.(`EARLY-DELETE DOWNLOADING [${index+1}/${job.items.length}]\n${item.source.remotePath}\nattempt ${attempt} / pool ${EARLY_DELETE_DOWNLOAD_WORKERS}`);
         let downloadEndedAt = null;
@@ -2855,25 +2946,25 @@ const transientSignedUrls = new Map();
           if (!downloadResult.ok) throw downloadResult.error;
           if (deleteError) throw deleteError;
 
-          await commitQueueJob(job, () => {
-            let tx = latestItemTx(item) || item.tx;
-            if (tx.state !== 'LOCAL_COMMITTED') throw new LinkexError(`完了前state異常: ${tx.state}`, {kind:'state'});
-            if (!tx.delete?.confirmedAbsentAt) throw new LinkexError('完了前にLinkex一時コピー削除が未確認です。', {kind:'early_delete_state'});
-            tx = {
-              ...tx,
-              state:'DONE',
-              download:{
-                ...(tx.download||{}),
-                detachedAfterDelete:true,
-                deleteParallel:true,
-                streamBeforeDelete:true
-              }
-            };
-            tx = perfPhaseEnd(tx, 'total', Date.now(), {outcome:'done-stream-before-delete'});
-            item.tx = tx;
-            item.state = 'DONE';
-            compactCompletedItem(job, item);
-          });
+          let completedTx = latestItemTx(item) || item.tx;
+          if (completedTx.state !== 'LOCAL_COMMITTED') throw new LinkexError(`完了前state異常: ${completedTx.state}`, {kind:'state'});
+          if (!completedTx.delete?.confirmedAbsentAt) throw new LinkexError('完了前にLinkex一時コピー削除が未確認です。', {kind:'early_delete_state'});
+          completedTx = {
+            ...completedTx,
+            state:'DONE',
+            download:{
+              ...(completedTx.download||{}),
+              detachedAfterDelete:true,
+              deleteParallel:true,
+              streamBeforeDelete:true
+            }
+          };
+          completedTx = perfPhaseEnd(completedTx, 'total', Date.now(), {outcome:'done-stream-before-delete'});
+          item.tx = completedTx;
+          item.state = 'DONE';
+          compactCompletedItem(job, item);
+          saveQueueItemJournal(job, index);
+          saveQueueJobLazy(job);
           onStatus?.(`完了 [${index+1}/${job.items.length}]\n${item.source.remotePath}\nDL stream先行 + DELETE並行 / ローカル検証済み / 一時コピー削除確認済み`);
         } catch (e) {
           if (downloadSettled) {
@@ -2900,8 +2991,10 @@ const transientSignedUrls = new Map();
       if (fatalError) break;
       if (job.stopRequested) { pauseRequested = true; break; }
 
-      await commitQueueJob(job, () => { job.currentIndex = i; });
+      job.currentIndex = i;
+      saveQueueJobLazy(job);
       const item = job.items[i];
+      if (item.tx) syncTxFromProbe(job, i);
       if (item.state === 'DONE' || item.tx?.state === 'DONE') {
         compactCompletedItem(job, item);
         saveQueueJob(job);
@@ -2921,14 +3014,14 @@ const transientSignedUrls = new Map();
       }
 
       if (item.tx?.state === 'LOCAL_COMMITTED' && item.tx?.delete?.confirmedAbsentAt) {
-        await commitQueueJob(job, () => {
-          let tx = latestItemTx(item) || item.tx;
-          tx = {...tx, state:'DONE'};
-          tx = perfPhaseEnd(tx, 'total', Date.now(), {outcome:'recovered-local-and-delete-confirmed'});
-          item.tx = tx;
-          item.state = 'DONE';
-          compactCompletedItem(job, item);
-        });
+        let recoveredTx = latestItemTx(item) || item.tx;
+        recoveredTx = {...recoveredTx, state:'DONE'};
+        recoveredTx = perfPhaseEnd(recoveredTx, 'total', Date.now(), {outcome:'recovered-local-and-delete-confirmed'});
+        item.tx = recoveredTx;
+        item.state = 'DONE';
+        compactCompletedItem(job, item);
+        saveQueueItemJournal(job, i);
+        saveQueueJobLazy(job);
         continue;
       }
 
@@ -3690,6 +3783,11 @@ const transientSignedUrls = new Map();
       product: 'Linkex Downloader',
       version: VERSION,
       buildTag: BUILD_TAG,
+      queuePersistence:{
+        mode:'item-journal',
+        fullQueueIntervalMs:QUEUE_FULL_PERSIST_INTERVAL_MS,
+        dirtyIndexes:queue ? loadDirtyQueueIndexes(queue).length : 0
+      },
       generatedAt: new Date().toISOString(),
       signatureSelfTest: runSignatureSelfTest().map(x => ({name:x.name, ok:x.ok, actual:x.actual, expected:x.expected})),
       performance: redactForExport(buildPerformanceSummary(queue)),
