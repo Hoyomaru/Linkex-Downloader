@@ -10,7 +10,7 @@ permissions:
 
 jobs:
   publish:
-    if: startsWith(github.event.head_commit.message, 'release: publish v')
+    if: "${{ startsWith(github.event.head_commit.message, 'release: publish v') }}"
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
