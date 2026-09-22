@@ -40,7 +40,8 @@ test('early-delete opens the download stream before destructive DELETE and still
   assert.ok(barrierAt > downloadStartAt, 'DELETE barrier must wait for stream-ready');
   assert.ok(deleteAt > barrierAt, 'DELETE starts only after stream-ready');
   assert.ok(downloadJoinAt > deleteAt, 'download completion is joined after DELETE has started');
-  assert.match(launchBlock, /first non-empty chunk/);
+  assert.match(launchBlock, /stream-ready/);
+  assert.match(launchBlock, /zero-byte EOF/);
   assert.match(launchBlock, /capacity\.release\(reservation\)/);
 
   const loopBlock = block.slice(loopStart);
