@@ -312,6 +312,13 @@
     return Number.isFinite(when) ? Math.max(0, when - Date.now()) : null;
   }
 
+  function parseResponseDateMs(responseHeaders) {
+    const line = String(responseHeaders || '').split(/\r?\n/).find(x => /^date\s*:/i.test(x));
+    if (!line) return null;
+    const parsed = Date.parse(line.slice(line.indexOf(':') + 1).trim());
+    return Number.isFinite(parsed) ? parsed : null;
+  }
+
   function isRetryableReadStatus(status) {
     const n = Number(status || 0);
     return n === 429 || (n >= 500 && n <= 599);
@@ -359,7 +366,11 @@
             status:Number(res?.status || 0),
             hiddenAtStart,
             hiddenAtEnd:!!globalThis.document?.hidden,
-            visibilityState:String(globalThis.document?.visibilityState || 'unknown')
+            visibilityState:String(globalThis.document?.visibilityState || 'unknown'),
+            responseDateLagMs:(() => {
+              const serverDateMs = parseResponseDateMs(res?.responseHeaders);
+              return serverDateMs == null ? null : Math.max(0, requestEndedAt - serverDateMs);
+            })()
           });
         }
         if (res.status >= 200 && res.status < 300) break;
