@@ -4,6 +4,8 @@
 
 ## [Unreleased]
 
+## [1.3.0] - 2026-09-22
+
 ### Added
 
 - ownership-confirmed一時copyをsigned URL取得後に先行DELETEし、ローカルDOWNLOADを最大8並列で実行するv1.3高速パイプライン

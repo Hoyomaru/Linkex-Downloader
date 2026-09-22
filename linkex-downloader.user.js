@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Linkex Downloader
 // @namespace    openai-linkex-helper
-// @version      1.2.1
-// @description  Linkex共有ページからワンクリックで安全にQueue保存。選択DL・再開・検証・所有ID限定削除・診断付き。
+// @version      1.3.0
+// @description  Linkex共有ページからDL=8高速Queue保存。所有ID限定early DELETE・Range復旧・互換モード・診断付き。
 // @license      MIT
 // @match        https://disk.linkex.io/*
 // @match        https://l2e.click/d/*
@@ -19,7 +19,7 @@
 (() => {
   'use strict';
 
-  const VERSION = '1.2.1';
+  const VERSION = '1.3.0';
   const API_BASE = 'https://prod.linksvc.xyz';
   const SIGNED_HEADER_PREFIX = 'x-linkinflu-';
   const SIGNATURE_HEADER = 'x-linkinflu-sign';
@@ -3014,7 +3014,7 @@ function sameOwnedIdentity(current, state) {
             <div class="selection-actions"><button id="lf-select-all" class="secondary">全件選択</button><button id="lf-clear-all" class="secondary">全解除</button><button id="lf-select-visible" class="secondary">表示中を選択</button><button id="lf-clear-visible" class="secondary">表示中を解除</button></div>
             <div id="lf-file-list" class="file-list"></div>
             <div id="lf-selection-note" class="notice"></div>
-            <div class="row" style="margin-top:8px;margin-bottom:0"><button id="lf-start-selected" class="primary" disabled>選択をダウンロード</button><button id="lf-start-selected-early-delete" class="secondary" disabled>互換: 選択 保存後DELETE</button><button id="lf-early-delete-recovery" class="warn" disabled>検証: 1件復旧</button><button id="lf-early-delete-probe" class="secondary" disabled>検証: signed URL</button></div>
+            <div class="row" style="margin-top:8px;margin-bottom:0"><button id="lf-start-selected" class="primary" disabled>選択をダウンロード</button><button id="lf-start-selected-early-delete" class="secondary" disabled>互換: 選択 保存後DELETE</button></div>
           </div>
           <div id="lf-queue-actions" class="row" hidden><button id="lf-resume" class="primary" disabled>Queueを再開</button><button id="lf-pause" class="secondary" disabled>現在ファイル後に停止</button></div>
           <div class="progress-wrap">
@@ -3035,7 +3035,7 @@ function sameOwnedIdentity(current, state) {
               </details>
             </div>
           </details>
-          <div class="notice">v1.3候補の標準は高速DL=8です。Downloaderが所有確認した一時copyだけをsigned URL取得後に先に削除し、ローカルDLを最大8並列で進めます。中断時は新しいCOPY/URLから既存partialへRange再開します。「互換: 保存後DELETE」は従来方式です。</div>
+          <div class="notice">v1.3の標準は高速DL=8です.Downloaderが所有確認した一時copyだけをsigned URL取得後に先に削除し、ローカルDLを最大8並列で進めます。中断時は新しいCOPY/URLから既存partialへRange再開します。「互換: 保存後DELETE」は従来方式です。</div>
         </div>
       </div>`;
     document.body.appendChild(root);
@@ -3052,8 +3052,6 @@ function sameOwnedIdentity(current, state) {
     const selectModeBtn = root.querySelector('#lf-select-mode');
     const selectedStartBtn = root.querySelector('#lf-start-selected');
     const selectedEarlyDeleteStartBtn = root.querySelector('#lf-start-selected-early-delete');
-    const earlyDeleteRecoveryBtn = root.querySelector('#lf-early-delete-recovery');
-    const earlyDeleteProbeBtn = root.querySelector('#lf-early-delete-probe');
     const selectionPanel = root.querySelector('#lf-selection');
     const selectionMeta = root.querySelector('#lf-selection-meta');
     const fileFilter = root.querySelector('#lf-file-filter');
@@ -3336,9 +3334,6 @@ function sameOwnedIdentity(current, state) {
       selectModeBtn.disabled = busy || !!active || !hasShareInput;
       selectedStartBtn.disabled = busy || !manifest?.files?.length || selectedIndexes.size === 0 || !!active || !preferredHandleReady;
       selectedEarlyDeleteStartBtn.disabled = busy || !manifest?.files?.length || selectedIndexes.size === 0 || !!active || !preferredHandleReady;
-      const recoverySelected = selectedIndexes.size === 1 ? manifest?.files?.[Array.from(selectedIndexes)[0]] : null;
-      earlyDeleteRecoveryBtn.disabled = busy || !recoverySelected || Number(recoverySelected?.size || 0) < 16 * 1024 * 1024 || !!active || !preferredHandleReady;
-      earlyDeleteProbeBtn.disabled = busy || !manifest?.files?.length || selectedIndexes.size !== 1 || !!active;
       const c = queueCounts(job);
       retryBtn.disabled = busy || !job || !(c.skippedCapacity || c.unfittable) || !isTerminal(job);
       abandonBtn.disabled = busy || !active;
@@ -3785,28 +3780,6 @@ function sameOwnedIdentity(current, state) {
         write(`ファイルを選択してください。\n${manifest.files.length}件 / ${formatBytes(manifest.totalBytes)}\n選択後に「選択をダウンロード」を押します。`, 'ok');
       } catch (e) { handleAnalyzeFailure(e); }
       finally { preparing = false; refreshQueueUi(); }
-    });
-
-    earlyDeleteProbeBtn.addEventListener('click', async () => {
-      await startEarlyDeleteProbe();
-    });
-
-    earlyDeleteRecoveryBtn.addEventListener('click', async () => {
-      if (running || preparing || !manifest || selectedIndexes.size !== 1) return;
-      if (!resolveCredentials()) { write(credentialBootstrapMessage(), 'err'); return; }
-      preparing = true;
-      refreshQueueUi();
-      try {
-        const baseDir = await acquirePreferredBaseDirFromGesture();
-        preparing = false;
-        refreshQueueUi();
-        await startEarlyDeletePipeline(new Set(selectedIndexes), {baseDir, skipConfirm:false, recoveryProbe:true});
-      } catch (e) {
-        if (e?.name !== 'AbortError') write(`復旧検証の保存先準備失敗: ${e?.message || e}`, 'err');
-      } finally {
-        preparing = false;
-        refreshQueueUi();
-      }
     });
 
     selectedEarlyDeleteStartBtn.addEventListener('click', async () => {

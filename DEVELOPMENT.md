@@ -8,12 +8,12 @@ READMEは利用者向け、CHANGELOGは変更履歴、`docs/ARCHITECTURE.md` は
 
 ## 現在の状態
 
-2026-09-17 時点で確認した状態です。
+2026-09-22 時点で確認した状態です。
 
-- `main` source: **v1.2.1**（公開済み / 実機確認済み）
+- `main` source: **v1.3.0**（release commit準備済み / 公開前）
 - 最新公開Stable: **v1.2.1**
-- userscript metadata `@version`: **1.2.1**
-- `const VERSION`: **1.2.1**
+- userscript metadata `@version`: **1.3.0**
+- `const VERSION`: **1.3.0**
 - 最新公開Git tag: **`v1.2.1`**
 - GitHub Release: **v1.2.1 公開済み**
 - Release commit: `ac698e0d3d8f6a6e6ba876cf2ea64e8cc98e1ac5`
@@ -25,7 +25,7 @@ READMEは利用者向け、CHANGELOGは変更履歴、`docs/ARCHITECTURE.md` は
 - Main API origin: `https://prod.linksvc.xyz`
 - 実機確認ブラウザ: Chromium系（Chrome / Edge）
 - License: **MIT**
-- v1.3候補: normal-order DL=8 / maxInFlight=16 early-delete pipeline。reload recovery FULL_PASS済み。公開Stableはまだv1.2.1。
+- v1.3.0 release prep: normal-order DL=8 / maxInFlight=16 early-delete pipeline。reload recovery FULL_PASS済み。公開Stable / tagはまだv1.2.1。
 
 ### リポジトリ直下
 

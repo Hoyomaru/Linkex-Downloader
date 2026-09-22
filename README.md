@@ -33,7 +33,7 @@ signed CDN URL をメモリ上だけで取得
 
 ## Version / 配布状態
 
-- `main` source: **v1.2.1**（公開済み / 実機確認済み）
+- `main` source: **v1.3.0**（release commit準備済み / 公開前）
 - 最新公開安定版: **v1.2.1**
 - 最新公開tag: **`v1.2.1`**
 - GitHub Release: **v1.2.1 公開済み（2026-09-17）**
@@ -42,7 +42,7 @@ signed CDN URL をメモリ上だけで取得
 - License: **MIT**
 
 > [!NOTE]
-> `feat/v1.3-dl8-release-candidate` はv1.3候補です。公開Stableはまだv1.2.1のままです。候補版では通常の「すべてダウンロード」「選択をダウンロード」がDL=8高速パイプラインを使用し、「互換: 保存後DELETE」で従来のLOCAL_COMMITTED後DELETE方式へ戻せます。
+> v1.3.0のrelease commitを準備中です。公開Stable / tag / GitHub Releaseはまだv1.2.1のままです。v1.3.0では通常の「すべてダウンロード」「選択をダウンロード」がDL=8高速パイプラインを使用し、「互換: 保存後DELETE」で従来のLOCAL_COMMITTED後DELETE方式へ戻せます。
 
 最新の正式配布先は GitHub Releases です。
 
