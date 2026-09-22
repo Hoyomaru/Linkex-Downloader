@@ -755,6 +755,7 @@
     let transferredBytes = 0;
     let measuredTransferMs = 0;
     let peakBytesPerSecond = 0;
+    let workerTransfers = 0;
     let firstTransferStartedAt = null;
     let lastTransferEndedAt = null;
 
@@ -770,6 +771,7 @@
         }
       }
       const transfer = tx.download?.telemetry || {};
+      if (transfer.worker === true) workerTransfers += 1;
       const bytes = Number(transfer.transferredBytes || 0);
       const duration = Number(transfer.durationMs || 0);
       const peak = Number(transfer.peakBytesPerSecond || 0);
@@ -816,6 +818,7 @@
       completedTransactions,
       measuredTransactions,
       transferredBytes,
+      workerTransfers,
       phaseMs,
       measuredTransferMs,
       aggregateBytesPerSecond,
@@ -1275,7 +1278,8 @@ let detachedDownloadWorkerUrl = null;
               sourceMetaSize:Number(state.source?.size || 0),
               averageBytesPerSecond:Number(data.averageBytesPerSecond || 0),
               instantBytesPerSecond:Number(data.instantBytesPerSecond || 0),
-              peakBytesPerSecond:Number(data.peakBytesPerSecond || 0)
+              peakBytesPerSecond:Number(data.peakBytesPerSecond || 0),
+              worker:true
             });
             return;
           }
@@ -1405,6 +1409,10 @@ let detachedDownloadWorkerUrl = null;
         // Network/CDN/filesystem errors remain real transfer errors and are handled by the normal Range retry layer.
         if (!['worker_unavailable','worker_start','range_416','network'].includes(e?.kind)) throw e;
         console.warn('[Linkex Downloader] Worker path unavailable; falling back to inline transfer.', e);
+        recordEvent('warn', 'worker-fallback', 'Web Workerからinline転送へフォールバック', {
+          kind:e?.kind || null,
+          message:e?.message || String(e)
+        });
       }
     }
 
@@ -2508,7 +2516,8 @@ const transientSignedUrls = new Map();
           onProgress:x => {
             const pct = x.expectedTotal ? Math.min(100, x.written / x.expectedTotal * 100) : null;
             const rateText = x.averageBytesPerSecond > 0 ? `\n平均 ${formatTransferRate(x.averageBytesPerSecond)} / 瞬間 ${formatTransferRate(x.instantBytesPerSecond)}` : '';
-            onStatus?.(`EARLY-DELETE DOWNLOADING [${index+1}/${job.items.length}]\n${item.source.remotePath}\n${formatBytes(x.written)}${x.expectedTotal ? ` / ${formatBytes(x.expectedTotal)}` : ''}${pct == null ? '' : ` (${pct.toFixed(1)}%)`}${rateText}\n${x.resumed ? 'Range resume' : 'full/restart'} · temp already deleted`);
+            const engineText = x.worker ? ' · Web Worker' : ' · inline';
+            onStatus?.(`EARLY-DELETE DOWNLOADING [${index+1}/${job.items.length}]\n${item.source.remotePath}\n${formatBytes(x.written)}${x.expectedTotal ? ` / ${formatBytes(x.expectedTotal)}` : ''}${pct == null ? '' : ` (${pct.toFixed(1)}%)`}${rateText}\n${x.resumed ? 'Range resume' : 'full/restart'}${engineText} · temp already deleted`);
           },
           onPhase:x => {
             if (x?.phase === 'download-end') downloadEndedAt = Number(x.at || Date.now());
