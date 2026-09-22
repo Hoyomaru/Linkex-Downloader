@@ -290,6 +290,22 @@ test('download refuses a destId whose identity changed after ownership confirmat
   assert.equal(fetched, false);
 });
 
+
+test('real page exit releases only the current context lease while BFCache keeps it', () => {
+  assert.match(SOURCE, /addEventListener\?\.\('pagehide', event => \{/);
+  const pagehideAt = SOURCE.indexOf("addEventListener?.('pagehide', event => {");
+  const existingAt = SOURCE.indexOf('const existing = refreshQueueUi();', pagehideAt);
+  assert.ok(pagehideAt > 0 && existingAt > pagehideAt);
+  const block = SOURCE.slice(pagehideAt, existingAt);
+  assert.match(block, /if \(event\?\.persisted\) return;/);
+  assert.match(block, /releaseLease\(\);/);
+
+  const releaseAt = SOURCE.indexOf('function releaseLease()');
+  const ensureCopyAt = SOURCE.indexOf('async function ensureCopyOwned', releaseAt);
+  const releaseBlock = SOURCE.slice(releaseAt, ensureCopyAt);
+  assert.match(releaseBlock, /if \(cur\?\.owner === TAB_ID\) GM_setValue\(LEASE_KEY, null\);/);
+});
+
 test('queue start and resume acquire the lease before shared Queue mutations', () => {
   const startAt = SOURCE.indexOf('async function startManifestQueue(');
   const resumeAt = SOURCE.indexOf("resumeBtn.addEventListener('click'", startAt);

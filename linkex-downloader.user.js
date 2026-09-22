@@ -4008,6 +4008,13 @@ function sameOwnedIdentity(current, state) {
       void refreshPreferredDirectoryState({reloadHandle:false});
       syncSharePageContext({initial:true});
     });
+    globalThis.addEventListener?.('pagehide', event => {
+      // Reload/navigation destroys this JS context. Drop only our own lease so the
+      // replacement context can reconcile the persisted Queue immediately.
+      // A BFCache page can return alive, so keep its lease until normal expiry.
+      if (event?.persisted) return;
+      releaseLease();
+    });
 
     const existing = refreshQueueUi();
     if (existing) {

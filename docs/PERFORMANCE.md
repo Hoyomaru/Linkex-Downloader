@@ -352,3 +352,12 @@ The first one-file recovery run established most of the data path but did not qu
 - A later reload happened while the resumed transfer was still active, leaving the old 30-second lease alive temporarily; the new page correctly refused concurrent resume.
 
 Recovery v2 therefore makes the reload boundary machine-enforced: the resume button is disabled in the interruption context, the interruption context ID is persisted, the second-stage context ID must differ, and FULL_PASS explicitly requires that context change in addition to new operation/destination, replacement delete confirmation, actual Range resume, and final local verification.
+
+
+### Recovery v3: reload-safe lease handoff
+
+The first manual chained-recovery attempt showed a stale-lease edge case. A resumed Range transfer was intentionally interrupted by reloading the page. The new page correctly refused Queue resume because the old 30-second lease was still present even though the old JavaScript context had already been destroyed by the reload.
+
+Recovery v3 fixes that without weakening cross-tab exclusion. On a real `pagehide` where `event.persisted === false`, the exiting context releases only a lease whose owner is its own runtime TAB_ID. A BFCache page (`persisted === true`) keeps the lease because that JavaScript context may later be restored. Abrupt browser/process crashes still fall back to the existing lease TTL instead of forcing takeover.
+
+This means normal reload/navigation can resume immediately and reconcile the persisted early-delete transaction, while a genuinely live second tab is still blocked by the existing lease guard.
