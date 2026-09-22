@@ -91,3 +91,13 @@ test('performance summary aggregates phase timing and transfer throughput', () =
   assert.equal(summary.queueWallMs, 2000);
   assert.equal(summary.queueEffectiveMBps, 7.5);
 });
+
+
+test('background lifecycle and slow API diagnostics are exported through the persistent event log', () => {
+  assert.match(SOURCE, /requestDurationMs >= 5000/);
+  assert.match(SOURCE, /'api-slow'/);
+  assert.match(SOURCE, /'runtime-stall'/);
+  assert.match(SOURCE, /visibilitychange/);
+  assert.match(SOURCE, /addEventListener\?\.\('freeze'/);
+  assert.match(SOURCE, /logLifecycle\('pagehide'/);
+});
