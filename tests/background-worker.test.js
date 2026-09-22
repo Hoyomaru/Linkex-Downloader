@@ -50,7 +50,7 @@ test('worker startup and Range-416 compatibility failures fall back to proven in
   const start = SOURCE.indexOf('async function downloadOwnedFile({api, state, handle');
   const end = SOURCE.indexOf('// --- I: destructive action guard', start);
   const block = SOURCE.slice(start, end);
-  assert.match(block, /'worker_unavailable','worker_start','range_416'/);
+  assert.match(block, /'worker_unavailable','worker_start','range_416','network'/);
   assert.match(block, /falling back to inline transfer/);
   assert.match(block, /if \(res\.status === 416\)/);
 });
