@@ -331,3 +331,10 @@ Compared with DOWNLOAD=4 / maxInFlight=8, pool throughput improved only about 2.
 Transfer-window concurrency analysis: there was effectively no zero-active gap; average active concurrency was about 3.07, and six simultaneous transfers were reached for about 8.16 s. Setup remained mostly stable (COPY median ~253 ms, ownership reconciliation median ~239 ms, DELETE median ~481 ms), with one isolated COPY outlier around 1.98 s.
 
 This points to diminishing returns beyond DOWNLOAD=4, but there is still a small measurable gain at DOWNLOAD=6. One final isolated ceiling check uses DOWNLOAD=8 with maxInFlight=16. If that produces little or no further improvement, DOWNLOAD=6 (or DOWNLOAD=4 for a lower-concurrency default) is the practical range for this workload.
+
+
+### DL=8 selected for early-delete candidate
+
+After DL=4, DL=6, DL=8, and DL=8 size-desc ceiling tests, the selected performance configuration is normal-order DOWNLOAD=8 with maxInFlight=16. Size-desc scheduling is not adopted because it changed queue-effective throughput by only about +0.27% despite forcing sustained eight-way overlap.
+
+Before release promotion, recovery is the remaining destructive-flow gate: prove that a persisted local partial survives a reload after the original temporary destination has already been deleted, then safely obtain a new COPY/signed URL, delete the new temporary destination, Range-resume the same local file, and verify final completion.

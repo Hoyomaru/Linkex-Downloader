@@ -97,3 +97,46 @@ test('real-write experimental UI supports all or selected files', () => {
   assert.match(SOURCE, /startEarlyDeletePipeline\(null, \{baseDir, skipConfirm:false\}\)/);
   assert.match(SOURCE, /startEarlyDeletePipeline\(new Set\(selectedIndexes\), \{baseDir, skipConfirm:false\}\)/);
 });
+
+
+test('recovery probe is one-file only and intentionally interrupts only after a flushed partial exists', () => {
+  assert.match(SOURCE, /recoveryProbe && chosenFiles\.length !== 1/);
+  assert.match(SOURCE, /Number\(chosenFiles\[0\]\?\.size \|\| 0\) < 16 \* 1024 \* 1024/);
+  const start = SOURCE.indexOf('const interruptAt = Number(interruptAfterBytes)');
+  const end = SOURCE.indexOf('if (now - lastUi >= UI_UPDATE_INTERVAL_MS)', start);
+  assert.ok(start > 0 && end > start);
+  const block = SOURCE.slice(start, end);
+  assert.match(block, /await flushBufferedWrite\(\)/);
+  assert.match(block, /await handle\.getFile\(\)/);
+  assert.match(block, /kind:'recovery_probe_interrupt'/);
+});
+
+test('recovery interruption is armed once and signed URL remains memory-only', () => {
+  const start = SOURCE.indexOf('const recoveryProbe = job.experimental?.recoveryProbe');
+  const end = SOURCE.indexOf('tx = syncTxFromProbe', start);
+  const block = SOURCE.slice(start, end);
+  assert.match(block, /!recoveryProbe\.interruptTriggeredAt/);
+  assert.match(block, /interruptAfterBytes:/);
+  assert.match(block, /firstOperationId:tx\.operationId/);
+  assert.match(block, /firstDestId:tx\.confirmedDest\?\.id/);
+  assert.doesNotMatch(block, /signedUrl\s*:/);
+});
+
+test('recovery FULL_PASS requires new op, new dest, Range resume, replacement delete, and local verification', () => {
+  const start = SOURCE.indexOf('if (job.experimental?.recoveryProbe?.enabled && job.experimental.recoveryProbe.interruptTriggeredAt)');
+  const end = SOURCE.indexOf('return tx;', start);
+  const block = SOURCE.slice(start, end);
+  assert.match(block, /operationChanged/);
+  assert.match(block, /destChanged/);
+  assert.match(block, /rangeResumed/);
+  assert.match(block, /newDeleteConfirmed/);
+  assert.match(block, /localVerified/);
+  assert.match(block, /const fullPass = operationChanged && destChanged && rangeResumed && newDeleteConfirmed && localVerified/);
+});
+
+test('recovery UI requires one selection and uses the normal persisted Queue resume path', () => {
+  assert.match(SOURCE, /id="lf-early-delete-recovery"/);
+  assert.match(SOURCE, /selectedIndexes\.size !== 1/);
+  assert.match(SOURCE, /recoveryProbe:true/);
+  assert.match(SOURCE, /「Queueを再開」で新しいCOPY\/URLを取得し、Range resumeを検証します/);
+});
