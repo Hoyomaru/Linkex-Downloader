@@ -612,13 +612,16 @@ test('verbose status log is collapsed under details while one-line state stays v
   const statusAt = SOURCE.indexOf('id="lf-status" class="status"');
   assert.ok(progressAt > 0 && stateAt > progressAt && moreAt > stateAt && logAt > moreAt && statusAt > logAt);
 
-  const writeAt = SOURCE.indexOf("const write = (text, cls='') => {");
+  const renderAt = SOURCE.indexOf("const renderStatus = (text, cls='') => {");
+  const writeAt = SOURCE.indexOf("const write = (text, cls='') => {", renderAt);
   const manifestAt = SOURCE.indexOf('let manifest = null;', writeAt);
-  assert.ok(writeAt > 0 && manifestAt > writeAt);
+  assert.ok(renderAt > 0 && writeAt > renderAt && manifestAt > writeAt);
+  const renderBlock = SOURCE.slice(renderAt, writeAt);
   const writeBlock = SOURCE.slice(writeAt, manifestAt);
-  assert.match(writeBlock, /stateLine\.textContent =/);
-  assert.match(writeBlock, /stateLine\.className = `state-line \$\{cls\}`;/);
-  assert.match(writeBlock, /if \(cls === 'err'\) \{\s*moreDetails\.open = true;\s*logDetails\.open = true;\s*\}/);
+  assert.match(renderBlock, /stateLine\.textContent =/);
+  assert.match(renderBlock, /stateLine\.className = `state-line \$\{cls\}`;/);
+  assert.match(renderBlock, /if \(cls === 'err'\) \{\s*moreDetails\.open = true;\s*logDetails\.open = true;\s*\}/);
+  assert.match(writeBlock, /const message = renderStatus\(text, cls\);/);
 });
 
 test('preferred download directory is separate from Queue-specific handles and is preloaded before quick actions enable', () => {
