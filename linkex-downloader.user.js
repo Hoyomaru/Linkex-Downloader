@@ -3005,7 +3005,7 @@ function sameOwnedIdentity(current, state) {
           <input id="lf-url" placeholder="https://l2e.click/d/xxxxxxxx" />
           <div class="primary-actions">
             <button id="lf-start" class="primary action-main" disabled>すべてダウンロード</button>
-            <button id="lf-start-early-delete" class="warn action-secondary" disabled>実験: 全件 早期DELETE DL=8</button>
+            <button id="lf-start-early-delete" class="secondary action-secondary" disabled>互換: 保存後DELETE</button>
             <button id="lf-select-mode" class="secondary action-secondary" disabled>ファイルを選ぶ</button>
           </div>
           <div id="lf-selection" class="selection" hidden>
@@ -3014,7 +3014,7 @@ function sameOwnedIdentity(current, state) {
             <div class="selection-actions"><button id="lf-select-all" class="secondary">全件選択</button><button id="lf-clear-all" class="secondary">全解除</button><button id="lf-select-visible" class="secondary">表示中を選択</button><button id="lf-clear-visible" class="secondary">表示中を解除</button></div>
             <div id="lf-file-list" class="file-list"></div>
             <div id="lf-selection-note" class="notice"></div>
-            <div class="row" style="margin-top:8px;margin-bottom:0"><button id="lf-start-selected" class="primary" disabled>選択をダウンロード</button><button id="lf-start-selected-early-delete" class="warn" disabled>選択を早期DELETE DL=8</button><button id="lf-early-delete-recovery" class="warn" disabled>1件 復旧テスト</button><button id="lf-early-delete-probe" class="secondary" disabled>1件Probe</button></div>
+            <div class="row" style="margin-top:8px;margin-bottom:0"><button id="lf-start-selected" class="primary" disabled>選択をダウンロード</button><button id="lf-start-selected-early-delete" class="secondary" disabled>互換: 選択 保存後DELETE</button><button id="lf-early-delete-recovery" class="warn" disabled>検証: 1件復旧</button><button id="lf-early-delete-probe" class="secondary" disabled>検証: signed URL</button></div>
           </div>
           <div id="lf-queue-actions" class="row" hidden><button id="lf-resume" class="primary" disabled>Queueを再開</button><button id="lf-pause" class="secondary" disabled>現在ファイル後に停止</button></div>
           <div class="progress-wrap">
@@ -3031,11 +3031,11 @@ function sameOwnedIdentity(current, state) {
               <div class="row" style="margin-bottom:0"><button id="lf-abandon" class="secondary" disabled>Queueを安全に破棄</button></div>
               <details id="lf-log-details" class="log">
                 <summary>ログを表示</summary>
-                <div id="lf-status" class="status">共有ページでは「すべてダウンロード」だけで解析からQueue開始まで進めます。\n安全処理は1ファイルずつ COPY → DL → VERIFY → 所有destIdだけDELETE します。</div>
+                <div id="lf-status" class="status">共有ページでは「すべてダウンロード」だけで解析からQueue開始まで進めます。\n高速モードは COPY/所有確認 → signed URL → 所有一時copy DELETE → 最大8並列DL/VERIFY。中断時は新COPY/URLからRange再開します。</div>
               </details>
             </div>
           </details>
-          <div class="notice">早期DELETEはDL=8を採用候補として検証中です。「1件 復旧テスト」はpartial保存後に予定停止し、再読み込み→Queue再開で新COPY/URL + Range resumeを検証します。所有確認・1件DELETE・不明時再送禁止は通常の早期DELETEと同じです。</div>
+          <div class="notice">v1.3候補の標準は高速DL=8です。Downloaderが所有確認した一時copyだけをsigned URL取得後に先に削除し、ローカルDLを最大8並列で進めます。中断時は新しいCOPY/URLから既存partialへRange再開します。「互換: 保存後DELETE」は従来方式です。</div>
         </div>
       </div>`;
     document.body.appendChild(root);
@@ -3508,12 +3508,12 @@ function sameOwnedIdentity(current, state) {
           '共有元は削除しません。DELETE対象は所有確認済み一時コピー1件だけです。',
           '開始しますか？'
         ].join('\n') : [
-          `実験: 早期DELETE並列ダウンロード DL=${EARLY_DELETE_DOWNLOAD_WORKERS}`,
+          `高速モード: 並列ダウンロード DL=${EARLY_DELETE_DOWNLOAD_WORKERS}`,
           '',
           `${modeText} ${chosenFiles.length}件（合計 ${formatBytes(totalBytes)}）`,
           '',
           '各ファイルで COPY → 所有確認 → signed URL取得 → 一時コピーDELETE確認 → ローカルDL を行います。',
-          'DELETEはローカル保存完了より前です。今回のFULL_PASS検証結果を使う実験モードです。',
+          '一時copyのDELETEはローカル保存完了より前です。所有確認・signed URL取得・identity再確認・DELETE不明時reconcileを必須にします。',
           'signed URLは永続化せずメモリ上だけに保持します。',
           'DL失敗/URL失効時は安全停止し、再開時は必要なら新しいCOPY/URLでRange再開します。',
           '',
@@ -3737,7 +3737,7 @@ function sameOwnedIdentity(current, state) {
         await analyzeCurrentShare({announceSuccess:false});
         preparing = false;
         refreshQueueUi();
-        await startEarlyDeletePipeline(null, {baseDir, skipConfirm:false});
+        await startManifestQueue(null, {baseDir, skipConfirm:true});
       } catch (e) {
         if (e?.name !== 'AbortError') {
           if (e?.kind === 'filesystem') write(`保存先準備失敗: ${e?.message || e}`, 'err');
@@ -3762,7 +3762,7 @@ function sameOwnedIdentity(current, state) {
         await analyzeCurrentShare({announceSuccess:false});
         preparing = false;
         refreshQueueUi();
-        await startManifestQueue(null, {baseDir, skipConfirm:true});
+        await startEarlyDeletePipeline(null, {baseDir, skipConfirm:true});
       } catch (e) {
         if (e?.name !== 'AbortError') {
           if (e?.kind === 'filesystem') write(`保存先準備失敗: ${e?.message || e}`, 'err');
@@ -3818,7 +3818,7 @@ function sameOwnedIdentity(current, state) {
         const baseDir = await acquirePreferredBaseDirFromGesture();
         preparing = false;
         refreshQueueUi();
-        await startEarlyDeletePipeline(new Set(selectedIndexes), {baseDir, skipConfirm:false});
+        await startManifestQueue(new Set(selectedIndexes), {baseDir, skipConfirm:true});
       } catch (e) {
         if (e?.name !== 'AbortError') write(`保存先準備失敗: ${e?.message || e}`, 'err');
       } finally {
@@ -3836,7 +3836,7 @@ function sameOwnedIdentity(current, state) {
         const baseDir = await acquirePreferredBaseDirFromGesture();
         preparing = false;
         refreshQueueUi();
-        await startManifestQueue(new Set(selectedIndexes), {baseDir, skipConfirm:true});
+        await startEarlyDeletePipeline(new Set(selectedIndexes), {baseDir, skipConfirm:true});
       } catch (e) {
         if (e?.name !== 'AbortError') write(`保存先準備失敗: ${e?.message || e}`, 'err');
       } finally { preparing = false; refreshQueueUi(); }

@@ -605,7 +605,7 @@ test('quick all-download resolves directory permission before network manifest a
   const block = SOURCE.slice(quickAt, selectAt);
   const dirAt = block.indexOf('await acquirePreferredBaseDirFromGesture()');
   const analyzeAt = block.indexOf('await analyzeCurrentShare({announceSuccess:false})');
-  const startAt = block.indexOf('await startManifestQueue(null, {baseDir, skipConfirm:true})');
+  const startAt = block.indexOf('await startEarlyDeletePipeline(null, {baseDir, skipConfirm:true})');
   assert.ok(dirAt >= 0 && analyzeAt > dirAt && startAt > analyzeAt);
   assert.doesNotMatch(block, /confirm\(/);
 });

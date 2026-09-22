@@ -91,11 +91,23 @@ test('resume after confirmed early delete rearms with a new COPY while preservin
   assert.match(processBlock, /await ensureCopyOwned/);
 });
 
-test('real-write experimental UI supports all or selected files', () => {
-  assert.match(SOURCE, /id="lf-start-early-delete"/);
-  assert.match(SOURCE, /id="lf-start-selected-early-delete"/);
-  assert.match(SOURCE, /startEarlyDeletePipeline\(null, \{baseDir, skipConfirm:false\}\)/);
-  assert.match(SOURCE, /startEarlyDeletePipeline\(new Set\(selectedIndexes\), \{baseDir, skipConfirm:false\}\)/);
+test('DL8 early-delete is primary all/selected path and post-commit delete remains compatibility fallback', () => {
+  assert.match(SOURCE, /id="lf-start" class="primary action-main" disabled>すべてダウンロード<\/button>/);
+  assert.match(SOURCE, /id="lf-start-early-delete" class="secondary action-secondary" disabled>互換: 保存後DELETE<\/button>/);
+  assert.match(SOURCE, /id="lf-start-selected" class="primary" disabled>選択をダウンロード<\/button>/);
+  assert.match(SOURCE, /id="lf-start-selected-early-delete" class="secondary" disabled>互換: 選択 保存後DELETE<\/button>/);
+
+  const compatAt = SOURCE.indexOf("earlyDeleteStartBtn.addEventListener('click'");
+  const mainAt = SOURCE.indexOf("startBtn.addEventListener('click'", compatAt);
+  const selectAt = SOURCE.indexOf("selectModeBtn.addEventListener('click'", mainAt);
+  const selectedCompatAt = SOURCE.indexOf("selectedEarlyDeleteStartBtn.addEventListener('click'", selectAt);
+  const selectedMainAt = SOURCE.indexOf("selectedStartBtn.addEventListener('click'", selectedCompatAt);
+  const destinationAt = SOURCE.indexOf("destinationBtn.addEventListener('click'", selectedMainAt);
+
+  assert.match(SOURCE.slice(compatAt, mainAt), /startManifestQueue\(null, \{baseDir, skipConfirm:true\}\)/);
+  assert.match(SOURCE.slice(mainAt, selectAt), /startEarlyDeletePipeline\(null, \{baseDir, skipConfirm:true\}\)/);
+  assert.match(SOURCE.slice(selectedCompatAt, selectedMainAt), /startManifestQueue\(new Set\(selectedIndexes\), \{baseDir, skipConfirm:true\}\)/);
+  assert.match(SOURCE.slice(selectedMainAt, destinationAt), /startEarlyDeletePipeline\(new Set\(selectedIndexes\), \{baseDir, skipConfirm:true\}\)/);
 });
 
 

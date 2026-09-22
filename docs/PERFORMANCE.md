@@ -361,3 +361,22 @@ The first manual chained-recovery attempt showed a stale-lease edge case. A resu
 Recovery v3 fixes that without weakening cross-tab exclusion. On a real `pagehide` where `event.persisted === false`, the exiting context releases only a lease whose owner is its own runtime TAB_ID. A BFCache page (`persisted === true`) keeps the lease because that JavaScript context may later be restored. Abrupt browser/process crashes still fall back to the existing lease TTL instead of forcing takeover.
 
 This means normal reload/navigation can resume immediately and reconcile the persisted early-delete transaction, while a genuinely live second tab is still blocked by the existing lease guard.
+
+
+### Recovery v3 FULL_PASS (2026-09-22)
+
+The one-file reload recovery gate completed FULL_PASS on the 1,483,073,919-byte MP4.
+
+- first operation wrote a 67,108,864-byte (64 MiB) local partial after the owned temporary destination had already been deleted
+- the page was reloaded into a different runtime context
+- Queue resume obtained a different COPY operation and different destination ID
+- the replacement temporary destination was deleted and confirmed absent before transfer resumed
+- the existing 64 MiB local file was resumed with Range
+- 1,415,965,055 bytes were transferred after resume in 26.425 s
+- final local bytes: 1,483,073,919
+- expected CDN bytes: 1,483,073,919
+- verification: content-length
+- all recovery gate flags: rangeResumed, operationChanged, destChanged, newDeleteConfirmed, localVerified, contextChanged = true
+- Queue ended DONE with no pending/blocked/skipped items
+
+This closes the reload-recovery gate for the selected normal-order DOWNLOAD=8 / maxInFlight=16 configuration. The v1.3 release-candidate UI promotes this fast pipeline to the primary all-files and selected-files actions while retaining the old LOCAL_COMMITTED-before-DELETE pipeline as an explicit compatibility fallback.
