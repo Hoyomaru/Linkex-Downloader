@@ -1206,7 +1206,10 @@ function sameOwnedIdentity(current, state) {
   const PIPELINE_DELETE_WORKERS = 1;
   const PIPELINE_MAX_IN_FLIGHT = 3;
   const EARLY_DELETE_DOWNLOAD_WORKERS = 4;
-  const EARLY_DELETE_MAX_IN_FLIGHT = EARLY_DELETE_DOWNLOAD_WORKERS + 1;
+  // DL=4 benchmark with maxInFlight=5 starved after the setup path slowed.
+  // Keep four additional memory-only signed URLs prefetched so network workers
+  // can remain busy while COPY / ownership / URL refresh / DELETE run serially.
+  const EARLY_DELETE_MAX_IN_FLIGHT = EARLY_DELETE_DOWNLOAD_WORKERS * 2;
   let queueCommitTail = Promise.resolve();
 
   function commitQueueJob(job, mutate = null) {
@@ -2144,7 +2147,7 @@ function sameOwnedIdentity(current, state) {
         reservation = null;
 
         // A deleted temporary file no longer consumes Linkex capacity. The signed URL stays only
-        // in this closure; one extra in-flight slot is allowed to overlap COPY/DELETE with DL=4.
+        // in this closure; four extra in-flight slots are allowed to prefetch memory-only signed URLs while DL=4 is active.
         launchDetachedDownload(i, signedUrl, releaseInFlight);
       } catch (e) {
         if (reservation) capacity.release(reservation);

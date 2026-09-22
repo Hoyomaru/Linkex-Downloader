@@ -267,3 +267,25 @@ Capacity is released immediately after the temporary destination is confirmed ab
 Recovery rule: if a detached download fails after confirmed early DELETE, the signed URL is not persisted. On a later Queue resume, the old operation is archived, a new ownership-safe COPY obtains a new signed URL, that new temporary copy is early-deleted, and the existing local partial file is resumed with Range. DELETE-uncertain states are reconciled before any new COPY and are never blindly replayed.
 
 Benchmark target: compare the same workload against the current browser candidate (COPY=1 / DOWNLOAD=2 / DELETE=1). Primary metrics are `poolDownloadMBps`, `pipelineEffectiveMBps`, `queueEffectiveMBps`, and queue wall time.
+
+
+### Early-delete DL=4 first real-write run (2026-09-22)
+
+The first real-write run completed safely: 26/26 transactions DONE, no download retries, all downloads verified, all ownership-confirmed temporary destinations confirmed absent before local transfer start.
+
+Measured queue:
+
+- transferred bytes: 6,372,761,319
+- transfer window: 130.091 s
+- pool throughput: 46.72 MiB/s
+- pipeline wall: 132.300 s
+- pipeline effective: 45.94 MiB/s
+- queue wall: 132.571 s
+- queue effective: 45.84 MiB/s
+- actual download overlap reached 4.
+
+This is slower than the previous DOWNLOAD=2 browser pipeline (62.03 MiB/s pool, 100.848 s queue wall, 60.26 MiB/s queue effective). The first DL=4 early-delete run therefore does not establish a speed gain.
+
+Post-run timing analysis shows a starvation pattern rather than a destructive-action failure. Within the 130.091 s transfer window, no transfer was active for about 46.489 s. The first 16 setup transactions were fast (COPY ~251 ms median, ownership reconciliation ~236 ms, URL-refresh-to-delete gap ~464 ms, DELETE ~478 ms). From item 17 onward those control-plane phases stepped to approximately COPY 0.99 s, reconciliation 1.00 s, URL-refresh-to-delete gap 1.98 s, and DELETE 2.02 s. Because maxInFlight=5 allowed only one prefetched detached URL beyond the four download workers, that setup slowdown drained the download pool.
+
+Next isolated A/B: keep DOWNLOAD=4 and every destructive guard unchanged, but raise early-delete maxInFlight from 5 to 8. This allows up to four memory-only signed URLs to wait behind four active downloads. The signed URLs are still never persisted. If this does not recover utilization, the next target is control-plane request reduction/pacing rather than higher download concurrency.
