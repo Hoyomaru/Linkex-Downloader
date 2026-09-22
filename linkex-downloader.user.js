@@ -19,7 +19,7 @@
 (() => {
   'use strict';
 
-  const VERSION = '1.3.0';
+  const VERSION = '1.3.0-perf-worker';
   const API_BASE = 'https://prod.linksvc.xyz';
   const SIGNED_HEADER_PREFIX = 'x-linkinflu-';
   const SIGNATURE_HEADER = 'x-linkinflu-sign';
@@ -666,11 +666,11 @@
 
       // 安全側: コピー開始後に増えたIDが1件だけで、それが元ファイルと整合するときだけ所有権を確定。
       if (diff.length === 1 && plausible.length === 1) {
-        return {status:'CONFIRMED', item:plausible[0], diff};
+        return {status:'CONFIRMED', item:plausible[0], diff, root};
       }
       // 2件以上増えた時点で、どれが自分のコピーかID差分だけでは証明できない。
       if (diff.length > 1) {
-        return {status:'AMBIGUOUS', diff, plausible};
+        return {status:'AMBIGUOUS', diff, plausible, root};
       }
 
       const delay = delays[Math.min(attempt, delays.length - 1)];
@@ -998,6 +998,7 @@ let detachedDownloadWorkerUrl = null;
       let resumed = false;
       let instantBytesPerSecond = 0;
       let peakBytesPerSecond = 0;
+      let streamReadySent = false;
 
       const fail = async (error, fallbackKind = 'network') => {
         try { await reader?.cancel(); } catch {}
@@ -1098,8 +1099,18 @@ let detachedDownloadWorkerUrl = null;
 
         while (true) {
           const {done, value} = await reader.read();
-          if (done) break;
+          if (done) {
+            if (!streamReadySent) {
+              streamReadySent = true;
+              self.postMessage({type:'stream-ready', at:Date.now(), firstChunkBytes:0, eof:true});
+            }
+            break;
+          }
           if (!value?.byteLength) continue;
+          if (!streamReadySent) {
+            streamReadySent = true;
+            self.postMessage({type:'stream-ready', at:Date.now(), firstChunkBytes:value.byteLength, eof:false});
+          }
 
           bufferedChunks.push(value);
           bufferedBytes += value.byteLength;
@@ -1268,6 +1279,17 @@ let detachedDownloadWorkerUrl = null;
           const data = event?.data || {};
           if (data.type === 'started') {
             assertLease();
+            return;
+          }
+          if (data.type === 'stream-ready') {
+            assertLease();
+            onPhase({
+              phase:'stream-ready',
+              at:Number(data.at || Date.now()),
+              firstChunkBytes:Number(data.firstChunkBytes || 0),
+              eof:!!data.eof,
+              worker:true
+            });
             return;
           }
           if (data.type === 'progress') {
@@ -1518,6 +1540,7 @@ let detachedDownloadWorkerUrl = null;
       let received = base;
       let bufferedChunks = [];
       let bufferedBytes = 0;
+      let streamReadySignaled = false;
       let nextCheckpoint = written + CHECKPOINT_BYTES;
       let lastCheckpointAt = transferStartedAt;
       let lastLeaseCheckAt = transferStartedAt;
@@ -1536,8 +1559,18 @@ let detachedDownloadWorkerUrl = null;
       try {
         while (true) {
           const {done, value} = await reader.read();
-          if (done) break;
+          if (done) {
+            if (!streamReadySignaled) {
+              streamReadySignaled = true;
+              onPhase({phase:'stream-ready', at:Date.now(), firstChunkBytes:0, eof:true, worker:false});
+            }
+            break;
+          }
           if (!value?.byteLength) continue;
+          if (!streamReadySignaled) {
+            streamReadySignaled = true;
+            onPhase({phase:'stream-ready', at:Date.now(), firstChunkBytes:value.byteLength, eof:false, worker:false});
+          }
           bufferedChunks.push(value);
           bufferedBytes += value.byteLength;
           received += value.byteLength;
@@ -1680,6 +1713,7 @@ let detachedDownloadWorkerUrl = null;
 }
 
 const transientSignedUrls = new Map();
+  const transientRootSnapshots = new Map();
 
   function ownedIdentitySnapshot(item) {
     if (!item) return null;
@@ -1708,6 +1742,23 @@ const transientSignedUrls = new Map();
 
   function clearTransientSignedUrl(operationId) {
     transientSignedUrls.delete(String(operationId || ''));
+  }
+
+  function rememberTransientRootSnapshot(operationId, root) {
+    const key = String(operationId || '');
+    if (!key || !Array.isArray(root)) return [];
+    const ids = root.map(item => String(item?.id || '')).filter(Boolean);
+    transientRootSnapshots.set(key, ids);
+    return ids;
+  }
+
+  function getTransientRootSnapshot(operationId) {
+    const ids = transientRootSnapshots.get(String(operationId || ''));
+    return Array.isArray(ids) ? [...ids] : null;
+  }
+
+  function clearTransientRootSnapshot(operationId) {
+    transientRootSnapshots.delete(String(operationId || ''));
   }
 
   function sameOwnedIdentity(current, state) {
@@ -2147,7 +2198,7 @@ const transientSignedUrls = new Map();
     leaseLost = false;
   }
 
-  async function ensureCopyOwned(api, job, index, onStatus, {capacityReserved = false} = {}) {
+  async function ensureCopyOwned(api, job, index, onStatus, {capacityReserved = false, beforeIdsHint = null} = {}) {
     assertLease();
     const item = job.items[index];
     let tx = item.tx;
@@ -2174,7 +2225,10 @@ const transientSignedUrls = new Map();
       }
 
       assertLease();
-      const beforeRoot = await listAllRoot(api);
+      const hintedBeforeIds = Array.isArray(beforeIdsHint)
+        ? [...new Set(beforeIdsHint.map(String).filter(Boolean))]
+        : null;
+      const beforeRoot = hintedBeforeIds ? null : await listAllRoot(api);
       const transactionStartedAt = Date.now();
       tx = {
         schemaVersion:1,
@@ -2182,7 +2236,7 @@ const transientSignedUrls = new Map();
         state:'COPY_INTENT',
         shareToken:job.shareToken,
         source:item.source,
-        beforeIds:beforeRoot.map(x => String(x.id)),
+        beforeIds:hintedBeforeIds || beforeRoot.map(x => String(x.id)),
         startedAt:transactionStartedAt,
         performance:{schemaVersion:PERFORMANCE_SCHEMA_VERSION, total:{startedAt:transactionStartedAt}},
         queueJobId:job.jobId,
@@ -2233,6 +2287,7 @@ const transientSignedUrls = new Map();
       tx = perfPhaseEnd(tx, 'ownershipReconcile', Date.now(), {outcome:rec.status});
       if (rec.status === 'CONFIRMED' || rec.status === 'UNIQUE') {
         rememberTransientSignedUrl(tx.operationId, rec.item);
+        rememberTransientRootSnapshot(tx.operationId, rec.root);
         tx = {...tx, state:'OWNERSHIP_CONFIRMED', confirmedDest:ownedIdentitySnapshot(rec.item), reconciledAt:Date.now()};
         persistItemTx(job, index, tx, 'COPIED');
       } else if (rec.status === 'AMBIGUOUS') {
@@ -2339,42 +2394,85 @@ const transientSignedUrls = new Map();
     return {destId};
   }
 
+  function earlyDeletePhase(tx) {
+    const nested = String(tx?.delete?.phase || '').toUpperCase();
+    if (nested) return nested;
+    if (tx?.delete?.confirmedAbsentAt || tx?.earlyDelete?.confirmedAbsentAt) return 'CONFIRMED';
+    if (tx?.state === 'EARLY_DELETE_INTENT') return 'INTENT';
+    if (tx?.state === 'EARLY_DELETE_REQUEST_SENT') return 'REQUEST_SENT';
+    if (tx?.state === 'EARLY_DELETE_UNCERTAIN') return 'UNCERTAIN';
+    if (tx?.state === 'EARLY_DELETE_CONFIRMED') return 'CONFIRMED';
+    return 'NONE';
+  }
+
+  function needsEarlyDeleteReconcile(tx) {
+    return ['INTENT','REQUEST_SENT','UNCERTAIN'].includes(earlyDeletePhase(tx));
+  }
+
+  function latestItemTx(item, fallback = null) {
+    return loadProbeState(item?.tx || fallback) || item?.tx || fallback;
+  }
+
   async function deleteOwnedTempForEarlyDeletePipeline(api, job, index, onStatus) {
     assertLease();
     const item = job.items[index];
-    let tx = item.tx;
+    let tx = latestItemTx(item);
     const guard = assertEarlyDeletePipelineGuards(job, index, tx);
+    const phase = earlyDeletePhase(tx);
 
-    if (['EARLY_DELETE_INTENT','EARLY_DELETE_REQUEST_SENT','EARLY_DELETE_UNCERTAIN'].includes(tx.state)) {
+    if (phase === 'CONFIRMED') return tx;
+
+    // Once DELETE intent has been persisted, never replay the POST after an interruption.
+    // Only reconcile current existence. This preserves the existing fail-closed behavior.
+    if (['INTENT','REQUEST_SENT','UNCERTAIN'].includes(phase)) {
       onStatus?.(`早期DELETE結果照合 [${index+1}/${job.items.length}]\n${item.source.remotePath}\nDELETE POST再送: NO`);
       const rec = await reconcileDelete(api, tx, {
         timeoutMs:30000,
         onProgress:x => onStatus?.(`早期DELETE照合 [${index+1}/${job.items.length}]\n存在: ${x.exists ? 'YES' : 'NO'}\n再送: NO`)
       });
+      tx = latestItemTx(item, tx);
       if (rec.status === 'ABSENT') {
+        const confirmedAt = Date.now();
+        const legacyDeleteState = ['EARLY_DELETE_INTENT','EARLY_DELETE_REQUEST_SENT','EARLY_DELETE_UNCERTAIN'].includes(tx.state);
+        tx = perfPhaseEnd(tx, 'delete', confirmedAt, {outcome:'early-confirmed-absent'});
         tx = {
           ...tx,
-          state:'EARLY_DELETE_CONFIRMED',
-          earlyDelete:{...(tx.earlyDelete||{}), confirmedAbsentAt:Date.now()},
-          delete:{...(tx.delete||{}), destId:guard.destId, confirmedAbsentAt:Date.now(), experimentalEarlyDelete:true}
+          state:legacyDeleteState ? 'EARLY_DELETE_CONFIRMED' : tx.state,
+          earlyDelete:{...(tx.earlyDelete||{}), confirmedAbsentAt:confirmedAt},
+          delete:{
+            ...(tx.delete||{}),
+            phase:'CONFIRMED',
+            destId:guard.destId,
+            confirmedAbsentAt:confirmedAt,
+            experimentalEarlyDelete:true
+          }
         };
-        tx = perfPhaseEnd(tx, 'delete', Date.now(), {outcome:'early-confirmed-absent'});
-        persistItemTx(job, index, tx, 'EARLY_DELETE_CONFIRMED');
+        persistItemTx(job, index, tx);
         return tx;
       }
-      tx = {...tx, state:'EARLY_DELETE_UNCERTAIN', earlyDelete:{...(tx.earlyDelete||{}), lastSeenAt:Date.now()}};
+      tx = {
+        ...tx,
+        state:['EARLY_DELETE_INTENT','EARLY_DELETE_REQUEST_SENT','EARLY_DELETE_UNCERTAIN'].includes(tx.state)
+          ? 'EARLY_DELETE_UNCERTAIN'
+          : tx.state,
+        earlyDelete:{...(tx.earlyDelete||{}), lastSeenAt:Date.now()},
+        delete:{...(tx.delete||{}), phase:'UNCERTAIN', destId:guard.destId}
+      };
       persistItemTx(job, index, tx, 'BLOCKED');
       throw new LinkexError('早期DELETE結果が不明でdestIdがまだ存在します。安全のためDELETEを再送しません。', {kind:'early_delete_uncertain'});
     }
 
-    if (tx.state !== 'OWNERSHIP_CONFIRMED') {
-      throw new LinkexError(`早期DELETE並列DL: 所有確定直後以外ではDELETEを開始できません (state=${tx.state})`, {kind:'early_delete_guard'});
+    if (!['OWNERSHIP_CONFIRMED','DOWNLOAD_READY','DOWNLOADING','DOWNLOAD_PAUSED','VERIFY_FAILED','LOCAL_COMMITTED'].includes(tx.state)) {
+      throw new LinkexError(`早期DELETE並列DL: DELETE開始可能状態ではありません (state=${tx.state})`, {kind:'early_delete_guard'});
     }
 
+    // The stream may already be active here. Re-read the exact owned destId immediately before
+    // DELETE so the destructive guard is at least as strict as the old sequential path.
     const current = await findOwnedRootFile(api, guard.destId);
     if (!current) {
       throw new LinkexError('早期DELETE前にdestIdが消失しました。外部変更の可能性があるため停止します。', {kind:'early_delete_external_change'});
     }
+    tx = latestItemTx(item, tx);
     if (!sameOwnedIdentity(current, tx)) {
       throw new LinkexError('早期DELETE拒否: 現在のdestId identityが所有権確定時と一致しません。', {kind:'early_delete_guard'});
     }
@@ -2382,37 +2480,64 @@ const transientSignedUrls = new Map();
     tx = perfPhaseStart(tx, 'delete');
     tx = {
       ...tx,
-      state:'EARLY_DELETE_INTENT',
-      earlyDelete:{...(tx.earlyDelete||{}), intendedAt:Date.now(), signedUrlInMemoryOnly:true},
-      delete:{destId:guard.destId, intendedAt:Date.now(), requestSent:false, experimentalEarlyDelete:true}
+      earlyDelete:{
+        ...(tx.earlyDelete||{}),
+        intendedAt:Date.now(),
+        signedUrlInMemoryOnly:true,
+        streamOpenedBeforeDelete:true
+      },
+      delete:{
+        ...(tx.delete||{}),
+        phase:'INTENT',
+        destId:guard.destId,
+        intendedAt:Date.now(),
+        requestSent:false,
+        experimentalEarlyDelete:true
+      }
     };
-    persistItemTx(job, index, tx, 'EARLY_DELETE_INTENT');
-    onStatus?.(`EARLY DELETE [${index+1}/${job.items.length}]\n${item.source.remotePath}\ndestId: ${guard.destId}\n所有確認済み一時コピー1件だけ削除します…`);
+    persistItemTx(job, index, tx);
+    onStatus?.(`EARLY DELETE (stream active) [${index+1}/${job.items.length}]\n${item.source.remotePath}\ndestId: ${guard.destId}\nDL stream開始済み。所有確認済み一時コピー1件だけ削除します…`);
 
     try {
       assertLease();
       const result = await api.deleteSingleFile(guard.destId);
+      tx = latestItemTx(item, tx);
       tx = {
         ...tx,
-        state:'EARLY_DELETE_REQUEST_SENT',
-        delete:{...(tx.delete||{}), requestSent:true, response:result ?? {}, requestCompletedAt:Date.now()}
+        delete:{
+          ...(tx.delete||{}),
+          phase:'REQUEST_SENT',
+          destId:guard.destId,
+          requestSent:true,
+          response:result ?? {},
+          requestCompletedAt:Date.now(),
+          experimentalEarlyDelete:true
+        }
       };
-      persistItemTx(job, index, tx, 'EARLY_DELETE_REQUEST_SENT');
+      persistItemTx(job, index, tx);
     } catch (e) {
+      tx = latestItemTx(item, tx);
       tx = {
         ...tx,
-        state:'EARLY_DELETE_UNCERTAIN',
-        delete:{...(tx.delete||{}), requestSent:true, requestError:{message:e?.message || String(e), kind:e?.kind || null}, requestFailedAt:Date.now()}
+        delete:{
+          ...(tx.delete||{}),
+          phase:'UNCERTAIN',
+          destId:guard.destId,
+          requestSent:true,
+          requestError:{message:e?.message || String(e), kind:e?.kind || null},
+          requestFailedAt:Date.now(),
+          experimentalEarlyDelete:true
+        }
       };
-      persistItemTx(job, index, tx, 'EARLY_DELETE_UNCERTAIN');
+      persistItemTx(job, index, tx);
     }
     return await deleteOwnedTempForEarlyDeletePipeline(api, job, index, onStatus);
   }
 
   function canRearmEarlyDeleteItem(item) {
     const tx = item?.tx;
-    if (!tx || tx.state === 'DONE') return false;
-    return !!tx.delete?.confirmedAbsentAt && ['EARLY_DELETE_CONFIRMED','DOWNLOAD_READY','DOWNLOADING','DOWNLOAD_PAUSED','VERIFY_FAILED','LOCAL_COMMITTED'].includes(tx.state);
+    if (!tx || tx.state === 'DONE' || tx.state === 'LOCAL_COMMITTED') return false;
+    return !!tx.delete?.confirmedAbsentAt && ['EARLY_DELETE_CONFIRMED','DOWNLOAD_READY','DOWNLOADING','DOWNLOAD_PAUSED','VERIFY_FAILED'].includes(tx.state);
   }
 
   function rearmEarlyDeleteItem(job, index) {
@@ -2439,13 +2564,13 @@ const transientSignedUrls = new Map();
     return true;
   }
 
-  async function ensureDetachedDownloaded(api, job, index, queueRoot, signedUrl, onStatus) {
+  async function ensureDetachedDownloaded(api, job, index, queueRoot, signedUrl, onStatus, {onStreamReady = null} = {}) {
     assertLease();
     const item = job.items[index];
     let tx = item.tx;
     if (tx.state === 'LOCAL_COMMITTED' || tx.state === 'DONE') return tx;
-    if (tx.state !== 'EARLY_DELETE_CONFIRMED') {
-      throw new LinkexError(`早期DELETE確認前にはDLを開始できません (state=${tx.state})`, {kind:'early_delete_state'});
+    if (!['OWNERSHIP_CONFIRMED','EARLY_DELETE_CONFIRMED','DOWNLOAD_READY','DOWNLOAD_PAUSED'].includes(tx.state)) {
+      throw new LinkexError(`DL開始可能状態ではありません (state=${tx.state})`, {kind:'early_delete_state'});
     }
     if (!signedUrl) throw new LinkexError('signed URLがメモリ上にありません。再COPYが必要です。', {kind:'signed_url_missing'});
 
@@ -2461,7 +2586,9 @@ const transientSignedUrls = new Map();
         localName:local.name,
         downloadedBytes:local.size,
         startedAt:tx.download?.startedAt || Date.now(),
-        detachedAfterDelete:true,
+        detachedAfterDelete:!!tx.delete?.confirmedAbsentAt,
+        deleteParallel:true,
+        streamBeforeDelete:true,
         signedUrlPersisted:false,
         updatedAt:Date.now()
       }
@@ -2518,9 +2645,12 @@ const transientSignedUrls = new Map();
             const pct = x.expectedTotal ? Math.min(100, x.written / x.expectedTotal * 100) : null;
             const rateText = x.averageBytesPerSecond > 0 ? `\n平均 ${formatTransferRate(x.averageBytesPerSecond)} / 瞬間 ${formatTransferRate(x.instantBytesPerSecond)}` : '';
             const engineText = x.worker ? ' · Web Worker' : ' · inline';
-            onStatus?.(`EARLY-DELETE DOWNLOADING [${index+1}/${job.items.length}]\n${item.source.remotePath}\n${formatBytes(x.written)}${x.expectedTotal ? ` / ${formatBytes(x.expectedTotal)}` : ''}${pct == null ? '' : ` (${pct.toFixed(1)}%)`}${rateText}\n${x.resumed ? 'Range resume' : 'full/restart'}${engineText} · temp already deleted`);
+            const liveTx = latestItemTx(item, tx);
+            const deleteText = liveTx?.delete?.confirmedAbsentAt ? 'temp deleted' : 'DELETE parallel';
+            onStatus?.(`EARLY-DELETE DOWNLOADING [${index+1}/${job.items.length}]\n${item.source.remotePath}\n${formatBytes(x.written)}${x.expectedTotal ? ` / ${formatBytes(x.expectedTotal)}` : ''}${pct == null ? '' : ` (${pct.toFixed(1)}%)`}${rateText}\n${x.resumed ? 'Range resume' : 'full/restart'}${engineText} · ${deleteText}`);
           },
           onPhase:x => {
+            if (x?.phase === 'stream-ready' && typeof onStreamReady === 'function') onStreamReady(x);
             if (x?.phase === 'download-end') downloadEndedAt = Number(x.at || Date.now());
             if (x?.phase === 'verify-start') verifyStartedAt = Number(x.at || Date.now());
             if (x?.phase === 'verify-end') verifyEndedAt = Number(x.at || Date.now());
@@ -2537,7 +2667,9 @@ const transientSignedUrls = new Map();
           peakBytesPerSecond:Number(t.peakBytesPerSecond || 0),
           resumed:!!result?.resumed,
           attempts:Number(item.attempts.download || 0),
-          detachedAfterDelete:true
+          detachedAfterDelete:!!tx.delete?.confirmedAbsentAt,
+          deleteParallel:true,
+          streamBeforeDelete:true
         });
         if (verifyStartedAt) {
           const end = verifyEndedAt || Date.now();
@@ -2548,7 +2680,7 @@ const transientSignedUrls = new Map();
             verificationMethod:result?.verificationMethod || tx.download?.verificationMethod || null
           });
         }
-        tx = {...tx, download:{...(tx.download||{}), telemetry:t, detachedAfterDelete:true, signedUrlPersisted:false}};
+        tx = {...tx, download:{...(tx.download||{}), telemetry:t, detachedAfterDelete:!!tx.delete?.confirmedAbsentAt, deleteParallel:true, streamBeforeDelete:true, signedUrlPersisted:false}};
         persistItemTx(job, index, tx, 'LOCAL_COMMITTED');
 
         if (job.experimental?.recoveryProbe?.enabled && job.experimental.recoveryProbe.interruptTriggeredAt) {
@@ -2621,6 +2753,7 @@ const transientSignedUrls = new Map();
     const inFlightSlots = createAsyncSemaphore(EARLY_DELETE_MAX_IN_FLIGHT);
     const capacity = await createCapacityReservation(api);
     const tasks = new Set();
+    let rootBaselineIds = null;
     let fatalError = null;
     let fatalIndex = null;
     let pauseRequested = false;
@@ -2668,41 +2801,91 @@ const transientSignedUrls = new Map();
         let releaseDownload = null;
         let releaseDelete = null;
         let capacityReleased = false;
+        let downloadSettled = null;
         try {
-          // DELETE remains ownership/identity guarded, but it no longer blocks preparation of
-          // the next COPY. This is safe because reconcileCopy only cares about new IDs.
+          releaseDownload = await downloadSlots.acquire();
+          assertLease();
+
+          let resolveStreamReady;
+          const streamReady = new Promise(resolve => { resolveStreamReady = resolve; });
+          const downloadPromise = ensureDetachedDownloaded(
+            api,
+            job,
+            index,
+            queueRoot,
+            signedUrl,
+            onStatus,
+            {onStreamReady:info => resolveStreamReady?.(info || {at:Date.now()})}
+          );
+          downloadSettled = downloadPromise.then(
+            value => ({ok:true, value}),
+            error => ({ok:false, error})
+          );
+
+          // Destructive action barrier: do not DELETE until the CDN response has yielded its first
+          // non-empty chunk (or a legitimate zero-byte EOF). This mirrors the proven probe sequence.
+          const first = await Promise.race([
+            streamReady.then(info => ({kind:'stream-ready', info})),
+            downloadSettled.then(result => ({kind:'download-settled', result}))
+          ]);
+          if (first.kind === 'download-settled' && !first.result.ok) throw first.result.error;
+
+          let deleteError = null;
           releaseDelete = await deleteSlots.acquire();
           try {
             assertLease();
             await deleteOwnedTempForEarlyDeletePipeline(api, job, index, onStatus);
+          } catch (e) {
+            deleteError = e;
           } finally {
             releaseDelete();
             releaseDelete = null;
           }
 
-          capacity.release(reservation);
-          capacityReleased = true;
+          const latestAfterDelete = latestItemTx(item);
+          if (latestAfterDelete?.delete?.confirmedAbsentAt) {
+            capacity.release(reservation);
+            capacityReleased = true;
+          }
 
-          releaseDownload = await downloadSlots.acquire();
-          assertLease();
-          await ensureDetachedDownloaded(api, job, index, queueRoot, signedUrl, onStatus);
+          // Even when DELETE becomes uncertain, let the already-open local transfer settle so
+          // a successfully verified local file is not discarded. Resume will reconcile DELETE only.
+          const downloadResult = await downloadSettled;
+          if (!downloadResult.ok) throw downloadResult.error;
+          if (deleteError) throw deleteError;
+
           await commitQueueJob(job, () => {
-            let tx = item.tx;
+            let tx = latestItemTx(item) || item.tx;
             if (tx.state !== 'LOCAL_COMMITTED') throw new LinkexError(`完了前state異常: ${tx.state}`, {kind:'state'});
-            tx = {...tx, state:'DONE'};
-            tx = perfPhaseEnd(tx, 'total', Date.now(), {outcome:'done-early-delete'});
+            if (!tx.delete?.confirmedAbsentAt) throw new LinkexError('完了前にLinkex一時コピー削除が未確認です。', {kind:'early_delete_state'});
+            tx = {
+              ...tx,
+              state:'DONE',
+              download:{
+                ...(tx.download||{}),
+                detachedAfterDelete:true,
+                deleteParallel:true,
+                streamBeforeDelete:true
+              }
+            };
+            tx = perfPhaseEnd(tx, 'total', Date.now(), {outcome:'done-stream-before-delete'});
             item.tx = tx;
             item.state = 'DONE';
             compactCompletedItem(job, item);
           });
-          onStatus?.(`完了 [${index+1}/${job.items.length}]\n${item.source.remotePath}\nローカル検証済み / Linkex一時コピーはDL前に削除確認済み`);
+          onStatus?.(`完了 [${index+1}/${job.items.length}]\n${item.source.remotePath}\nDL stream先行 + DELETE並行 / ローカル検証済み / 一時コピー削除確認済み`);
         } catch (e) {
+          if (downloadSettled) {
+            try { await downloadSettled; } catch {}
+          }
           await markFatal(index, e);
         } finally {
           if (releaseDelete) releaseDelete();
           if (releaseDownload) releaseDownload();
-          // Do not release a reservation whose temp file was not confirmed deleted.
-          if (!capacityReleased && item.tx?.delete?.confirmedAbsentAt) capacity.release(reservation);
+          if (!capacityReleased && latestItemTx(item)?.delete?.confirmedAbsentAt) {
+            capacity.release(reservation);
+            capacityReleased = true;
+          }
           releaseInFlight();
         }
       })();
@@ -2725,20 +2908,34 @@ const transientSignedUrls = new Map();
       }
       if (['SKIPPED_CAPACITY','UNFITTABLE'].includes(item.state)) continue;
 
-      if (canRearmEarlyDeleteItem(item)) {
-        onStatus?.(`再開準備 [${i+1}/${job.items.length}]\n前回の一時コピーは削除済み。新しいCOPY/URLを取得してローカルpartialへRange再開します。`);
-        rearmEarlyDeleteItem(job, i);
-      }
-      if (item.tx && ['EARLY_DELETE_INTENT','EARLY_DELETE_REQUEST_SENT','EARLY_DELETE_UNCERTAIN'].includes(item.tx.state)) {
-        // DELETE uncertainty must be reconciled before any new COPY.
+      if (item.tx && needsEarlyDeleteReconcile(item.tx)) {
+        // DELETE intent/request uncertainty is reconciled first and the POST is never replayed.
         try {
           await deleteOwnedTempForEarlyDeletePipeline(api, job, i, onStatus);
-          rearmEarlyDeleteItem(job, i);
+          item.tx = latestItemTx(item);
         } catch (e) {
           await markFatal(i, e);
           break;
         }
       }
+
+      if (item.tx?.state === 'LOCAL_COMMITTED' && item.tx?.delete?.confirmedAbsentAt) {
+        await commitQueueJob(job, () => {
+          let tx = latestItemTx(item) || item.tx;
+          tx = {...tx, state:'DONE'};
+          tx = perfPhaseEnd(tx, 'total', Date.now(), {outcome:'recovered-local-and-delete-confirmed'});
+          item.tx = tx;
+          item.state = 'DONE';
+          compactCompletedItem(job, item);
+        });
+        continue;
+      }
+
+      if (canRearmEarlyDeleteItem(item)) {
+        onStatus?.(`再開準備 [${i+1}/${job.items.length}]\n前回の一時コピーは削除済み。新しいCOPY/URLを取得してローカルpartialへRange再開します。`);
+        rearmEarlyDeleteItem(job, i);
+      }
+
       if (item.tx && !['COPY_INTENT','COPY_REQUEST_SENT','NEEDS_RECONCILE','UNCERTAIN_NO_EVIDENCE','OWNERSHIP_CONFIRMED'].includes(item.tx.state)) {
         await markFatal(i, new LinkexError(`早期DELETE Queueの再開状態を安全に再構成できません: ${item.tx.state}`, {kind:'early_delete_resume_state'}));
         break;
@@ -2782,8 +2979,13 @@ const transientSignedUrls = new Map();
           break;
         }
 
-        let tx = await ensureCopyOwned(api, job, i, onStatus, {capacityReserved:true});
+        let tx = await ensureCopyOwned(api, job, i, onStatus, {
+          capacityReserved:true,
+          beforeIdsHint:rootBaselineIds
+        });
         assertLease();
+        const reconciledRootIds = getTransientRootSnapshot(tx.operationId);
+        if (reconciledRootIds) rootBaselineIds = reconciledRootIds;
 
         // A freshly reconciled COPY already returned its signed URL. Keep it memory-only and
         // avoid an immediate second root listing. Resume paths fall back to a fresh identity check.
@@ -2807,6 +3009,7 @@ const transientSignedUrls = new Map();
         // Capacity is released by the task only after DELETE absence is confirmed.
         launchEarlyDeleteTransaction(i, signedUrl, releaseInFlight, reservation);
         clearTransientSignedUrl(tx.operationId);
+        clearTransientRootSnapshot(tx.operationId);
         reservation = null;
       } catch (e) {
         if (reservation) capacity.release(reservation);
@@ -3599,7 +3802,7 @@ const transientSignedUrls = new Map();
               </details>
             </div>
           </details>
-          <div class="notice">v1.3の標準は高速DL=8です.Downloaderが所有確認した一時copyだけをsigned URL取得後に先に削除し、ローカルDLを最大8並列で進めます。中断時は新しいCOPY/URLから既存partialへRange再開します。「互換: 保存後DELETE」は従来方式です。</div>
+          <div class="notice">TEST BUILD: stream→DELETE parallel / Web Worker / manifest-6. v1.3の標準は高速DL=8です.Downloaderが所有確認した一時copyだけをsigned URL取得後に先に削除し、ローカルDLを最大8並列で進めます。中断時は新しいCOPY/URLから既存partialへRange再開します。「互換: 保存後DELETE」は従来方式です。</div>
         </div>
       </div>`;
     document.body.appendChild(root);
