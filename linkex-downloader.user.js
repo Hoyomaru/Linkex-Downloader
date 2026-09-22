@@ -1088,18 +1088,19 @@ async function downloadOwnedFile({api, state, handle, detachedUrl = null, interr
             if (bufferedBytes) await flushBufferedWrite();
             const forcedAt = Date.now();
             const partial = await handle.getFile();
+            const interruptedBytes = Number(partial.size || written);
             if (typeof onForcedInterrupt === 'function') {
               await onForcedInterrupt({
                 at:forcedAt,
-                written:Number(partial.size || written),
+                written:interruptedBytes,
                 expectedTotal,
                 resumed,
                 destId
               });
             }
-            throw new LinkexError(`復旧検証の予定中断: partial=${partial.size} bytes`, {
+            throw new LinkexError(`復旧検証の予定中断: partial=${interruptedBytes} bytes`, {
               kind:'recovery_probe_interrupt',
-              partialBytes:Number(partial.size || 0),
+              partialBytes:interruptedBytes,
               expectedTotal,
               destId
             });
@@ -1964,7 +1965,8 @@ function sameOwnedIdentity(current, state) {
               expectedTotal:info?.expectedTotal == null ? null : Number(info.expectedTotal),
               firstOperationId:tx.operationId,
               firstDestId:tx.confirmedDest?.id || null,
-              firstDeleteConfirmedAt:tx.delete?.confirmedAbsentAt || null
+              firstDeleteConfirmedAt:tx.delete?.confirmedAbsentAt || null,
+              interruptContextId:TAB_ID
             };
             saveQueueJob(job);
             recordEvent('warn', 'early-delete-recovery-interrupt',
@@ -2022,7 +2024,10 @@ function sameOwnedIdentity(current, state) {
           const rangeResumed = !!result?.resumed;
           const newDeleteConfirmed = !!tx.delete?.confirmedAbsentAt;
           const localVerified = !!tx.download?.verifiedAt && tx.state === 'LOCAL_COMMITTED';
-          const fullPass = operationChanged && destChanged && rangeResumed && newDeleteConfirmed && localVerified;
+          const interruptContextId = job.experimental?.recoveryProbe?.interruptContextId || null;
+          const resumeContextId = job.experimental?.recoveryProbe?.resumeContextId || null;
+          const contextChanged = !!interruptContextId && !!resumeContextId && interruptContextId !== resumeContextId;
+          const fullPass = operationChanged && destChanged && rangeResumed && newDeleteConfirmed && localVerified && contextChanged;
           job.experimental.recoveryProbe = {
             ...job.experimental.recoveryProbe,
             stage:fullPass ? 'FULL_PASS' : 'FAIL',
@@ -2034,6 +2039,7 @@ function sameOwnedIdentity(current, state) {
               destChanged,
               newDeleteConfirmed,
               localVerified,
+              contextChanged,
               partialBytesBeforeResume:Number(previous?.download?.downloadedBytes || job.experimental.recoveryProbe.partialBytes || 0),
               previousOperationId:previous?.operationId || null,
               previousDestId:previous?.confirmedDestId || null,
@@ -3312,7 +3318,15 @@ function sameOwnedIdentity(current, state) {
       const busy = running || preparing;
       const hasShareInput = !!detectSharePageTarget(globalThis.location?.href || '') || !!String(input.value || '').trim();
       const probeActive = active && job?.kind === 'early-delete-probe';
-      resumeBtn.disabled = busy || !active || probeActive;
+      const recoveryProbe = job?.experimental?.recoveryProbe;
+      const recoveryNeedsNewContext = !!(
+        active &&
+        recoveryProbe?.stage === 'INTERRUPTED' &&
+        recoveryProbe?.interruptContextId &&
+        recoveryProbe.interruptContextId === TAB_ID
+      );
+      resumeBtn.disabled = busy || !active || probeActive || recoveryNeedsNewContext;
+      resumeBtn.textContent = recoveryNeedsNewContext ? '先にページ再読み込み' : 'Queueを再開';
       resumeBtn.hidden = running || !active || probeActive;
       pauseBtn.disabled = !running || !activeRunJob || !!activeRunJob.stopRequested;
       pauseBtn.hidden = !running;
@@ -3429,6 +3443,7 @@ function sameOwnedIdentity(current, state) {
               `新しいCOPY operation: ${recovery.operationChanged ? 'PASS' : 'FAIL'}`,
               `新しいdestId: ${recovery.destChanged ? 'PASS' : 'FAIL'}`,
               `新しい一時コピーDELETE確認: ${recovery.newDeleteConfirmed ? 'PASS' : 'FAIL'}`,
+              `新しい実行コンテキスト: ${recovery.contextChanged ? 'PASS' : 'FAIL'}`,
               `最終ローカル検証: ${recovery.localVerified ? 'PASS' : 'FAIL'}`,
               `partial開始点: ${formatBytes(recovery.partialBytesBeforeResume || 0)}`,
               '',
@@ -3532,6 +3547,7 @@ function sameOwnedIdentity(current, state) {
               stage:'ARMED',
               requiresReload:true,
               interruptAfterBytes:recoveryInterruptAfterBytes,
+              startContextId:TAB_ID,
               createdAt:Date.now()
             }
           } : {})
@@ -3563,8 +3579,9 @@ function sameOwnedIdentity(current, state) {
             'Linkex一時コピー: DELETE確認済み',
             'signed URL: 保存していません',
             '',
-            'ここでページを再読み込みしてください。',
-            '再読み込み後、「Queueを再開」を押します。',
+            'ここで必ずページを再読み込みしてください。',
+            'このページのままでは「Queueを再開」は押せません。',
+            '再読み込み後、「Queueを再開」を1回だけ押し、完了まで操作せず待ってください。',
             '新しいCOPY/URLを取得し、既存partialへRange resumeできるか検証します。'
           ].join('\n'), 'ok');
         } else {
@@ -3841,6 +3858,14 @@ function sameOwnedIdentity(current, state) {
       if (running) return;
       const snapshot = loadQueueJob();
       if (!snapshot || isTerminal(snapshot)) { refreshQueueUi(); return; }
+      const snapshotRecovery = snapshot.experimental?.recoveryProbe;
+      if (snapshotRecovery?.stage === 'INTERRUPTED' &&
+          snapshotRecovery?.interruptContextId &&
+          snapshotRecovery.interruptContextId === TAB_ID) {
+        write('復旧検証では、予定中断後にページ再読み込みが必須です。\n旧signed URLをメモリから確実に消してから「Queueを再開」を押してください。', 'err');
+        refreshQueueUi();
+        return;
+      }
       if (!resolveCredentials()) { write(credentialBootstrapMessage(), 'err'); syncSharePageContext({initial:true}); return; }
       running = true;
       try {
@@ -3848,6 +3873,24 @@ function sameOwnedIdentity(current, state) {
         // lease取得後に最新stateを読み直し、別tabの古いsnapshotを書き戻さない。
         const job = loadQueueJob();
         if (!job || isTerminal(job)) { refreshQueueUi(); return; }
+        const recovery = job.experimental?.recoveryProbe;
+        if (recovery?.stage === 'INTERRUPTED') {
+          if (!recovery.interruptContextId || recovery.interruptContextId === TAB_ID) {
+            throw new LinkexError('復旧検証: 新しい実行コンテキストを確認できません。ページ再読み込み後に再開してください。', {kind:'recovery_reload_required'});
+          }
+          job.experimental.recoveryProbe = {
+            ...recovery,
+            stage:'RESUMING',
+            resumeContextId:TAB_ID,
+            resumeStartedAt:Date.now(),
+            contextChanged:true
+          };
+          saveQueueJob(job);
+          recordEvent('info', 'early-delete-recovery-context-changed', '復旧検証: 新しい実行コンテキストを確認', {
+            interruptContextId:recovery.interruptContextId,
+            resumeContextId:TAB_ID
+          });
+        }
         const queueRoot = await getQueueRootHandle(job);
         if (!queueRoot) throw new LinkexError('保存先DirectoryHandleが見つかりません。開始時と同じTampermonkeyスクリプトを使用してください。', {kind:'filesystem'});
         await ensureHandlePermission(queueRoot);
@@ -3936,7 +3979,13 @@ function sameOwnedIdentity(current, state) {
       else if (job.state === 'DONE_WITH_SKIPS') write(`前回Queueはスキップありで走査完了しています。\n\n${queueSummary(job, {detail:true})}`, 'ok');
       else if (job.state === 'PROBE_DONE') write(`早期DELETE検証は完了済みです。\n\n${queueSummary(job, {detail:true})}\n\n診断ログを保存してください。`, 'ok');
       else if (job.kind === 'early-delete-probe') write(`中断された早期DELETE検証があります。\n\n${queueSummary(job)}\n\nこのProbeは自動再開しません。診断ログ保存後、「Queueを安全に破棄」で整理してください。`, 'err');
-      else if (job.experimental?.recoveryProbe?.stage === 'INTERRUPTED') write(`早期DELETE復旧検証のpartialを検出しました。\n\n${queueSummary(job)}\n\n「Queueを再開」で新しいCOPY/URLを取得し、Range resumeを検証します。`, 'ok');
+      else if (job.experimental?.recoveryProbe?.stage === 'INTERRUPTED') {
+        const sameContext = job.experimental.recoveryProbe?.interruptContextId === TAB_ID;
+        write(sameContext
+          ? `早期DELETE復旧検証のpartialを検出しました。\n\n${queueSummary(job)}\n\nこの実行コンテキストでは再開できません。ページを再読み込みしてください。`
+          : `早期DELETE復旧検証のpartialを検出しました。\n\n${queueSummary(job)}\n\n新しい実行コンテキストを確認しました。「Queueを再開」で新しいCOPY/URLからRange resumeします。`,
+          'ok');
+      }
       else write(`未完了Queueがあります。\n\n${queueSummary(job)}\n\n「Queueを再開」で状態照合から続けられます。`);
     });
 
@@ -3966,7 +4015,13 @@ function sameOwnedIdentity(current, state) {
       else if (existing.state === 'DONE_WITH_SKIPS') write(`前回Full Queueはスキップありで走査完了しています。\n\n${queueSummary(existing, {detail:true})}\n\n容量条件を変えた場合は「容量スキップを再試行」が使えます。`, 'ok');
       else if (existing.state === 'PROBE_DONE') write(`前回の早期DELETE検証は完了しています。\n\n${queueSummary(existing, {detail:true})}\n\n診断ログを保存してください。`, 'ok');
       else if (existing.kind === 'early-delete-probe') write(`中断された早期DELETE検証を検出しました。\n\n${queueSummary(existing)}\n\n自動再開はしません。診断ログ保存後、「Queueを安全に破棄」で整理してください。`, 'err');
-      else if (existing.experimental?.recoveryProbe?.stage === 'INTERRUPTED') write(`早期DELETE復旧検証の第1段階partialを検出しました。\n\n${queueSummary(existing)}\n\n「Queueを再開」を押してください。新しいCOPY/URLからRange resumeします。`, 'ok');
+      else if (existing.experimental?.recoveryProbe?.stage === 'INTERRUPTED') {
+        const sameContext = existing.experimental.recoveryProbe?.interruptContextId === TAB_ID;
+        write(sameContext
+          ? `早期DELETE復旧検証の第1段階partialを検出しました。\n\n${queueSummary(existing)}\n\nページを再読み込みしてください。再読み込み前はQueue再開を無効化しています。`
+          : `早期DELETE復旧検証の第1段階partialを新しい実行コンテキストで検出しました。\n\n${queueSummary(existing)}\n\n「Queueを再開」を押してください。新しいCOPY/URLからRange resumeし、完了まで操作せず待ってください。`,
+          'ok');
+      }
       else write(`未完了Full Queueを検出しました。\n\n${queueSummary(existing)}\n\n「Queueを再開」で状態照合から続けられます。`, '');
     }
     recordEvent('info', 'startup', `Linkex Downloader v${VERSION} 起動`);

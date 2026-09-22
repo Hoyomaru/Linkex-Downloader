@@ -338,3 +338,17 @@ This points to diminishing returns beyond DOWNLOAD=4, but there is still a small
 After DL=4, DL=6, DL=8, and DL=8 size-desc ceiling tests, the selected performance configuration is normal-order DOWNLOAD=8 with maxInFlight=16. Size-desc scheduling is not adopted because it changed queue-effective throughput by only about +0.27% despite forcing sustained eight-way overlap.
 
 Before release promotion, recovery is the remaining destructive-flow gate: prove that a persisted local partial survives a reload after the original temporary destination has already been deleted, then safely obtain a new COPY/signed URL, delete the new temporary destination, Range-resume the same local file, and verify final completion.
+
+
+### Recovery probe v1 partial result (2026-09-22)
+
+The first one-file recovery run established most of the data path but did not qualify as FULL_PASS.
+
+- Stage 1 wrote 67,108,864 bytes (64 MiB), after the owned temporary destination had already been deleted and confirmed absent.
+- A replacement operation was created with a different operation ID and different destination ID.
+- The replacement temporary destination was also deleted and confirmed absent.
+- The local file then resumed from the 64 MiB partial using Range and progressed substantially, demonstrating that new-copy/new-signed-URL resume works.
+- However, Queue resume occurred in the same userscript execution context before a reload, so the intended proof that recovery does not depend on any old in-memory state was not satisfied.
+- A later reload happened while the resumed transfer was still active, leaving the old 30-second lease alive temporarily; the new page correctly refused concurrent resume.
+
+Recovery v2 therefore makes the reload boundary machine-enforced: the resume button is disabled in the interruption context, the interruption context ID is persisted, the second-stage context ID must differ, and FULL_PASS explicitly requires that context change in addition to new operation/destination, replacement delete confirmation, actual Range resume, and final local verification.

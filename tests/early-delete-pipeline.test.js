@@ -140,3 +140,27 @@ test('recovery UI requires one selection and uses the normal persisted Queue res
   assert.match(SOURCE, /recoveryProbe:true/);
   assert.match(SOURCE, /「Queueを再開」で新しいCOPY\/URLを取得し、Range resumeを検証します/);
 });
+
+
+test('recovery v2 requires a new userscript context before Queue resume', () => {
+  assert.match(SOURCE, /interruptContextId:TAB_ID/);
+  assert.match(SOURCE, /recoveryNeedsNewContext/);
+  assert.match(SOURCE, /resumeBtn\.textContent = recoveryNeedsNewContext \? '先にページ再読み込み' : 'Queueを再開'/);
+  assert.match(SOURCE, /kind:'recovery_reload_required'/);
+  assert.match(SOURCE, /resumeContextId:TAB_ID/);
+});
+
+test('recovery v2 FULL_PASS includes context change and reports correct forced partial bytes', () => {
+  const resultStart = SOURCE.indexOf('const interruptContextId = job.experimental?.recoveryProbe?.interruptContextId');
+  const resultEnd = SOURCE.indexOf('return tx;', resultStart);
+  const resultBlock = SOURCE.slice(resultStart, resultEnd);
+  assert.match(resultBlock, /const contextChanged =/);
+  assert.match(resultBlock, /localVerified && contextChanged/);
+  assert.match(resultBlock, /contextChanged,/);
+
+  const interruptStart = SOURCE.indexOf('const interruptedBytes = Number(partial.size || written)');
+  const interruptEnd = SOURCE.indexOf("kind:'recovery_probe_interrupt'", interruptStart);
+  const interruptBlock = SOURCE.slice(interruptStart, interruptEnd + 100);
+  assert.match(interruptBlock, /partial=\$\{interruptedBytes\} bytes/);
+  assert.match(interruptBlock, /partialBytes:interruptedBytes/);
+});
