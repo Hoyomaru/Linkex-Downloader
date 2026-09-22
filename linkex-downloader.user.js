@@ -1937,7 +1937,9 @@ const transientSignedUrls = new Map();
       tx:item.tx || null,
       attempts:item.attempts ? {...item.attempts} : null,
       lastError:item.lastError || null,
-      updatedAt:Date.now()
+      // Must be strictly newer than the last full Queue snapshot even when both writes land
+      // in the same millisecond, otherwise crash recovery could ignore this journal entry.
+      updatedAt:Math.max(Date.now(), Number(job.updatedAt || 0) + 1)
     };
     GM_setValue(key, entry);
     const jobId = String(job.jobId || '');
