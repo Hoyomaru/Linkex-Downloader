@@ -34,8 +34,8 @@ function loadRuntime() {
     window:{},
     unsafeWindow:{},
     document:{readyState:'loading', addEventListener(){}},
-    GM_getValue(key, fallback) { return storage.has(key) ? storage.get(key) : fallback; },
-    GM_setValue(key, value) { storage.set(key, value); },
+    GM_getValue(key, fallback) { return storage.has(key) ? structuredClone(storage.get(key)) : fallback; },
+    GM_setValue(key, value) { storage.set(key, structuredClone(value)); },
     GM_xmlhttpRequest() { throw new Error('unexpected GM_xmlhttpRequest'); },
     fetch:async () => { throw new Error('unexpected fetch'); },
   };
