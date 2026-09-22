@@ -1205,7 +1205,7 @@ function sameOwnedIdentity(current, state) {
   const PIPELINE_DOWNLOAD_WORKERS = 2;
   const PIPELINE_DELETE_WORKERS = 1;
   const PIPELINE_MAX_IN_FLIGHT = 3;
-  const EARLY_DELETE_DOWNLOAD_WORKERS = 6;
+  const EARLY_DELETE_DOWNLOAD_WORKERS = 8;
   // Keep one full worker-pool worth of extra memory-only signed URLs prefetched
   // so COPY / ownership / URL refresh / DELETE can run ahead of active downloads.
   const EARLY_DELETE_MAX_IN_FLIGHT = EARLY_DELETE_DOWNLOAD_WORKERS * 2;
@@ -2146,7 +2146,7 @@ function sameOwnedIdentity(current, state) {
         reservation = null;
 
         // A deleted temporary file no longer consumes Linkex capacity. The signed URL stays only
-        // in this closure; six extra in-flight slots are allowed to prefetch memory-only signed URLs while DL=6 is active.
+        // in this closure; eight extra in-flight slots are allowed to prefetch memory-only signed URLs while DL=8 is active.
         launchDetachedDownload(i, signedUrl, releaseInFlight);
       } catch (e) {
         if (reservation) capacity.release(reservation);
@@ -2909,7 +2909,7 @@ function sameOwnedIdentity(current, state) {
           <input id="lf-url" placeholder="https://l2e.click/d/xxxxxxxx" />
           <div class="primary-actions">
             <button id="lf-start" class="primary action-main" disabled>すべてダウンロード</button>
-            <button id="lf-start-early-delete" class="warn action-secondary" disabled>実験: 全件 早期DELETE DL=6</button>
+            <button id="lf-start-early-delete" class="warn action-secondary" disabled>実験: 全件 早期DELETE DL=8</button>
             <button id="lf-select-mode" class="secondary action-secondary" disabled>ファイルを選ぶ</button>
           </div>
           <div id="lf-selection" class="selection" hidden>
@@ -2918,7 +2918,7 @@ function sameOwnedIdentity(current, state) {
             <div class="selection-actions"><button id="lf-select-all" class="secondary">全件選択</button><button id="lf-clear-all" class="secondary">全解除</button><button id="lf-select-visible" class="secondary">表示中を選択</button><button id="lf-clear-visible" class="secondary">表示中を解除</button></div>
             <div id="lf-file-list" class="file-list"></div>
             <div id="lf-selection-note" class="notice"></div>
-            <div class="row" style="margin-top:8px;margin-bottom:0"><button id="lf-start-selected" class="primary" disabled>選択をダウンロード</button><button id="lf-start-selected-early-delete" class="warn" disabled>選択を早期DELETE DL=6</button><button id="lf-early-delete-probe" class="secondary" disabled>1件Probe</button></div>
+            <div class="row" style="margin-top:8px;margin-bottom:0"><button id="lf-start-selected" class="primary" disabled>選択をダウンロード</button><button id="lf-start-selected-early-delete" class="warn" disabled>選択を早期DELETE DL=8</button><button id="lf-early-delete-probe" class="secondary" disabled>1件Probe</button></div>
           </div>
           <div id="lf-queue-actions" class="row" hidden><button id="lf-resume" class="primary" disabled>Queueを再開</button><button id="lf-pause" class="secondary" disabled>現在ファイル後に停止</button></div>
           <div class="progress-wrap">
@@ -2939,7 +2939,7 @@ function sameOwnedIdentity(current, state) {
               </details>
             </div>
           </details>
-          <div class="notice">通常DLはLOCAL_COMMITTED後に所有destIdを削除します。実験「早期DELETE DL=6」はFULL_PASS済みsigned URL挙動を使い、所有確認済み一時コピーをDL前に削除して容量を解放します。copy/delete不明時は盲目的に再送せず、共有元は削除しません。signed URLは永続化しません。</div>
+          <div class="notice">通常DLはLOCAL_COMMITTED後に所有destIdを削除します。実験「早期DELETE DL=8」はFULL_PASS済みsigned URL挙動を使い、所有確認済み一時コピーをDL前に削除して容量を解放します。copy/delete不明時は盲目的に再送せず、共有元は削除しません。signed URLは永続化しません。</div>
         </div>
       </div>`;
     document.body.appendChild(root);

@@ -311,3 +311,23 @@ Concurrency analysis of the transfer window: DOWNLOAD=4 was reached, zero-active
 Control-plane phase timings were also stable in this run (COPY median ~252 ms, ownership reconciliation median ~237 ms, DELETE median ~478 ms), so the previous late-run multi-second slowdown appears transient rather than a required behavior.
 
 Next isolated experiment: raise active DOWNLOAD workers from 4 to 6 while preserving a full extra worker-pool worth of detached URL prefetch (maxInFlight=12). All ownership and destructive-action guards remain unchanged.
+
+
+### Early-delete DL=6 result (2026-09-22)
+
+The same 26-file / 6.37 GB workload completed safely with DOWNLOAD=6 and maxInFlight=12.
+
+- transferred bytes: 6,372,761,319
+- transfer window: 79.885 s
+- pool throughput: 76.08 MiB/s
+- pipeline wall: 81.939 s
+- pipeline effective: 74.17 MiB/s
+- queue wall: 82.216 s
+- queue effective: 73.92 MiB/s
+- completed: 26/26, one download attempt each, no blocked items
+
+Compared with DOWNLOAD=4 / maxInFlight=8, pool throughput improved only about 2.37%, queue effective throughput improved about 2.40%, and queue wall fell about 2.34%. Per-transfer average throughput fell from 27.19 MiB/s to 24.76 MiB/s, which shows stronger bandwidth sharing between active downloads.
+
+Transfer-window concurrency analysis: there was effectively no zero-active gap; average active concurrency was about 3.07, and six simultaneous transfers were reached for about 8.16 s. Setup remained mostly stable (COPY median ~253 ms, ownership reconciliation median ~239 ms, DELETE median ~481 ms), with one isolated COPY outlier around 1.98 s.
+
+This points to diminishing returns beyond DOWNLOAD=4, but there is still a small measurable gain at DOWNLOAD=6. One final isolated ceiling check uses DOWNLOAD=8 with maxInFlight=16. If that produces little or no further improvement, DOWNLOAD=6 (or DOWNLOAD=4 for a lower-concurrency default) is the practical range for this workload.
