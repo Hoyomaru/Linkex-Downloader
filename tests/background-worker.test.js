@@ -50,9 +50,18 @@ test('worker startup and Range-416 compatibility failures fall back to proven in
   const start = SOURCE.indexOf('async function downloadOwnedFile({api, state, handle');
   const end = SOURCE.indexOf('// --- I: destructive action guard', start);
   const block = SOURCE.slice(start, end);
-  assert.match(block, /'worker_unavailable','worker_start','range_416','network'/);
+  assert.match(block, /'worker_unavailable','worker_start','worker_filesystem','range_416','network'/);
   assert.match(block, /falling back to inline transfer/);
   assert.match(block, /if \(res\.status === 416\)/);
+});
+
+test('Worker-only filesystem restrictions are classified for inline fallback', () => {
+  const start = SOURCE.indexOf('function detachedDownloadWorkerBootstrap()');
+  const end = SOURCE.indexOf('function resolveDownloadWorkerConstructor', start);
+  const worker = SOURCE.slice(start, end);
+  assert.match(worker, /NotAllowedError/);
+  assert.match(worker, /SecurityError/);
+  assert.match(worker, /worker_filesystem/);
 });
 
 test('Web Worker object URL is generated from a self-contained bootstrap function', () => {
