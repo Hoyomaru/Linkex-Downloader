@@ -34,6 +34,32 @@ test('download worker owns fetch, stream buffering, and FileSystem writable I/O'
   assert.match(worker, /type:'done'/);
 });
 
+test('Worker signals stream-ready only after first body chunk or clean zero-byte EOF', () => {
+  const start = SOURCE.indexOf('function detachedDownloadWorkerBootstrap()');
+  const end = SOURCE.indexOf('function resolveDownloadWorkerConstructor', start);
+  const worker = SOURCE.slice(start, end);
+  const readAt = worker.indexOf('const {done, value} = await reader.read()');
+  const readyAt = worker.indexOf("type:'stream-ready'", readAt);
+  assert.ok(readAt > 0 && readyAt > readAt);
+  assert.match(worker, /firstChunkBytes:value\.byteLength/);
+  assert.match(worker, /firstChunkBytes:0, eof:true/);
+
+  const bridgeStart = SOURCE.indexOf('async function downloadOwnedFileInWorker');
+  const bridgeEnd = SOURCE.indexOf('async function downloadOwnedFile({api, state, handle', bridgeStart);
+  const bridge = SOURCE.slice(bridgeStart, bridgeEnd);
+  assert.match(bridge, /data\.type === 'stream-ready'/);
+  assert.match(bridge, /phase:'stream-ready'/);
+});
+
+test('inline fallback exposes the same stream-ready barrier', () => {
+  const start = SOURCE.indexOf('async function downloadOwnedFile({api, state, handle');
+  const end = SOURCE.indexOf('// --- I: destructive action guard', start);
+  const block = SOURCE.slice(start, end);
+  assert.match(block, /let streamReadySignaled = false;/);
+  assert.match(block, /phase:'stream-ready'/);
+  assert.match(block, /firstChunkBytes:value\.byteLength/);
+});
+
 test('worker checkpoints are persisted on the main side and errors preserve partial size', () => {
   const start = SOURCE.indexOf('async function downloadOwnedFileInWorker');
   const end = SOURCE.indexOf('async function downloadOwnedFile({api, state, handle', start);
