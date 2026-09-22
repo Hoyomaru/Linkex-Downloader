@@ -3014,7 +3014,8 @@ const transientSignedUrls = new Map();
       if (item.tx) syncTxFromProbe(job, i);
       if (item.state === 'DONE' || item.tx?.state === 'DONE') {
         compactCompletedItem(job, item);
-        saveQueueJob(job);
+        saveQueueItemJournal(job, i);
+        saveQueueJobLazy(job);
         continue;
       }
       if (['SKIPPED_CAPACITY','UNFITTABLE'].includes(item.state)) continue;
