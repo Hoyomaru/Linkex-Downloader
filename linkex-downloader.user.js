@@ -19,7 +19,8 @@
 (() => {
   'use strict';
 
-  const VERSION = '1.3.0-perf-worker';
+  const VERSION = '1.3.0';
+  const BUILD_TAG = 'perf-worker-stream-delete';
   const API_BASE = 'https://prod.linksvc.xyz';
   const SIGNED_HEADER_PREFIX = 'x-linkinflu-';
   const SIGNATURE_HEADER = 'x-linkinflu-sign';
@@ -3688,6 +3689,7 @@ const transientSignedUrls = new Map();
     const bundle = {
       product: 'Linkex Downloader',
       version: VERSION,
+      buildTag: BUILD_TAG,
       generatedAt: new Date().toISOString(),
       signatureSelfTest: runSignatureSelfTest().map(x => ({name:x.name, ok:x.ok, actual:x.actual, expected:x.expected})),
       performance: redactForExport(buildPerformanceSummary(queue)),
