@@ -6,37 +6,55 @@ const fs = require('node:fs');
 
 const SOURCE = fs.readFileSync('linkex-downloader.user.js', 'utf8');
 
-test('early-delete pipeline is COPY=1 / early DELETE=1 / DOWNLOAD=8 with eight prefetch slots', () => {
+test('early-delete pipeline keeps COPY serialized while DELETE=2 and DOWNLOAD=8 overlap', () => {
   assert.match(SOURCE, /const EARLY_DELETE_DOWNLOAD_WORKERS = 8;/);
+  assert.match(SOURCE, /const EARLY_DELETE_DELETE_WORKERS = 2;/);
   assert.match(SOURCE, /const EARLY_DELETE_MAX_IN_FLIGHT = EARLY_DELETE_DOWNLOAD_WORKERS \* 2;/);
   const start = SOURCE.indexOf('async function processEarlyDeletePipeline');
   const end = SOURCE.indexOf('function assertEarlyDeleteProbeGuards', start);
   assert.ok(start > 0 && end > start);
   const block = SOURCE.slice(start, end);
   assert.match(block, /createAsyncSemaphore\(EARLY_DELETE_DOWNLOAD_WORKERS\)/);
+  assert.match(block, /createAsyncSemaphore\(EARLY_DELETE_DELETE_WORKERS\)/);
   assert.match(block, /createAsyncSemaphore\(EARLY_DELETE_MAX_IN_FLIGHT\)/);
+  assert.match(block, /earlyDeleteWorkers:EARLY_DELETE_DELETE_WORKERS/);
 });
 
-test('early-delete order is ownership -> signed URL -> confirmed delete -> download launch', () => {
+test('early-delete preparation launches guarded DELETE/DOWNLOAD task without awaiting it before the next COPY', () => {
   const start = SOURCE.indexOf('async function processEarlyDeletePipeline');
   const end = SOURCE.indexOf('function assertEarlyDeleteProbeGuards', start);
   const block = SOURCE.slice(start, end);
   const copyAt = block.indexOf('await ensureCopyOwned');
-  const urlAt = block.indexOf('await refreshOwnedFileUrl', copyAt);
-  const deleteAt = block.indexOf('await deleteOwnedTempForEarlyDeletePipeline', urlAt);
-  const releaseAt = block.indexOf('capacity.release(reservation)', deleteAt);
-  const launchAt = block.indexOf('launchDetachedDownload(i, signedUrl', deleteAt);
-  assert.ok(copyAt >= 0 && urlAt > copyAt);
-  assert.ok(deleteAt > urlAt);
-  assert.ok(releaseAt > deleteAt);
-  assert.ok(launchAt > releaseAt);
+  const signedAt = block.indexOf('getTransientSignedUrl', copyAt);
+  const launchAt = block.indexOf('launchEarlyDeleteTransaction(i, signedUrl', signedAt);
+  assert.ok(copyAt >= 0 && signedAt > copyAt && launchAt > signedAt);
+
+  const launchStart = block.indexOf('const launchEarlyDeleteTransaction');
+  const loopStart = block.indexOf('for (let i = 0;', launchStart);
+  const launchBlock = block.slice(launchStart, loopStart);
+  assert.match(launchBlock, /await deleteOwnedTempForEarlyDeletePipeline/);
+  assert.match(launchBlock, /capacity\.release\(reservation\)/);
+  assert.match(launchBlock, /await ensureDetachedDownloaded/);
+  assert.ok(launchBlock.indexOf('await deleteOwnedTempForEarlyDeletePipeline') < launchBlock.indexOf('await ensureDetachedDownloaded'));
+
+  const loopBlock = block.slice(loopStart);
+  const afterSigned = loopBlock.slice(loopBlock.indexOf('let signedUrl'));
+  assert.doesNotMatch(afterSigned.slice(0, afterSigned.indexOf('launchEarlyDeleteTransaction')), /await deleteOwnedTempForEarlyDeletePipeline/);
 });
 
-test('signed URL is closure-only and never placed in persisted transaction', () => {
+test('fresh ownership signed URL is memory-only and persisted confirmedDest is identity-only', () => {
+  assert.match(SOURCE, /const transientSignedUrls = new Map\(\);/);
+  assert.match(SOURCE, /rememberTransientSignedUrl\(tx\.operationId, rec\.item\)/);
+  assert.match(SOURCE, /confirmedDest:ownedIdentitySnapshot\(rec\.item\)/);
+  const snapshotStart = SOURCE.indexOf('function ownedIdentitySnapshot');
+  const snapshotEnd = SOURCE.indexOf('function rememberTransientSignedUrl', snapshotStart);
+  const snapshot = SOURCE.slice(snapshotStart, snapshotEnd);
+  assert.doesNotMatch(snapshot, /url:/);
+
   const start = SOURCE.indexOf('async function processEarlyDeletePipeline');
   const end = SOURCE.indexOf('function assertEarlyDeleteProbeGuards', start);
   const block = SOURCE.slice(start, end);
-  assert.match(block, /const signedUrl = owned\.url; \/\/ Memory-only; never persisted\./);
+  assert.match(block, /getTransientSignedUrl\(tx\.operationId\)/);
   assert.match(block, /signedUrlPersisted:false/);
   assert.doesNotMatch(block, /signedUrl\s*:/);
 });
