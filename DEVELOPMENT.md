@@ -63,9 +63,10 @@ shared file
   -> copy to own Linkex storage
   -> prove ownership of the new destId
   -> obtain signed CDN URL in memory
-  -> delete and confirm absence of only the proven temporary destId
-  -> download/verify with up to 8 local workers
-  -> on interruption, create a new owned copy and Range-resume the existing local partial
+  -> start the CDN stream in a Web Worker and observe the first chunk
+  -> delete only the proven temporary destId while download continues
+  -> verify local output with up to 8 download workers
+  -> on interruption, reconcile DELETE first, then Range-resume from the same owned copy or a new owned copy
   -> next file
 ```
 
@@ -76,7 +77,7 @@ shared file
 ここは新機能追加・リファクタ・UI変更時も弱めてはいけません。
 
 1. **共有元ファイルは削除しない。削除対象はDownloader自身が新規作成したと証明できる一時 `destId` だけ。**
-2. 高速モードのearly DELETEは、ownership確定・`beforeIds` 新規性・fresh signed URL取得・削除直前identity再確認がすべて成立した一時copyだけに限定する。互換モードは従来どおり `LOCAL_COMMITTED` 前DELETE禁止。
+2. 高速モードのearly DELETEは、ownership確定・`beforeIds` 新規性・fresh signed URL取得・CDN streamの最初のchunk確認・削除直前identity再確認がすべて成立した一時copyだけに限定する。互換モードは従来どおり `LOCAL_COMMITTED` 前DELETE禁止。
 3. DELETEは常に `select_all:false` かつ `file_ids:[destId]` の **1件だけ**。
 4. COPY応答が不明なとき、copy POSTを盲目的に再送しない。まず実状態を照合する。
 5. DELETE応答が不明なとき、delete POSTを盲目的に再送しない。まず `destId` の存在/不在を照合する。
@@ -84,7 +85,7 @@ shared file
 7. `destId` がコピー前ID集合に含まれていた場合は削除拒否。
 8. ダウンロードに使用したIDと所有権確定IDが一致しない場合は削除拒否。
 9. Content-Lengthが得られる場合はローカル検証済みサイズとCDN実サイズの一致を要求する。Content-Lengthが得られない場合は `verificationMethod === 'stream-eof'`、正常EOF、stream実書込byte数と最終ローカルサイズ一致を要求する。
-10. 互換モードのDELETEでは`verifiedAt`を要求する。高速モードのearly DELETEでは代わりにsigned URL取得済み・identity再確認済み・ownership guard済みを要求し、ローカルverifyはDOWNLOAD完了条件として別に必須。
+10. 互換モードのDELETEでは`verifiedAt`を要求する。高速モードのearly DELETEでは代わりにsigned URL取得済み・stream開始済み・identity再確認済み・ownership guard済みを要求し、ローカルverifyはDOWNLOAD完了条件として別に必須。
 11. 削除直前の `destId` のname / Linkex metadata sizeが所有権確定時と一致しない場合は削除拒否。
 12. leaseを失った場合は処理を停止する。
 13. 危険な曖昧状態は「失敗して止まる」側を選ぶ。誤削除より停止を優先する。
