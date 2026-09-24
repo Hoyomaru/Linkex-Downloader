@@ -8,15 +8,24 @@
 
 2026-09-24 時点:
 
-- `main` source: **v1.3.1**（公開用 / 実機確認済み）
+- `main` source: **v1.3.1**（公開済み / 実機確認済み）
 - 最新公開Stable: **v1.3.1**
 - 最新公開tag: **`v1.3.1`**
-- v1.3.1: publish workflow対象
-- Release commit: **`v1.3.1` tag対象commit**
+- v1.3.1: GitHub Release公開済み
+- Release commit: `2ea2dff8f83a77aafa23c6f4a47088b5d0e385d1`
 - License: **MIT**
 - CI: `.github/workflows/ci.yml`
 
-## v1.3.1 公開内容
+## v1.3.1 公開実績
+
+GitHub Release `v1.3.1` は2026-09-24に公開済みです。tagはrelease commit `2ea2dff8f83a77aafa23c6f4a47088b5d0e385d1` を指し、CI / publish workflowで回帰テスト・repository consistency・deterministic Release Asset生成・公開後digest照合まで通過しています。
+
+最終userscript build:
+
+```text
+linkex_downloader_v1.3.1.user.js  232993 bytes  sha256:eeca3c99f34d83c5b42fe177a3550bb57ac339024c1fcecab90c1c64af595d7b
+linkex_downloader_v1.3.1.zip       53197 bytes  sha256:6dbfd31897b543861f40be9bb817cc4cc800a7fd654c848586eb97028571ea6e
+```
 
 v1.3.1は、大量小ファイル共有で目立っていたcontrol-plane待ちとuserscript hot-path書き込みを削減し、Web Worker転送とstream-before-delete方式を標準化するpatch releaseです。
 
@@ -28,7 +37,7 @@ v1.3.1は、大量小ファイル共有で目立っていたcontrol-plane待ち�
 - signed URL: memory-only
 - background/API stall diagnostics: 有効
 
-Chromium系 + Tampermonkeyの実機で速度改善を確認しています。公開Assetはpublish workflowがtag対象commitからdeterministic生成し、GitHub ReleaseのSHA-256 digestと自動照合します。
+Chromium系 + Tampermonkeyの実機で速度改善を確認済みです。standalone userscriptはrelease commitの正本とbyte-identical、ZIP内userscriptも同一で、GitHub Release APIのAsset digestは上記SHA-256と一致確認済みです。
 
 ## v1.3.0 公開実績
 
@@ -163,7 +172,7 @@ python tools/build_release_assets.py --output-dir <temporary directory>
 
 - 共有元ファイルを削除しない
 - Downloader自身が新規作成したと証明できる `destId` だけ削除
-- 高速モードのearly DELETEはownership・新規ID・fresh signed URL・削除直前identity確認を必須にし、signed URLを永続化しない
+- 高速モードのearly DELETEはownership・新規ID・fresh signed URL・stream-ready・削除直前identity確認を必須にし、signed URLを永続化しない
 - 互換モードでは従来どおり `LOCAL_COMMITTED` 前に削除しない
 - DELETEは `select_all:false` + 単一 `file_ids:[destId]`
 - COPY / DELETE結果不明時はwriteを盲目的に再送しない
@@ -186,7 +195,7 @@ Chromium系 + Tampermonkeyで少なくとも次を確認します。
 - 選択ダウンロード
 - 最大8並列CDN download / Range / early DELETE後の新COPY・新URL復旧
 - ローカルsize verification
-- 所有済み一時copyだけearly deleteし、不在確認後にDOWNLOAD開始
+- 所有済み一時copyだけを、CDN streamの最初のchunk確認後にearly DELETEし、DELETE確認とDOWNLOADを並行
 - `現在ファイル後に停止` → `Queueを再開`
 - early DELETE後にpartialを残してreload → 新contextでQueue再開 → 新COPY/new dest delete → Range resume → final verify
 - 詳細ログは通常折りたたみ、error時だけ自動展開

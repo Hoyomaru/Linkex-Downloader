@@ -35,11 +35,11 @@ Web WorkerでCDN stream開始（最初のchunkを確認）
 
 ## Version / 配布状態
 
-- `main` source: **v1.3.1**（公開用 / 実機確認済み）
+- `main` source: **v1.3.1**（公開済み / 実機確認済み）
 - 最新公開安定版: **v1.3.1**
 - 最新公開tag: **`v1.3.1`**
-- GitHub Release: **v1.3.1（2026-09-24 publish workflow対象）**
-- Release commit: **`v1.3.1` tag対象commit**
+- GitHub Release: **v1.3.1 公開済み（2026-09-24）**
+- Release commit: `2ea2dff8f83a77aafa23c6f4a47088b5d0e385d1`
 - 現行CI: **GitHub Actions (`.github/workflows/ci.yml`)** — userscript構文、回帰テスト、repository整合性、Release Asset生成を検証
 - License: **MIT**
 
@@ -137,7 +137,7 @@ Node.js / Python等の外部ランタイムは不要です。
 ### GitHub Releaseから導入する場合（推奨）
 
 1. Chrome / Edge に Tampermonkey をインストールします。
-2. GitHub Releases から最新の公開安定版 **v1.3.1** を開きます.
+2. GitHub Releases から最新の公開安定版 **v1.3.1** を開きます。
 3. Release Assets の `linkex_downloader_v1.3.1.user.js` を取得します。
 4. Tampermonkeyで新規スクリプトを作成し、userscript全文を貼り付けて保存します。
 5. Linkexへログインした状態で `https://disk.linkex.io/` を一度開きます。
