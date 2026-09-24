@@ -20,7 +20,7 @@
   'use strict';
 
   const VERSION = '1.3.0';
-  const BUILD_TAG = 'perf-worker-stream-delete';
+  const BUILD_TAG = 'stream-delete-worker-journal';
   const API_BASE = 'https://prod.linksvc.xyz';
   const SIGNED_HEADER_PREFIX = 'x-linkinflu-';
   const SIGNATURE_HEADER = 'x-linkinflu-sign';
@@ -3909,7 +3909,7 @@ const transientSignedUrls = new Map();
       </style>
       <div class="box">
         <div class="hd">
-          <div class="hd-left"><div class="title">Linkex Downloader v${VERSION}</div><div class="badge">PERF TEST</div></div>
+          <div class="hd-left"><div class="title">Linkex Downloader v${VERSION}</div><div class="badge">SAFE QUEUE</div></div>
           <button id="lf-collapse" class="mini" title="最小化/展開">−</button>
         </div>
         <div class="body">
@@ -3943,11 +3943,11 @@ const transientSignedUrls = new Map();
               <div class="row" style="margin-bottom:0"><button id="lf-abandon" class="secondary" disabled>Queueを安全に破棄</button></div>
               <details id="lf-log-details" class="log">
                 <summary>ログを表示</summary>
-                <div id="lf-status" class="status">共有ページでは「すべてダウンロード」だけで解析からQueue開始まで進めます。\nPERF TEST: COPY/所有確認 → signed URL → Web Worker stream開始 → 所有一時copy DELETEを並行 → DL/VERIFY。中断時は安全照合後にRange再開します。</div>
+                <div id="lf-status" class="status">共有ページでは「すべてダウンロード」だけで解析からQueue開始まで進めます。\n高速モード: COPY/所有確認 → signed URL → Web Worker stream開始 → 所有一時copy DELETEを並行 → DL/VERIFY。中断時は安全照合後にRange再開します。</div>
               </details>
             </div>
           </details>
-          <div class="notice">TEST BUILD: ${BUILD_TAG} / manifest-6 / item-journal. 高速モードはCDN streamの最初のchunk確認後に、所有確認済み一時copyのDELETEをDLと並行実行します。ローカルDLは最大8並列。中断時はDELETE状態を照合し、必要に応じて同じ所有copyまたは新COPYからRange再開します。「互換: 保存後DELETE」は従来方式です。</div>
+          <div class="notice">高速モードはCDN streamの最初のchunk確認後に、所有確認済み一時copyのDELETEをDLと並行実行します。ローカルDLは最大8並列。中断時はDELETE状態を照合し、必要に応じて同じ所有copyまたは新COPYからRange再開します。「互換: 保存後DELETE」は従来方式です。</div>
         </div>
       </div>`;
     document.body.appendChild(root);
