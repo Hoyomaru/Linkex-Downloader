@@ -2,7 +2,7 @@
 
 Linkex の共有リンクから、共有内のファイルを **所有権確認付きでローカルへ高速保存する** Tampermonkey userscript です。
 
-v1.3.0では、Linkex の自分のストレージを一時作業領域として利用し、各ファイルを「一時コピー → 所有権確認 → signed URL取得 → 所有済み一時コピー削除 → ローカル保存/検証」の順で処理します。Linkex側のCOPY/DELETE制御は1件ずつ直列、ローカルDOWNLOADは最大8並列です。
+v1.3.0の現行mainでは、Linkex の自分のストレージを一時作業領域として利用し、各ファイルを「一時コピー → 所有権確認 → signed URL取得 → CDN stream開始 → 所有済み一時コピーDELETEを並行 → ローカル保存/検証」の順で処理します。COPYの所有権確定は安全のため1件ずつ、ローカルDOWNLOADはWeb Workerで最大8並列です。
 
 > [!IMPORTANT]
 > 本ツールは **Linkex公式とは無関係の非公式ツール** です。Linkex側のWeb/API仕様変更により動作しなくなる可能性があります。
@@ -22,14 +22,16 @@ Linkex 自領域へ一時コピー
   ↓
 signed CDN URL をメモリ上だけで取得
   ↓
-自分で作成した一時コピー ID だけ削除・不在確認
+Web WorkerでCDN stream開始（最初のchunkを確認）
+  ↓
+自分で作成した一時コピー ID だけDELETEを並行実行・不在確認
   ↓
 最大8並列でローカルへダウンロード / 検証
   ↓
-中断時は新COPY / 新URLから既存partialへRange再開
+中断時はDELETE状態を照合し、同じ所有copyまたは新COPY / 新URLから既存partialへRange再開
 ```
 
-一時コピーはLinkex上で1件ずつ所有確認・削除確認するため、Linkex容量を使い回せます。削除確認後のsigned URLはメモリ上だけでDOWNLOAD workerへ渡し、最大8本を並列転送します。
+一時コピーはLinkex上で1件ずつ所有確認し、signed URLをメモリ上だけでDOWNLOAD workerへ渡します。CDN streamの最初のchunkが読めたことを確認してから、その所有確認済み一時copyだけをDELETEし、DELETE確認とダウンロードを並行させてLinkex容量を早く使い回します。
 
 ## Version / 配布状態
 
@@ -58,10 +60,10 @@ signed CDN URL をメモリ上だけで取得
 - `disk.linkex.io` 上での従来の共有URL手入力解析も継続対応
 - 共有フォルダの再帰走査
 - 全ファイルmanifest作成
-- Linkex自領域へのCOPY / ownership確認 / early DELETEを1件ずつ直列実行
+- Linkex自領域へのCOPY / ownership確認は安全のため1件ずつ実行し、DL stream開始後のearly DELETEは転送と並行
 - コピー前後のID差分による `destId` 所有権確定
-- signed CDN URLを永続化せずメモリ上だけで受け渡し、ローカルDOWNLOADを最大8並列実行
-- Range Requestによる途中再開。early DELETE後の再読み込みでは新COPY / 新signed URLを取得して既存partialから再開
+- signed CDN URLを永続化せずメモリ上だけで受け渡し、Web WorkerでローカルDOWNLOADを最大8並列実行
+- Range Requestによる途中再開。中断時はDELETE状態を先に照合し、同じ所有copyが残っていればfresh URLで再開、削除済みなら新COPY / 新signed URLから既存partialへ再開
 - signed URL失効時（403）のURL再取得
 - Content-Lengthがある場合はCDN実サイズ一致、ない場合はstream正常EOF＋実書込byte数でローカル保存検証
 - 検証済み一時コピー1件だけの自動削除
