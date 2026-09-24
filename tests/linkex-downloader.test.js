@@ -10,7 +10,7 @@ const {TextEncoder} = require('node:util');
 const SOURCE_PATH = 'linkex-downloader.user.js';
 const SOURCE = fs.readFileSync(SOURCE_PATH, 'utf8');
 const STARTUP = "  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', createPanel, {once:true});\n  else createPanel();\n})();";
-const EXPOSE = "  globalThis.__linkexTest = {allocateLocalPaths, assertDeleteGuards, downloadOwnedFile, sameOwnedIdentity, LinkexApi, compactDoneTx, createQueueFromManifest, parseShareToken, detectSharePageTarget, isSharePageHost, readCredentialBridge, syncCredentialBridgeFromDisk, resolveCredentials};\n})();";
+const EXPOSE = "  globalThis.__linkexTest = {allocateLocalPaths, assertDeleteGuards, downloadOwnedFile, sameOwnedIdentity, LinkexApi, compactDoneTx, createQueueFromManifest, buildManifest, parseShareToken, detectSharePageTarget, isSharePageHost, readCredentialBridge, syncCredentialBridgeFromDisk, resolveCredentials};\n})();";
 
 function loadRuntime({href = 'https://disk.linkex.io/', localStorageEntries = {}} = {}) {
   assert.ok(SOURCE.includes(STARTUP), 'test harness could not find userscript startup block');
@@ -72,6 +72,40 @@ function response({status, length = null, reader = null}) {
     body,
   };
 }
+
+test('manifest crawler overlaps sibling folder requests while staying within six workers', async () => {
+  const {api} = loadRuntime();
+  let active = 0;
+  let peak = 0;
+  const folders = Array.from({length: 12}, (_, i) => ({id:`folder-${i}`, name:`folder-${i}`, type:'folder'}));
+  const fakeApi = {
+    async getShare() { return {share:{file:{name:'parallel-share'}}}; },
+    async getShareContent(_token, {parentId}) {
+      active += 1;
+      peak = Math.max(peak, active);
+      await new Promise(resolve => setTimeout(resolve, 15));
+      active -= 1;
+      if (!parentId) return {list:folders, pagination:{has_next:false}};
+      return {
+        list:[{id:`file-${parentId}`, name:`${parentId}.bin`, type:'file', size:1}],
+        pagination:{has_next:false}
+      };
+    }
+  };
+
+  const manifest = await api.buildManifest(fakeApi, 'share-token');
+  assert.equal(manifest.files.length, 12);
+  assert.equal(manifest.folders.length, 12);
+  assert.ok(peak > 1, `expected concurrent folder reads, peak=${peak}`);
+  assert.ok(peak <= 6, `manifest worker bound exceeded, peak=${peak}`);
+});
+
+test('manifest progress is throttled and UI has a non-persistent transient path', () => {
+  assert.match(SOURCE, /const MANIFEST_WORKERS = 6;/);
+  assert.match(SOURCE, /const MANIFEST_PROGRESS_INTERVAL_MS = 250;/);
+  assert.match(SOURCE, /const writeTransient =/);
+  assert.match(SOURCE, /buildManifest\(api, token, x => writeTransient/);
+});
 
 test('long sanitized filename collisions keep a hash suffix inside the 140-char limit', () => {
   const {api} = loadRuntime();
@@ -578,13 +612,16 @@ test('verbose status log is collapsed under details while one-line state stays v
   const statusAt = SOURCE.indexOf('id="lf-status" class="status"');
   assert.ok(progressAt > 0 && stateAt > progressAt && moreAt > stateAt && logAt > moreAt && statusAt > logAt);
 
-  const writeAt = SOURCE.indexOf("const write = (text, cls='') => {");
+  const renderAt = SOURCE.indexOf("const renderStatus = (text, cls='') => {");
+  const writeAt = SOURCE.indexOf("const write = (text, cls='') => {", renderAt);
   const manifestAt = SOURCE.indexOf('let manifest = null;', writeAt);
-  assert.ok(writeAt > 0 && manifestAt > writeAt);
+  assert.ok(renderAt > 0 && writeAt > renderAt && manifestAt > writeAt);
+  const renderBlock = SOURCE.slice(renderAt, writeAt);
   const writeBlock = SOURCE.slice(writeAt, manifestAt);
-  assert.match(writeBlock, /stateLine\.textContent =/);
-  assert.match(writeBlock, /stateLine\.className = `state-line \$\{cls\}`;/);
-  assert.match(writeBlock, /if \(cls === 'err'\) \{\s*moreDetails\.open = true;\s*logDetails\.open = true;\s*\}/);
+  assert.match(renderBlock, /stateLine\.textContent =/);
+  assert.match(renderBlock, /stateLine\.className = `state-line \$\{cls\}`;/);
+  assert.match(renderBlock, /if \(cls === 'err'\) \{\s*moreDetails\.open = true;\s*logDetails\.open = true;\s*\}/);
+  assert.match(writeBlock, /const message = renderStatus\(text, cls\);/);
 });
 
 test('preferred download directory is separate from Queue-specific handles and is preloaded before quick actions enable', () => {

@@ -63,7 +63,7 @@ test('performance summary aggregates phase timing and transfer throughput', () =
     completedAt:2500,
     pipeline:{startedAt:1000, completedAt:2500},
     items:[
-      {state:'DONE', tx:{state:'DONE', download:{telemetry:{transferStartedAt:1100, transferEndedAt:2100, durationMs:1000, transferredBytes:10*MiB, peakBytesPerSecond:20*MiB}}, performance:{
+      {state:'DONE', tx:{state:'DONE', download:{telemetry:{transferStartedAt:1100, transferEndedAt:2100, durationMs:1000, transferredBytes:10*MiB, peakBytesPerSecond:20*MiB, worker:true}}, performance:{
         copy:{durationMs:10}, ownershipReconcile:{durationMs:20}, download:{durationMs:1100},
         verify:{durationMs:5}, delete:{durationMs:7}, total:{durationMs:1142}
       }}},
@@ -77,6 +77,7 @@ test('performance summary aggregates phase timing and transfer throughput', () =
   assert.equal(summary.completedTransactions, 2);
   assert.equal(summary.measuredTransactions, 2);
   assert.equal(summary.transferredBytes, 15*MiB);
+  assert.equal(summary.workerTransfers, 1);
   assert.equal(summary.phaseMs.download, 1700);
   assert.equal(summary.measuredTransferMs, 1500);
   assert.equal(summary.aggregateDownloadMBps, 10);
@@ -89,4 +90,14 @@ test('performance summary aggregates phase timing and transfer throughput', () =
   assert.equal(summary.pipelineEffectiveMBps, 10);
   assert.equal(summary.queueWallMs, 2000);
   assert.equal(summary.queueEffectiveMBps, 7.5);
+});
+
+
+test('background lifecycle and slow API diagnostics are exported through the persistent event log', () => {
+  assert.match(SOURCE, /requestDurationMs >= 5000/);
+  assert.match(SOURCE, /'api-slow'/);
+  assert.match(SOURCE, /'runtime-stall'/);
+  assert.match(SOURCE, /visibilitychange/);
+  assert.match(SOURCE, /addEventListener\?\.\('freeze'/);
+  assert.match(SOURCE, /logLifecycle\('pagehide'/);
 });

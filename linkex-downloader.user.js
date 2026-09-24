@@ -20,6 +20,7 @@
   'use strict';
 
   const VERSION = '1.3.0';
+  const BUILD_TAG = 'stream-delete-worker-journal';
   const API_BASE = 'https://prod.linksvc.xyz';
   const SIGNED_HEADER_PREFIX = 'x-linkinflu-';
   const SIGNATURE_HEADER = 'x-linkinflu-sign';
@@ -311,6 +312,13 @@
     return Number.isFinite(when) ? Math.max(0, when - Date.now()) : null;
   }
 
+  function parseResponseDateMs(responseHeaders) {
+    const line = String(responseHeaders || '').split(/\r?\n/).find(x => /^date\s*:/i.test(x));
+    if (!line) return null;
+    const parsed = Date.parse(line.slice(line.indexOf(':') + 1).trim());
+    return Number.isFinite(parsed) ? parsed : null;
+  }
+
   function isRetryableReadStatus(status) {
     const n = Number(status || 0);
     return n === 429 || (n >= 500 && n <= 599);
@@ -344,7 +352,27 @@
           'X-LinkInflu-Sign': signed.signature
         };
         if (auth && this.token) headers.Authorization = `Bearer ${this.token}`;
+        const requestStartedAt = Date.now();
+        const hiddenAtStart = !!globalThis.document?.hidden;
         res = await gmRequest({method:upperMethod, url:API_BASE + path, headers, data:body === undefined ? undefined : bodyText});
+        const requestEndedAt = Date.now();
+        const requestDurationMs = Math.max(0, requestEndedAt - requestStartedAt);
+        if (requestDurationMs >= 5000) {
+          recordEvent('warn', 'api-slow', `${upperMethod} ${pathname} took ${requestDurationMs} ms`, {
+            method:upperMethod,
+            pathname,
+            attempt,
+            durationMs:requestDurationMs,
+            status:Number(res?.status || 0),
+            hiddenAtStart,
+            hiddenAtEnd:!!globalThis.document?.hidden,
+            visibilityState:String(globalThis.document?.visibilityState || 'unknown'),
+            responseDateLagMs:(() => {
+              const serverDateMs = parseResponseDateMs(res?.responseHeaders);
+              return serverDateMs == null ? null : Math.max(0, requestEndedAt - serverDateMs);
+            })()
+          });
+        }
         if (res.status >= 200 && res.status < 300) break;
         if (attempt >= maxAttempts || !isRetryableReadStatus(res.status)) break;
         const retryAfter = parseRetryAfterMs(res.responseHeaders);
@@ -450,11 +478,30 @@
     return {shareToken:match[1], href:url.href, hostname:url.hostname.toLowerCase()};
   }
 
+  const MANIFEST_WORKERS = 6;
+  const MANIFEST_PROGRESS_INTERVAL_MS = 250;
+
   async function buildManifest(api, shareToken, onProgress = () => {}) {
     const shareInfo = await api.getShare(shareToken);
     const files = [];
     const folders = [];
     const visited = new Set();
+    const folderSlots = createAsyncSemaphore(MANIFEST_WORKERS);
+    let lastProgressAt = 0;
+    let lastPath = '';
+
+    const emitProgress = (type, path, force = false) => {
+      lastPath = path || lastPath;
+      const now = Date.now();
+      if (!force && now - lastProgressAt < MANIFEST_PROGRESS_INTERVAL_MS) return;
+      lastProgressAt = now;
+      onProgress({
+        type,
+        path:lastPath,
+        files:files.length,
+        folders:folders.length
+      });
+    };
 
     async function listAll(parentId) {
       let page = 1;
@@ -471,15 +518,25 @@
     }
 
     async function walk(parentId, remotePath) {
-      const items = await listAll(parentId);
+      const releaseFolderSlot = await folderSlots.acquire();
+      let items;
+      try {
+        items = await listAll(parentId);
+      } finally {
+        releaseFolderSlot();
+      }
+
+      const childWalks = [];
       for (const item of items) {
         const path = remotePath ? `${remotePath}/${item.name}` : item.name;
         if (item.type === 'folder') {
-          if (visited.has(item.id)) throw new LinkexError(`フォルダ循環を検出: ${path}`, {kind:'protocol'});
-          visited.add(item.id);
+          const id = String(item.id);
+          if (visited.has(id)) throw new LinkexError(`フォルダ循環を検出: ${path}`, {kind:'protocol'});
+          visited.add(id);
           folders.push({id:item.id, name:item.name, remotePath:path});
-          onProgress({type:'folder', path, files:files.length});
-          await walk(item.id, path);
+          emitProgress('folder', path);
+          // Start sibling folder reads immediately, but bound actual API concurrency.
+          childWalks.push(walk(item.id, path));
         } else {
           files.push({
             sourceId:item.id,
@@ -489,12 +546,16 @@
             remotePath:path,
             parentId:parentId || null
           });
-          onProgress({type:'file', path, files:files.length});
+          emitProgress('file', path);
         }
       }
+      if (childWalks.length) await Promise.all(childWalks);
     }
 
     await walk(undefined, '');
+    files.sort((a, b) => String(a.remotePath).localeCompare(String(b.remotePath), undefined, {numeric:true, sensitivity:'base'}));
+    folders.sort((a, b) => String(a.remotePath).localeCompare(String(b.remotePath), undefined, {numeric:true, sensitivity:'base'}));
+    emitProgress('done', lastPath, true);
     const totalBytes = files.reduce((sum, f) => sum + (Number.isFinite(f.size) ? f.size : 0), 0);
     return {
       schemaVersion:1,
@@ -508,7 +569,7 @@
     };
   }
 
-  const formatBytes = bytes => {
+    const formatBytes = bytes => {
     const n = Number(bytes || 0);
     const units = ['B','KB','MB','GB','TB'];
     if (n <= 0) return '0 B';
@@ -596,12 +657,13 @@
   async function waitTaskIfPresent(api, copyResult, onStatus) {
     const taskId = copyResult?.task_id ?? copyResult?.taskId ?? null;
     if (!taskId) return {taskId:null, status:'NO_TASK_ID'};
-    let a = 1, b = 1;
+    const delays = [200, 300, 500, 1000, 2000, 3000, 5000, 8000, 13000];
+    let attempt = 0;
     let lastStatus = '';
     const terminalFail = new Set(['failed','size_exceeded','insufficient_storage']);
     const deadline = Date.now() + 120000;
     while (Date.now() < deadline) {
-      await sleep(Math.min(a, 13) * 1000);
+      await sleep(delays[Math.min(attempt, delays.length - 1)]);
       const data = await api.getTask(taskId);
       const task = data?.task ?? (data?.status ? data : null);
       if (!task) throw new LinkexError('Copy task not found', {kind:'protocol', taskId});
@@ -609,14 +671,13 @@
       onStatus?.(status || 'unknown');
       if (status === 'success') return {taskId, status};
       if (terminalFail.has(status)) throw new LinkexError(`Copy task failed: ${status}`, {kind:'copy_task', status, task});
-      if (status !== lastStatus) { a = 1; b = 1; }
-      else { const next = a + b; a = b; b = next; }
+      attempt = status !== lastStatus ? 0 : attempt + 1;
       lastStatus = status;
     }
     throw new LinkexError('Copy task timeout', {kind:'timeout', taskId});
   }
 
-  async function reconcileCopy(api, state, {timeoutMs = 90000, onProgress = () => {}} = {}) {
+    async function reconcileCopy(api, state, {timeoutMs = 90000, onProgress = () => {}} = {}) {
     if (!state?.beforeIds || !state?.source) throw new LinkexError('照合に必要なCOPY_INTENT情報がありません。');
     const before = new Set(state.beforeIds.map(String));
     const deadline = Date.now() + timeoutMs;
@@ -633,11 +694,11 @@
 
       // 安全側: コピー開始後に増えたIDが1件だけで、それが元ファイルと整合するときだけ所有権を確定。
       if (diff.length === 1 && plausible.length === 1) {
-        return {status:'CONFIRMED', item:plausible[0], diff};
+        return {status:'CONFIRMED', item:plausible[0], diff, root};
       }
       // 2件以上増えた時点で、どれが自分のコピーかID差分だけでは証明できない。
       if (diff.length > 1) {
-        return {status:'AMBIGUOUS', diff, plausible};
+        return {status:'AMBIGUOUS', diff, plausible, root};
       }
 
       const delay = delays[Math.min(attempt, delays.length - 1)];
@@ -722,6 +783,7 @@
     let transferredBytes = 0;
     let measuredTransferMs = 0;
     let peakBytesPerSecond = 0;
+    let workerTransfers = 0;
     let firstTransferStartedAt = null;
     let lastTransferEndedAt = null;
 
@@ -737,6 +799,7 @@
         }
       }
       const transfer = tx.download?.telemetry || {};
+      if (transfer.worker === true) workerTransfers += 1;
       const bytes = Number(transfer.transferredBytes || 0);
       const duration = Number(transfer.durationMs || 0);
       const peak = Number(transfer.peakBytesPerSecond || 0);
@@ -783,6 +846,7 @@
       completedTransactions,
       measuredTransactions,
       transferredBytes,
+      workerTransfers,
       phaseMs,
       measuredTransferMs,
       aggregateBytesPerSecond,
@@ -922,10 +986,486 @@
   return saveProbeState({...current, state:'LOCAL_COMMITTED', download:{...(current.download||{}), destId, downloadedBytes:downloaded, expectedCdnBytes:expected, sizeVerified, verificationMethod, streamComplete, sourceMetaSize:Number(state.source?.size || 0), verifiedAt:Date.now(), localName}});
 }
 
-async function downloadOwnedFile({api, state, handle, detachedUrl = null, interruptAfterBytes = null, onForcedInterrupt = null, onProgress = () => {}, onPhase = () => {}}) {
+let detachedDownloadWorkerUrl = null;
+
+  function detachedDownloadWorkerBootstrap() {
+    const mergeChunks = (chunks, totalBytes) => {
+      if (!totalBytes) return new Uint8Array(0);
+      if (chunks.length === 1 && chunks[0]?.byteLength === totalBytes) return chunks[0];
+      const merged = new Uint8Array(totalBytes);
+      let offset = 0;
+      for (const chunk of chunks) {
+        if (!chunk?.byteLength) continue;
+        merged.set(chunk, offset);
+        offset += chunk.byteLength;
+      }
+      if (offset !== totalBytes) throw new Error(`buffer size mismatch: ${offset}/${totalBytes}`);
+      return merged;
+    };
+
+    self.onmessage = async event => {
+      const msg = event?.data || {};
+      if (msg.type !== 'download') return;
+      const {
+        url,
+        handle,
+        checkpointBytes,
+        checkpointIntervalMs,
+        uiIntervalMs,
+        writeBufferBytes
+      } = msg;
+
+      let reader = null;
+      let writable = null;
+      let transferStartedAt = 0;
+      let transferStartBytes = 0;
+      let received = 0;
+      let written = 0;
+      let expectedTotal = null;
+      let verificationMethod = 'stream-eof';
+      let resumed = false;
+      let instantBytesPerSecond = 0;
+      let peakBytesPerSecond = 0;
+      let streamReadySent = false;
+
+      const fail = async (error, fallbackKind = 'network') => {
+        try { await reader?.cancel(); } catch {}
+        try { await writable?.close(); } catch {}
+        self.postMessage({
+          type:'error',
+          error:{
+            message:String(error?.message || error || 'worker download failed'),
+            kind:error?.kind || fallbackKind,
+            status:error?.status ?? null
+          }
+        });
+      };
+
+      try {
+        const localFile = await handle.getFile();
+        let offset = Number(localFile.size || 0);
+        const headers = offset > 0 ? {'Range': `bytes=${offset}-`} : {};
+        const res = await fetch(String(url), {
+          method:'GET',
+          headers,
+          cache:'no-store',
+          credentials:'omit'
+        });
+
+        if (res.status === 403) {
+          const error = new Error('早期DELETE後のsigned URLが403になりました。再COPYで新しいURLを取得して再開してください。');
+          error.kind = 'signed_url_expired';
+          error.status = 403;
+          throw error;
+        }
+        if (res.status === 416) {
+          const error = new Error('Range 416');
+          error.kind = 'range_416';
+          error.status = 416;
+          throw error;
+        }
+        if (!(res.status === 200 || res.status === 206)) {
+          const error = new Error(`CDN HTTP ${res.status}`);
+          error.kind = 'cdn';
+          error.status = res.status;
+          throw error;
+        }
+        if (!res.body) {
+          const error = new Error('CDN response bodyがストリームではありません。');
+          error.kind = 'protocol';
+          throw error;
+        }
+
+        const rawRemaining = res.headers.get('Content-Length');
+        const remaining = rawRemaining === null ? null : Number(rawRemaining);
+        const hasKnownLength = remaining !== null && Number.isFinite(remaining) && remaining >= 0;
+        resumed = offset > 0 && res.status === 206;
+        let base = resumed ? offset : 0;
+        if (offset > 0 && res.status === 200) {
+          offset = 0;
+          base = 0;
+          resumed = false;
+        }
+
+        expectedTotal = hasKnownLength ? base + remaining : null;
+        verificationMethod = hasKnownLength ? 'content-length' : 'stream-eof';
+        transferStartedAt = Date.now();
+        transferStartBytes = base;
+        received = base;
+        written = base;
+        let lastRateAt = transferStartedAt;
+        let lastRateBytes = base;
+        let lastUiAt = 0;
+        let lastCheckpointAt = transferStartedAt;
+        let nextCheckpoint = written + Number(checkpointBytes || 0);
+        let bufferedChunks = [];
+        let bufferedBytes = 0;
+
+        writable = await handle.createWritable({keepExistingData:resumed});
+        if (resumed) await writable.seek(base);
+        else await writable.truncate(0);
+        reader = res.body.getReader();
+
+        const flush = async () => {
+          if (!bufferedBytes) return;
+          const batchBytes = bufferedBytes;
+          const batch = mergeChunks(bufferedChunks, batchBytes);
+          await writable.write(batch);
+          written += batchBytes;
+          bufferedChunks = [];
+          bufferedBytes = 0;
+        };
+
+        self.postMessage({
+          type:'started',
+          transferStartedAt,
+          transferStartBytes,
+          expectedTotal,
+          resumed,
+          verificationMethod
+        });
+
+        while (true) {
+          const {done, value} = await reader.read();
+          if (done) {
+            if (!streamReadySent) {
+              streamReadySent = true;
+              self.postMessage({type:'stream-ready', at:Date.now(), firstChunkBytes:0, eof:true});
+            }
+            break;
+          }
+          if (!value?.byteLength) continue;
+          if (!streamReadySent) {
+            streamReadySent = true;
+            self.postMessage({type:'stream-ready', at:Date.now(), firstChunkBytes:value.byteLength, eof:false});
+          }
+
+          bufferedChunks.push(value);
+          bufferedBytes += value.byteLength;
+          received += value.byteLength;
+          let now = Date.now();
+
+          if (bufferedBytes >= Number(writeBufferBytes || 0) || now - lastCheckpointAt >= Number(checkpointIntervalMs || 0)) {
+            await flush();
+            now = Date.now();
+          }
+
+          const elapsedMs = Math.max(1, now - transferStartedAt);
+          const transferredBytes = Math.max(0, received - transferStartBytes);
+          const averageBytesPerSecond = transferredBytes * 1000 / elapsedMs;
+          if (now - lastRateAt >= 250) {
+            const deltaMs = Math.max(1, now - lastRateAt);
+            instantBytesPerSecond = Math.max(0, received - lastRateBytes) * 1000 / deltaMs;
+            peakBytesPerSecond = Math.max(peakBytesPerSecond, instantBytesPerSecond);
+            lastRateAt = now;
+            lastRateBytes = received;
+          }
+
+          if (written >= nextCheckpoint || now - lastCheckpointAt >= Number(checkpointIntervalMs || 0)) {
+            if (bufferedBytes) {
+              await flush();
+              now = Date.now();
+            }
+            self.postMessage({
+              type:'checkpoint',
+              written,
+              received,
+              expectedTotal,
+              transferStartedAt,
+              transferStartBytes,
+              transferredBytes,
+              elapsedMs:Math.max(1, now - transferStartedAt),
+              averageBytesPerSecond,
+              instantBytesPerSecond,
+              peakBytesPerSecond,
+              resumed,
+              verificationMethod
+            });
+            nextCheckpoint = written + Number(checkpointBytes || 0);
+            lastCheckpointAt = now;
+          }
+
+          if (now - lastUiAt >= Number(uiIntervalMs || 0)) {
+            self.postMessage({
+              type:'progress',
+              written:received,
+              expectedTotal,
+              transferStartedAt,
+              transferStartBytes,
+              transferredBytes,
+              elapsedMs,
+              averageBytesPerSecond,
+              instantBytesPerSecond,
+              peakBytesPerSecond,
+              resumed
+            });
+            lastUiAt = now;
+          }
+        }
+
+        await flush();
+        await writable.close();
+        writable = null;
+        const finalFile = await handle.getFile();
+        const actual = Number(finalFile.size || 0);
+        if (actual !== written) {
+          const error = new Error(`ローカル書き込み検証失敗: file=${actual} / written=${written}`);
+          error.kind = 'verify';
+          throw error;
+        }
+        if (hasKnownLength && actual !== expectedTotal) {
+          const error = new Error(`サイズ検証失敗: local=${actual} / CDN=${expectedTotal}`);
+          error.kind = 'verify';
+          throw error;
+        }
+
+        const transferEndedAt = Date.now();
+        const durationMs = Math.max(0, transferEndedAt - transferStartedAt);
+        const transferredBytes = Math.max(0, actual - transferStartBytes);
+        const averageBytesPerSecond = durationMs > 0 ? transferredBytes * 1000 / durationMs : 0;
+        peakBytesPerSecond = Math.max(peakBytesPerSecond, instantBytesPerSecond, averageBytesPerSecond);
+
+        self.postMessage({
+          type:'done',
+          actual,
+          expectedTotal,
+          verificationMethod,
+          resumed,
+          localName:finalFile.name,
+          telemetry:{
+            transferStartedAt,
+            transferEndedAt,
+            transferStartBytes,
+            transferredBytes,
+            durationMs,
+            averageBytesPerSecond,
+            instantBytesPerSecond,
+            peakBytesPerSecond,
+            resumed,
+            worker:true
+          }
+        });
+      } catch (error) {
+        const workerEnvironmentFsError = ['NotAllowedError','SecurityError','InvalidStateError','DataCloneError'].includes(String(error?.name || ''));
+        await fail(error, workerEnvironmentFsError ? 'worker_filesystem' : 'network');
+      }
+    };
+  }
+
+  function resolveDownloadWorkerConstructor() {
+    if (typeof globalThis.Worker === 'function') return globalThis.Worker;
+    if (typeof unsafeWindow !== 'undefined' && typeof unsafeWindow?.Worker === 'function') return unsafeWindow.Worker;
+    return null;
+  }
+
+  function canUseDetachedDownloadWorker({detachedUrl, interruptAfterBytes}) {
+    return !!detachedUrl &&
+      !(Number.isFinite(Number(interruptAfterBytes)) && Number(interruptAfterBytes) > 0) &&
+      !!resolveDownloadWorkerConstructor() &&
+      typeof globalThis.Blob === 'function' &&
+      typeof globalThis.URL?.createObjectURL === 'function';
+  }
+
+  function getDetachedDownloadWorkerUrl() {
+    if (detachedDownloadWorkerUrl) return detachedDownloadWorkerUrl;
+    if (!canUseDetachedDownloadWorker({detachedUrl:'worker-check', interruptAfterBytes:null})) {
+      throw new LinkexError('Web Workerを利用できません。', {kind:'worker_unavailable'});
+    }
+    const source = `(${detachedDownloadWorkerBootstrap.toString()})();`;
+    detachedDownloadWorkerUrl = URL.createObjectURL(new Blob([source], {type:'text/javascript'}));
+    return detachedDownloadWorkerUrl;
+  }
+
+  async function downloadOwnedFileInWorker({state, handle, detachedUrl, onProgress = () => {}, onPhase = () => {}}) {
+    const destId = state?.confirmedDest?.id;
+    if (!destId) throw new LinkexError('Worker DL対象のdestIdがありません。', {kind:'ownership'});
+    let worker;
+    try {
+      const WorkerCtor = resolveDownloadWorkerConstructor();
+      if (!WorkerCtor) throw new Error('Worker constructor unavailable');
+      worker = new WorkerCtor(getDetachedDownloadWorkerUrl());
+    } catch (e) {
+      throw new LinkexError(`Web Worker起動失敗: ${e?.message || e}`, {kind:'worker_start'});
+    }
+
+    return await new Promise((resolve, reject) => {
+      let settled = false;
+      const finish = (fn, value) => {
+        if (settled) return;
+        settled = true;
+        try { worker.terminate(); } catch {}
+        fn(value);
+      };
+      const fail = error => finish(reject, error instanceof Error ? error : new LinkexError(String(error || 'Worker DL失敗'), {kind:'worker'}));
+
+      worker.onerror = event => {
+        fail(new LinkexError(`Web Worker実行失敗: ${event?.message || 'unknown error'}`, {kind:'worker_start'}));
+      };
+
+      worker.onmessage = event => {
+        void (async () => {
+          const data = event?.data || {};
+          if (data.type === 'started') {
+            assertLease();
+            return;
+          }
+          if (data.type === 'stream-ready') {
+            assertLease();
+            onPhase({
+              phase:'stream-ready',
+              at:Number(data.at || Date.now()),
+              firstChunkBytes:Number(data.firstChunkBytes || 0),
+              eof:!!data.eof,
+              worker:true
+            });
+            return;
+          }
+          if (data.type === 'progress') {
+            assertLease();
+            onProgress({
+              written:Number(data.written || 0),
+              expectedTotal:data.expectedTotal == null ? null : Number(data.expectedTotal),
+              resumed:!!data.resumed,
+              sourceMetaSize:Number(state.source?.size || 0),
+              averageBytesPerSecond:Number(data.averageBytesPerSecond || 0),
+              instantBytesPerSecond:Number(data.instantBytesPerSecond || 0),
+              peakBytesPerSecond:Number(data.peakBytesPerSecond || 0),
+              worker:true
+            });
+            return;
+          }
+          if (data.type === 'checkpoint') {
+            assertLease();
+            const now = Date.now();
+            const current = loadProbeState(state) || state;
+            const transferredBytes = Number(data.transferredBytes || 0);
+            const averageBytesPerSecond = Number(data.averageBytesPerSecond || 0);
+            saveProbeState({
+              ...current,
+              state:'DOWNLOADING',
+              download:{
+                ...(current.download||{}),
+                destId,
+                downloadedBytes:Number(data.written || 0),
+                expectedCdnBytes:data.expectedTotal == null ? null : Number(data.expectedTotal),
+                telemetry:{
+                  transferStartedAt:Number(data.transferStartedAt || 0),
+                  transferStartBytes:Number(data.transferStartBytes || 0),
+                  transferredBytes,
+                  elapsedMs:Number(data.elapsedMs || 0),
+                  averageBytesPerSecond,
+                  averageMBps:bytesPerSecondToMBps(averageBytesPerSecond),
+                  instantBytesPerSecond:Number(data.instantBytesPerSecond || 0),
+                  peakBytesPerSecond:Number(data.peakBytesPerSecond || 0),
+                  resumed:!!data.resumed,
+                  worker:true
+                },
+                updatedAt:now
+              }
+            });
+            return;
+          }
+          if (data.type === 'error') {
+            const details = data.error || {};
+            const partial = await handle.getFile();
+            const current = loadProbeState(state) || state;
+            const pausedAt = Date.now();
+            const telemetry = current.download?.telemetry || {};
+            saveProbeState({
+              ...current,
+              state:'DOWNLOAD_PAUSED',
+              download:{
+                ...(current.download||{}),
+                destId,
+                downloadedBytes:Number(partial.size || 0),
+                expectedCdnBytes:current.download?.expectedCdnBytes ?? null,
+                telemetry:{...telemetry, worker:true, interrupted:true},
+                lastError:String(details.message || 'Worker DL失敗'),
+                updatedAt:pausedAt
+              }
+            });
+            fail(new LinkexError(details.message || 'Worker DL失敗', {
+              kind:details.kind || 'worker',
+              status:details.status ?? null
+            }));
+            return;
+          }
+          if (data.type !== 'done') return;
+
+          assertLease();
+          const transferEndedAt = Number(data.telemetry?.transferEndedAt || Date.now());
+          onPhase({phase:'download-end', at:transferEndedAt});
+          const verifyStartedAt = Date.now();
+          onPhase({phase:'verify-start', at:verifyStartedAt});
+
+          const expectedTotal = data.expectedTotal == null ? null : Number(data.expectedTotal);
+          const actual = Number(data.actual || 0);
+          const verificationMethod = data.verificationMethod || (expectedTotal == null ? 'stream-eof' : 'content-length');
+          const telemetry = {
+            ...(data.telemetry || {}),
+            averageMBps:bytesPerSecondToMBps(Number(data.telemetry?.averageBytesPerSecond || 0)),
+            worker:true
+          };
+          const currentBeforeCommit = loadProbeState(state) || state;
+          saveProbeState({...currentBeforeCommit, download:{...(currentBeforeCommit.download||{}), telemetry}});
+          const done = commitVerifiedDownload(state, {
+            destId,
+            downloadedBytes:actual,
+            expectedCdnBytes:expectedTotal,
+            localName:data.localName || state.source?.name || 'download',
+            verificationMethod
+          });
+          onPhase({phase:'verify-end', at:Date.now()});
+          finish(resolve, {
+            verified:true,
+            resumed:!!data.resumed,
+            totalBytes:expectedTotal ?? actual,
+            localBytes:actual,
+            finalFile:await handle.getFile(),
+            state:done,
+            verificationMethod,
+            metadataSize:Number(state.source?.size || 0),
+            telemetry,
+            worker:true
+          });
+        })().catch(fail);
+      };
+
+      try {
+        worker.postMessage({
+          type:'download',
+          url:String(detachedUrl),
+          handle,
+          checkpointBytes:CHECKPOINT_BYTES,
+          checkpointIntervalMs:CHECKPOINT_INTERVAL_MS,
+          uiIntervalMs:UI_UPDATE_INTERVAL_MS,
+          writeBufferBytes:WRITE_BUFFER_BYTES
+        });
+      } catch (e) {
+        fail(new LinkexError(`WorkerへのFileSystemHandle転送失敗: ${e?.message || e}`, {kind:'worker_start'}));
+      }
+    });
+  }
+
+  async function downloadOwnedFile({api, state, handle, detachedUrl = null, interruptAfterBytes = null, onForcedInterrupt = null, onProgress = () => {}, onPhase = () => {}}) {
     const destId = state?.confirmedDest?.id;
     if (!destId || state.state === 'AMBIGUOUS_COPY') throw new LinkexError('所有権確定済みdestIdがありません。', {kind:'ownership'});
     await ensureHandlePermission(handle);
+
+    if (canUseDetachedDownloadWorker({detachedUrl, interruptAfterBytes})) {
+      try {
+        return await downloadOwnedFileInWorker({state, handle, detachedUrl, onProgress, onPhase});
+      } catch (e) {
+        // CSP / userscript sandbox / handle-clone failures fall back to the proven inline path.
+        // Network/CDN/filesystem errors remain real transfer errors and are handled by the normal Range retry layer.
+        if (!['worker_unavailable','worker_start','worker_filesystem','range_416','network'].includes(e?.kind)) throw e;
+        console.warn('[Linkex Downloader] Worker path unavailable; falling back to inline transfer.', e);
+        recordEvent('warn', 'worker-fallback', 'Web Workerからinline転送へフォールバック', {
+          kind:e?.kind || null,
+          message:e?.message || String(e)
+        });
+      }
+    }
 
     let localFile = await handle.getFile();
     let offset = localFile.size;
@@ -1028,6 +1568,7 @@ async function downloadOwnedFile({api, state, handle, detachedUrl = null, interr
       let received = base;
       let bufferedChunks = [];
       let bufferedBytes = 0;
+      let streamReadySignaled = false;
       let nextCheckpoint = written + CHECKPOINT_BYTES;
       let lastCheckpointAt = transferStartedAt;
       let lastLeaseCheckAt = transferStartedAt;
@@ -1046,8 +1587,18 @@ async function downloadOwnedFile({api, state, handle, detachedUrl = null, interr
       try {
         while (true) {
           const {done, value} = await reader.read();
-          if (done) break;
+          if (done) {
+            if (!streamReadySignaled) {
+              streamReadySignaled = true;
+              onPhase({phase:'stream-ready', at:Date.now(), firstChunkBytes:0, eof:true, worker:false});
+            }
+            break;
+          }
           if (!value?.byteLength) continue;
+          if (!streamReadySignaled) {
+            streamReadySignaled = true;
+            onPhase({phase:'stream-ready', at:Date.now(), firstChunkBytes:value.byteLength, eof:false, worker:false});
+          }
           bufferedChunks.push(value);
           bufferedBytes += value.byteLength;
           received += value.byteLength;
@@ -1189,7 +1740,56 @@ async function downloadOwnedFile({api, state, handle, detachedUrl = null, interr
   return streamEofVerified ? {destId, downloaded, expected:null, verificationMethod:'stream-eof'} : {destId, downloaded, expected};
 }
 
-function sameOwnedIdentity(current, state) {
+const transientSignedUrls = new Map();
+  const transientRootSnapshots = new Map();
+
+  function ownedIdentitySnapshot(item) {
+    if (!item) return null;
+    return {
+      id:item.id,
+      type:item.type,
+      name:item.name,
+      size:Number(item.size || 0),
+      created_at:item.created_at ?? null,
+      createdAt:item.createdAt ?? null,
+      updated_at:item.updated_at ?? null,
+      user_id:item.user_id ?? null
+    };
+  }
+
+  function rememberTransientSignedUrl(operationId, item) {
+    const key = String(operationId || '');
+    const url = String(item?.url || '');
+    if (key && url) transientSignedUrls.set(key, url);
+    return url;
+  }
+
+  function getTransientSignedUrl(operationId) {
+    return transientSignedUrls.get(String(operationId || '')) || '';
+  }
+
+  function clearTransientSignedUrl(operationId) {
+    transientSignedUrls.delete(String(operationId || ''));
+  }
+
+  function rememberTransientRootSnapshot(operationId, root) {
+    const key = String(operationId || '');
+    if (!key || !Array.isArray(root)) return [];
+    const ids = root.map(item => String(item?.id || '')).filter(Boolean);
+    transientRootSnapshots.set(key, ids);
+    return ids;
+  }
+
+  function getTransientRootSnapshot(operationId) {
+    const ids = transientRootSnapshots.get(String(operationId || ''));
+    return Array.isArray(ids) ? [...ids] : null;
+  }
+
+  function clearTransientRootSnapshot(operationId) {
+    transientRootSnapshots.delete(String(operationId || ''));
+  }
+
+  function sameOwnedIdentity(current, state) {
     if (!current || !state?.confirmedDest) return false;
     if (String(current.id) !== String(state.confirmedDest.id)) return false;
     if (String(current.name || '') !== String(state.confirmedDest.name || '')) return false;
@@ -1221,6 +1821,9 @@ function sameOwnedIdentity(current, state) {
   // --- Production full queue: all files, safe sequential transactions ---
   const QUEUE_KEY = 'linkexQueueFullV1';
   const QUEUE_HANDLE_PREFIX = 'queue-full:';
+  const QUEUE_ITEM_JOURNAL_PREFIX = 'linkexQueueItemJournalV1:';
+  const QUEUE_DIRTY_INDEX_PREFIX = 'linkexQueueDirtyIndexesV1:';
+  const QUEUE_FULL_PERSIST_INTERVAL_MS = 5000;
   const LEASE_KEY = 'linkexQueueFullLeaseV1';
   const TAB_ID = `tab-${(globalThis.crypto?.randomUUID?.() || `${Date.now()}-${Math.random().toString(16).slice(2)}`)}`;
   let leaseTimer = null;
@@ -1229,10 +1832,13 @@ function sameOwnedIdentity(current, state) {
   const PIPELINE_DELETE_WORKERS = 1;
   const PIPELINE_MAX_IN_FLIGHT = 3;
   const EARLY_DELETE_DOWNLOAD_WORKERS = 8;
+  const EARLY_DELETE_DELETE_WORKERS = 2;
   // Keep one full worker-pool worth of extra memory-only signed URLs prefetched
   // so COPY / ownership / URL refresh / DELETE can run ahead of active downloads.
   const EARLY_DELETE_MAX_IN_FLIGHT = EARLY_DELETE_DOWNLOAD_WORKERS * 2;
   let queueCommitTail = Promise.resolve();
+  let lastFullQueuePersistAt = 0;
+  const dirtyQueueIndexCache = new Map();
 
   function commitQueueJob(job, mutate = null) {
     const run = queueCommitTail.then(() => {
@@ -1273,21 +1879,34 @@ function sameOwnedIdentity(current, state) {
     const initial = await api.getUsage();
     const initialTotal = Number(initial.total_space || 0);
     const initialUsed = Number(initial.used_space || 0);
+    let knownTotal = initialTotal;
     let availableBytes = initialTotal > 0 ? Math.max(0, initialTotal - initialUsed) : Number.POSITIVE_INFINITY;
 
     return {
       async reserve(bytes) {
         const needed = Math.max(0, Number(bytes || 0));
-        const usage = await api.getUsage();
-        const total = Number(usage.total_space || initialTotal || 0);
-        const used = Number(usage.used_space || 0);
-        if (total > 0 && needed > total) {
-          throw new LinkexError(`単一ファイルがLinkex総容量を超えます: ${formatBytes(needed)} > ${formatBytes(total)}`, {kind:'unfittable'});
+        if (knownTotal > 0 && needed > knownTotal) {
+          throw new LinkexError(`単一ファイルがLinkex総容量を超えます: ${formatBytes(needed)} > ${formatBytes(knownTotal)}`, {kind:'unfittable'});
         }
-        const reportedFree = total > 0 ? Math.max(0, total - used) : availableBytes;
-        const effectiveFree = Math.min(availableBytes, reportedFree);
-        if (needed > effectiveFree) {
-          throw new LinkexError(`Linkex空き容量不足: 必要 ${formatBytes(needed)} / 予約可能 ${formatBytes(effectiveFree)}`, {kind:'capacity'});
+
+        // The local reservation ledger already accounts for our own in-flight temp copies.
+        // Avoid a getUsage round-trip for every file; refresh only when we would otherwise block.
+        if (needed > availableBytes && Number.isFinite(availableBytes)) {
+          const usage = await api.getUsage();
+          const total = Number(usage.total_space || knownTotal || 0);
+          const used = Number(usage.used_space || 0);
+          if (total > 0) {
+            knownTotal = total;
+            if (needed > total) {
+              throw new LinkexError(`単一ファイルがLinkex総容量を超えます: ${formatBytes(needed)} > ${formatBytes(total)}`, {kind:'unfittable'});
+            }
+            const reportedFree = Math.max(0, total - used);
+            availableBytes = Math.min(availableBytes, reportedFree);
+          }
+        }
+
+        if (needed > availableBytes) {
+          throw new LinkexError(`Linkex空き容量不足: 必要 ${formatBytes(needed)} / 予約可能 ${formatBytes(availableBytes)}`, {kind:'capacity'});
         }
         availableBytes -= needed;
         return {bytes:needed, released:false};
@@ -1297,24 +1916,122 @@ function sameOwnedIdentity(current, state) {
         if (token?.released) return;
         const bytes = Math.max(0, Number(token ? token.bytes : reservationOrBytes || 0));
         if (token) token.released = true;
-        availableBytes = initialTotal > 0
-          ? Math.min(initialTotal, availableBytes + bytes)
+        availableBytes = knownTotal > 0
+          ? Math.min(knownTotal, availableBytes + bytes)
           : availableBytes + bytes;
       },
       snapshot() {
-        return {totalBytes:initialTotal, availableBytes};
+        return {totalBytes:knownTotal, availableBytes};
       }
     };
   }
 
+    function queueItemJournalKey(job, index) {
+    const jobId = String(job?.jobId || '');
+    return jobId ? `${QUEUE_ITEM_JOURNAL_PREFIX}${jobId}:${Number(index)}` : null;
+  }
+
+  function queueDirtyIndexKey(job) {
+    const jobId = String(job?.jobId || '');
+    return jobId ? `${QUEUE_DIRTY_INDEX_PREFIX}${jobId}` : null;
+  }
+
+  function loadDirtyQueueIndexes(job) {
+    const jobId = String(job?.jobId || '');
+    const key = queueDirtyIndexKey(job);
+    if (!jobId || !key) return [];
+    const cached = dirtyQueueIndexCache.get(jobId);
+    if (cached) return [...cached];
+    const value = GM_getValue(key, []);
+    const normalized = Array.isArray(value)
+      ? value.map(Number).filter(x => Number.isInteger(x) && x >= 0 && x < (job?.items?.length || 0))
+      : [];
+    const set = new Set(normalized);
+    dirtyQueueIndexCache.set(jobId, set);
+    return [...set];
+  }
+
+  function saveQueueItemJournal(job, index) {
+    const item = job?.items?.[index];
+    const key = queueItemJournalKey(job, index);
+    const dirtyKey = queueDirtyIndexKey(job);
+    if (!item || !key || !dirtyKey) return null;
+    const entry = {
+      schemaVersion:1,
+      jobId:job.jobId,
+      index:Number(index),
+      itemState:item.state || null,
+      tx:item.tx || null,
+      attempts:item.attempts ? {...item.attempts} : null,
+      lastError:item.lastError || null,
+      // Must be strictly newer than the last full Queue snapshot even when both writes land
+      // in the same millisecond, otherwise crash recovery could ignore this journal entry.
+      updatedAt:Math.max(Date.now(), Number(job.updatedAt || 0) + 1)
+    };
+    GM_setValue(key, entry);
+    const jobId = String(job.jobId || '');
+    let dirty = dirtyQueueIndexCache.get(jobId);
+    if (!dirty) {
+      dirty = new Set(loadDirtyQueueIndexes(job));
+      dirtyQueueIndexCache.set(jobId, dirty);
+    }
+    const numericIndex = Number(index);
+    if (!dirty.has(numericIndex)) {
+      dirty.add(numericIndex);
+      GM_setValue(dirtyKey, [...dirty]);
+    }
+    return entry;
+  }
+
+  function applyQueueItemJournals(job) {
+    if (!job?.jobId || !Array.isArray(job.items)) return job;
+    const queueSavedAt = Number(job.updatedAt || 0);
+    for (const index of loadDirtyQueueIndexes(job)) {
+      const key = queueItemJournalKey(job, index);
+      const entry = key ? GM_getValue(key, null) : null;
+      if (!entry || entry.jobId !== job.jobId || Number(entry.index) !== index) continue;
+      if (Number(entry.updatedAt || 0) <= queueSavedAt) continue;
+      const item = job.items[index];
+      if (!item) continue;
+      item.state = entry.itemState || item.state;
+      item.tx = entry.tx ?? item.tx;
+      item.attempts = entry.attempts ? {...entry.attempts} : item.attempts;
+      item.lastError = entry.lastError ?? item.lastError;
+      job.currentIndex = Math.max(Number(job.currentIndex || 0), index);
+    }
+    return job;
+  }
+
+  function clearQueueItemJournals(job) {
+    if (!job?.jobId) return;
+    for (const index of loadDirtyQueueIndexes(job)) {
+      const key = queueItemJournalKey(job, index);
+      if (key) GM_setValue(key, null);
+    }
+    const dirtyKey = queueDirtyIndexKey(job);
+    if (dirtyKey) GM_setValue(dirtyKey, null);
+    dirtyQueueIndexCache.delete(String(job.jobId || ''));
+  }
+
   function loadQueueJob() {
     const value = GM_getValue(QUEUE_KEY, null);
-    return value && typeof value === 'object' ? value : null;
+    if (!value || typeof value !== 'object') return null;
+    return applyQueueItemJournals(value);
   }
 
   function saveQueueJob(job) {
     job.updatedAt = Date.now();
     GM_setValue(QUEUE_KEY, job);
+    lastFullQueuePersistAt = job.updatedAt;
+    clearQueueItemJournals(job);
+    return job;
+  }
+
+  function saveQueueJobLazy(job) {
+    if (!job) return job;
+    if (Date.now() - lastFullQueuePersistAt >= QUEUE_FULL_PERSIST_INTERVAL_MS) {
+      return saveQueueJob(job);
+    }
     return job;
   }
 
@@ -1512,8 +2229,11 @@ function sameOwnedIdentity(current, state) {
     const item = job.items[index];
     item.tx = tx;
     if (itemState) item.state = itemState;
-    saveQueueJob(job);
+    // The operation-scoped probe and item journal are the durable write-ahead log.
+    // Avoid serializing the entire multi-thousand-item Queue on every phase transition.
     saveProbeState(tx);
+    saveQueueItemJournal(job, index);
+    saveQueueJobLazy(job);
     return tx;
   }
 
@@ -1522,7 +2242,8 @@ function sameOwnedIdentity(current, state) {
     const tx = loadProbeState(current);
     if (tx && tx.operationId === current?.operationId) {
       job.items[index].tx = tx;
-      saveQueueJob(job);
+      saveQueueItemJournal(job, index);
+      saveQueueJobLazy(job);
     }
     return job.items[index].tx;
   }
@@ -1612,7 +2333,7 @@ function sameOwnedIdentity(current, state) {
     leaseLost = false;
   }
 
-  async function ensureCopyOwned(api, job, index, onStatus, {capacityReserved = false} = {}) {
+  async function ensureCopyOwned(api, job, index, onStatus, {capacityReserved = false, beforeIdsHint = null} = {}) {
     assertLease();
     const item = job.items[index];
     let tx = item.tx;
@@ -1639,7 +2360,10 @@ function sameOwnedIdentity(current, state) {
       }
 
       assertLease();
-      const beforeRoot = await listAllRoot(api);
+      const hintedBeforeIds = Array.isArray(beforeIdsHint)
+        ? [...new Set(beforeIdsHint.map(String).filter(Boolean))]
+        : null;
+      const beforeRoot = hintedBeforeIds ? null : await listAllRoot(api);
       const transactionStartedAt = Date.now();
       tx = {
         schemaVersion:1,
@@ -1647,7 +2371,7 @@ function sameOwnedIdentity(current, state) {
         state:'COPY_INTENT',
         shareToken:job.shareToken,
         source:item.source,
-        beforeIds:beforeRoot.map(x => String(x.id)),
+        beforeIds:hintedBeforeIds || beforeRoot.map(x => String(x.id)),
         startedAt:transactionStartedAt,
         performance:{schemaVersion:PERFORMANCE_SCHEMA_VERSION, total:{startedAt:transactionStartedAt}},
         queueJobId:job.jobId,
@@ -1697,7 +2421,9 @@ function sameOwnedIdentity(current, state) {
       const rec = await reconcileCopy(api, tx, {timeoutMs:90000, onProgress:x => onStatus?.(`コピー照合中 [${index+1}/${job.items.length}]…\n${item.source.remotePath}\n差分: ${x.diff?.length ?? 0}\n候補: ${x.plausible?.length ?? 0}`)});
       tx = perfPhaseEnd(tx, 'ownershipReconcile', Date.now(), {outcome:rec.status});
       if (rec.status === 'CONFIRMED' || rec.status === 'UNIQUE') {
-        tx = {...tx, state:'OWNERSHIP_CONFIRMED', confirmedDest:rec.item, reconciledAt:Date.now()};
+        rememberTransientSignedUrl(tx.operationId, rec.item);
+        rememberTransientRootSnapshot(tx.operationId, rec.root);
+        tx = {...tx, state:'OWNERSHIP_CONFIRMED', confirmedDest:ownedIdentitySnapshot(rec.item), reconciledAt:Date.now()};
         persistItemTx(job, index, tx, 'COPIED');
       } else if (rec.status === 'AMBIGUOUS') {
         tx = {...tx, state:'AMBIGUOUS_COPY', candidates:rec.diff, reconciledAt:Date.now()};
@@ -1803,42 +2529,85 @@ function sameOwnedIdentity(current, state) {
     return {destId};
   }
 
+  function earlyDeletePhase(tx) {
+    const nested = String(tx?.delete?.phase || '').toUpperCase();
+    if (nested) return nested;
+    if (tx?.delete?.confirmedAbsentAt || tx?.earlyDelete?.confirmedAbsentAt) return 'CONFIRMED';
+    if (tx?.state === 'EARLY_DELETE_INTENT') return 'INTENT';
+    if (tx?.state === 'EARLY_DELETE_REQUEST_SENT') return 'REQUEST_SENT';
+    if (tx?.state === 'EARLY_DELETE_UNCERTAIN') return 'UNCERTAIN';
+    if (tx?.state === 'EARLY_DELETE_CONFIRMED') return 'CONFIRMED';
+    return 'NONE';
+  }
+
+  function needsEarlyDeleteReconcile(tx) {
+    return ['INTENT','REQUEST_SENT','UNCERTAIN'].includes(earlyDeletePhase(tx));
+  }
+
+  function latestItemTx(item, fallback = null) {
+    return loadProbeState(item?.tx || fallback) || item?.tx || fallback;
+  }
+
   async function deleteOwnedTempForEarlyDeletePipeline(api, job, index, onStatus) {
     assertLease();
     const item = job.items[index];
-    let tx = item.tx;
+    let tx = latestItemTx(item);
     const guard = assertEarlyDeletePipelineGuards(job, index, tx);
+    const phase = earlyDeletePhase(tx);
 
-    if (['EARLY_DELETE_INTENT','EARLY_DELETE_REQUEST_SENT','EARLY_DELETE_UNCERTAIN'].includes(tx.state)) {
+    if (phase === 'CONFIRMED') return tx;
+
+    // Once DELETE intent has been persisted, never replay the POST after an interruption.
+    // Only reconcile current existence. This preserves the existing fail-closed behavior.
+    if (['INTENT','REQUEST_SENT','UNCERTAIN'].includes(phase)) {
       onStatus?.(`早期DELETE結果照合 [${index+1}/${job.items.length}]\n${item.source.remotePath}\nDELETE POST再送: NO`);
       const rec = await reconcileDelete(api, tx, {
         timeoutMs:30000,
         onProgress:x => onStatus?.(`早期DELETE照合 [${index+1}/${job.items.length}]\n存在: ${x.exists ? 'YES' : 'NO'}\n再送: NO`)
       });
+      tx = latestItemTx(item, tx);
       if (rec.status === 'ABSENT') {
+        const confirmedAt = Date.now();
+        const legacyDeleteState = ['EARLY_DELETE_INTENT','EARLY_DELETE_REQUEST_SENT','EARLY_DELETE_UNCERTAIN'].includes(tx.state);
+        tx = perfPhaseEnd(tx, 'delete', confirmedAt, {outcome:'early-confirmed-absent'});
         tx = {
           ...tx,
-          state:'EARLY_DELETE_CONFIRMED',
-          earlyDelete:{...(tx.earlyDelete||{}), confirmedAbsentAt:Date.now()},
-          delete:{...(tx.delete||{}), destId:guard.destId, confirmedAbsentAt:Date.now(), experimentalEarlyDelete:true}
+          state:legacyDeleteState ? 'EARLY_DELETE_CONFIRMED' : tx.state,
+          earlyDelete:{...(tx.earlyDelete||{}), confirmedAbsentAt:confirmedAt},
+          delete:{
+            ...(tx.delete||{}),
+            phase:'CONFIRMED',
+            destId:guard.destId,
+            confirmedAbsentAt:confirmedAt,
+            experimentalEarlyDelete:true
+          }
         };
-        tx = perfPhaseEnd(tx, 'delete', Date.now(), {outcome:'early-confirmed-absent'});
-        persistItemTx(job, index, tx, 'EARLY_DELETE_CONFIRMED');
+        persistItemTx(job, index, tx);
         return tx;
       }
-      tx = {...tx, state:'EARLY_DELETE_UNCERTAIN', earlyDelete:{...(tx.earlyDelete||{}), lastSeenAt:Date.now()}};
+      tx = {
+        ...tx,
+        state:['EARLY_DELETE_INTENT','EARLY_DELETE_REQUEST_SENT','EARLY_DELETE_UNCERTAIN'].includes(tx.state)
+          ? 'EARLY_DELETE_UNCERTAIN'
+          : tx.state,
+        earlyDelete:{...(tx.earlyDelete||{}), lastSeenAt:Date.now()},
+        delete:{...(tx.delete||{}), phase:'UNCERTAIN', destId:guard.destId}
+      };
       persistItemTx(job, index, tx, 'BLOCKED');
       throw new LinkexError('早期DELETE結果が不明でdestIdがまだ存在します。安全のためDELETEを再送しません。', {kind:'early_delete_uncertain'});
     }
 
-    if (tx.state !== 'OWNERSHIP_CONFIRMED') {
-      throw new LinkexError(`早期DELETE並列DL: 所有確定直後以外ではDELETEを開始できません (state=${tx.state})`, {kind:'early_delete_guard'});
+    if (!['OWNERSHIP_CONFIRMED','DOWNLOAD_READY','DOWNLOADING','DOWNLOAD_PAUSED','VERIFY_FAILED','LOCAL_COMMITTED'].includes(tx.state)) {
+      throw new LinkexError(`早期DELETE並列DL: DELETE開始可能状態ではありません (state=${tx.state})`, {kind:'early_delete_guard'});
     }
 
+    // The stream may already be active here. Re-read the exact owned destId immediately before
+    // DELETE so the destructive guard is at least as strict as the old sequential path.
     const current = await findOwnedRootFile(api, guard.destId);
     if (!current) {
       throw new LinkexError('早期DELETE前にdestIdが消失しました。外部変更の可能性があるため停止します。', {kind:'early_delete_external_change'});
     }
+    tx = latestItemTx(item, tx);
     if (!sameOwnedIdentity(current, tx)) {
       throw new LinkexError('早期DELETE拒否: 現在のdestId identityが所有権確定時と一致しません。', {kind:'early_delete_guard'});
     }
@@ -1846,37 +2615,64 @@ function sameOwnedIdentity(current, state) {
     tx = perfPhaseStart(tx, 'delete');
     tx = {
       ...tx,
-      state:'EARLY_DELETE_INTENT',
-      earlyDelete:{...(tx.earlyDelete||{}), intendedAt:Date.now(), signedUrlInMemoryOnly:true},
-      delete:{destId:guard.destId, intendedAt:Date.now(), requestSent:false, experimentalEarlyDelete:true}
+      earlyDelete:{
+        ...(tx.earlyDelete||{}),
+        intendedAt:Date.now(),
+        signedUrlInMemoryOnly:true,
+        streamOpenedBeforeDelete:true
+      },
+      delete:{
+        ...(tx.delete||{}),
+        phase:'INTENT',
+        destId:guard.destId,
+        intendedAt:Date.now(),
+        requestSent:false,
+        experimentalEarlyDelete:true
+      }
     };
-    persistItemTx(job, index, tx, 'EARLY_DELETE_INTENT');
-    onStatus?.(`EARLY DELETE [${index+1}/${job.items.length}]\n${item.source.remotePath}\ndestId: ${guard.destId}\n所有確認済み一時コピー1件だけ削除します…`);
+    persistItemTx(job, index, tx);
+    onStatus?.(`EARLY DELETE (stream active) [${index+1}/${job.items.length}]\n${item.source.remotePath}\ndestId: ${guard.destId}\nDL stream開始済み。所有確認済み一時コピー1件だけ削除します…`);
 
     try {
       assertLease();
       const result = await api.deleteSingleFile(guard.destId);
+      tx = latestItemTx(item, tx);
       tx = {
         ...tx,
-        state:'EARLY_DELETE_REQUEST_SENT',
-        delete:{...(tx.delete||{}), requestSent:true, response:result ?? {}, requestCompletedAt:Date.now()}
+        delete:{
+          ...(tx.delete||{}),
+          phase:'REQUEST_SENT',
+          destId:guard.destId,
+          requestSent:true,
+          response:result ?? {},
+          requestCompletedAt:Date.now(),
+          experimentalEarlyDelete:true
+        }
       };
-      persistItemTx(job, index, tx, 'EARLY_DELETE_REQUEST_SENT');
+      persistItemTx(job, index, tx);
     } catch (e) {
+      tx = latestItemTx(item, tx);
       tx = {
         ...tx,
-        state:'EARLY_DELETE_UNCERTAIN',
-        delete:{...(tx.delete||{}), requestSent:true, requestError:{message:e?.message || String(e), kind:e?.kind || null}, requestFailedAt:Date.now()}
+        delete:{
+          ...(tx.delete||{}),
+          phase:'UNCERTAIN',
+          destId:guard.destId,
+          requestSent:true,
+          requestError:{message:e?.message || String(e), kind:e?.kind || null},
+          requestFailedAt:Date.now(),
+          experimentalEarlyDelete:true
+        }
       };
-      persistItemTx(job, index, tx, 'EARLY_DELETE_UNCERTAIN');
+      persistItemTx(job, index, tx);
     }
     return await deleteOwnedTempForEarlyDeletePipeline(api, job, index, onStatus);
   }
 
   function canRearmEarlyDeleteItem(item) {
     const tx = item?.tx;
-    if (!tx || tx.state === 'DONE') return false;
-    return !!tx.delete?.confirmedAbsentAt && ['EARLY_DELETE_CONFIRMED','DOWNLOAD_READY','DOWNLOADING','DOWNLOAD_PAUSED','VERIFY_FAILED','LOCAL_COMMITTED'].includes(tx.state);
+    if (!tx || tx.state === 'DONE' || tx.state === 'LOCAL_COMMITTED') return false;
+    return !!tx.delete?.confirmedAbsentAt && ['EARLY_DELETE_CONFIRMED','DOWNLOAD_READY','DOWNLOADING','DOWNLOAD_PAUSED','VERIFY_FAILED'].includes(tx.state);
   }
 
   function rearmEarlyDeleteItem(job, index) {
@@ -1903,13 +2699,13 @@ function sameOwnedIdentity(current, state) {
     return true;
   }
 
-  async function ensureDetachedDownloaded(api, job, index, queueRoot, signedUrl, onStatus) {
+  async function ensureDetachedDownloaded(api, job, index, queueRoot, signedUrl, onStatus, {onStreamReady = null} = {}) {
     assertLease();
     const item = job.items[index];
     let tx = item.tx;
     if (tx.state === 'LOCAL_COMMITTED' || tx.state === 'DONE') return tx;
-    if (tx.state !== 'EARLY_DELETE_CONFIRMED') {
-      throw new LinkexError(`早期DELETE確認前にはDLを開始できません (state=${tx.state})`, {kind:'early_delete_state'});
+    if (!['OWNERSHIP_CONFIRMED','EARLY_DELETE_CONFIRMED','DOWNLOAD_READY','DOWNLOADING','DOWNLOAD_PAUSED','VERIFY_FAILED'].includes(tx.state)) {
+      throw new LinkexError(`DL開始可能状態ではありません (state=${tx.state})`, {kind:'early_delete_state'});
     }
     if (!signedUrl) throw new LinkexError('signed URLがメモリ上にありません。再COPYが必要です。', {kind:'signed_url_missing'});
 
@@ -1925,7 +2721,9 @@ function sameOwnedIdentity(current, state) {
         localName:local.name,
         downloadedBytes:local.size,
         startedAt:tx.download?.startedAt || Date.now(),
-        detachedAfterDelete:true,
+        detachedAfterDelete:!!tx.delete?.confirmedAbsentAt,
+        deleteParallel:true,
+        streamBeforeDelete:true,
         signedUrlPersisted:false,
         updatedAt:Date.now()
       }
@@ -1937,7 +2735,8 @@ function sameOwnedIdentity(current, state) {
     for (let attempt = 1; attempt <= 3; attempt++) {
       assertLease();
       item.attempts.download = (item.attempts.download || 0) + 1;
-      saveQueueJob(job);
+      saveQueueItemJournal(job, index);
+      saveQueueJobLazy(job);
       try {
         onStatus?.(`EARLY-DELETE DOWNLOADING [${index+1}/${job.items.length}]\n${item.source.remotePath}\nattempt ${attempt} / pool ${EARLY_DELETE_DOWNLOAD_WORKERS}`);
         let downloadEndedAt = null;
@@ -1981,9 +2780,13 @@ function sameOwnedIdentity(current, state) {
           onProgress:x => {
             const pct = x.expectedTotal ? Math.min(100, x.written / x.expectedTotal * 100) : null;
             const rateText = x.averageBytesPerSecond > 0 ? `\n平均 ${formatTransferRate(x.averageBytesPerSecond)} / 瞬間 ${formatTransferRate(x.instantBytesPerSecond)}` : '';
-            onStatus?.(`EARLY-DELETE DOWNLOADING [${index+1}/${job.items.length}]\n${item.source.remotePath}\n${formatBytes(x.written)}${x.expectedTotal ? ` / ${formatBytes(x.expectedTotal)}` : ''}${pct == null ? '' : ` (${pct.toFixed(1)}%)`}${rateText}\n${x.resumed ? 'Range resume' : 'full/restart'} · temp already deleted`);
+            const engineText = x.worker ? ' · Web Worker' : ' · inline';
+            const liveTx = latestItemTx(item, tx);
+            const deleteText = liveTx?.delete?.confirmedAbsentAt ? 'temp deleted' : 'DELETE parallel';
+            onStatus?.(`EARLY-DELETE DOWNLOADING [${index+1}/${job.items.length}]\n${item.source.remotePath}\n${formatBytes(x.written)}${x.expectedTotal ? ` / ${formatBytes(x.expectedTotal)}` : ''}${pct == null ? '' : ` (${pct.toFixed(1)}%)`}${rateText}\n${x.resumed ? 'Range resume' : 'full/restart'}${engineText} · ${deleteText}`);
           },
           onPhase:x => {
+            if (x?.phase === 'stream-ready' && typeof onStreamReady === 'function') onStreamReady(x);
             if (x?.phase === 'download-end') downloadEndedAt = Number(x.at || Date.now());
             if (x?.phase === 'verify-start') verifyStartedAt = Number(x.at || Date.now());
             if (x?.phase === 'verify-end') verifyEndedAt = Number(x.at || Date.now());
@@ -2000,7 +2803,9 @@ function sameOwnedIdentity(current, state) {
           peakBytesPerSecond:Number(t.peakBytesPerSecond || 0),
           resumed:!!result?.resumed,
           attempts:Number(item.attempts.download || 0),
-          detachedAfterDelete:true
+          detachedAfterDelete:!!tx.delete?.confirmedAbsentAt,
+          deleteParallel:true,
+          streamBeforeDelete:true
         });
         if (verifyStartedAt) {
           const end = verifyEndedAt || Date.now();
@@ -2011,7 +2816,7 @@ function sameOwnedIdentity(current, state) {
             verificationMethod:result?.verificationMethod || tx.download?.verificationMethod || null
           });
         }
-        tx = {...tx, download:{...(tx.download||{}), telemetry:t, detachedAfterDelete:true, signedUrlPersisted:false}};
+        tx = {...tx, download:{...(tx.download||{}), telemetry:t, detachedAfterDelete:!!tx.delete?.confirmedAbsentAt, deleteParallel:true, streamBeforeDelete:true, signedUrlPersisted:false}};
         persistItemTx(job, index, tx, 'LOCAL_COMMITTED');
 
         if (job.experimental?.recoveryProbe?.enabled && job.experimental.recoveryProbe.interruptTriggeredAt) {
@@ -2080,9 +2885,11 @@ function sameOwnedIdentity(current, state) {
     if (!creds) throw new LinkexError(credentialBootstrapMessage(), {kind:'auth'});
     const api = new LinkexApi({token:creds.token});
     const downloadSlots = createAsyncSemaphore(EARLY_DELETE_DOWNLOAD_WORKERS);
+    const deleteSlots = createAsyncSemaphore(EARLY_DELETE_DELETE_WORKERS);
     const inFlightSlots = createAsyncSemaphore(EARLY_DELETE_MAX_IN_FLIGHT);
     const capacity = await createCapacityReservation(api);
     const tasks = new Set();
+    let rootBaselineIds = null;
     let fatalError = null;
     let fatalIndex = null;
     let pauseRequested = false;
@@ -2093,7 +2900,7 @@ function sameOwnedIdentity(current, state) {
       schemaVersion:1,
       mode:'early-delete',
       copyWorkers:1,
-      earlyDeleteWorkers:1,
+      earlyDeleteWorkers:EARLY_DELETE_DELETE_WORKERS,
       downloadWorkers:EARLY_DELETE_DOWNLOAD_WORKERS,
       maxInFlight:EARLY_DELETE_MAX_IN_FLIGHT,
       signedUrlPersistence:false,
@@ -2124,27 +2931,97 @@ function sameOwnedIdentity(current, state) {
       onStatus?.(`${kind === 'unfittable' ? '単一ファイル上限' : '現在のCOPY可能容量不足'}でスキップ [${index+1}/${job.items.length}]\n${item.source.remotePath}\n次へ進みます。`);
     };
 
-    const launchDetachedDownload = (index, signedUrl, releaseInFlight) => {
+    const launchEarlyDeleteTransaction = (index, signedUrl, releaseInFlight, reservation) => {
       const item = job.items[index];
       const task = (async () => {
-        const releaseDownload = await downloadSlots.acquire();
+        let releaseDownload = null;
+        let releaseDelete = null;
+        let capacityReleased = false;
+        let downloadSettled = null;
         try {
+          releaseDownload = await downloadSlots.acquire();
           assertLease();
-          await ensureDetachedDownloaded(api, job, index, queueRoot, signedUrl, onStatus);
-          await commitQueueJob(job, () => {
-            let tx = item.tx;
-            if (tx.state !== 'LOCAL_COMMITTED') throw new LinkexError(`完了前state異常: ${tx.state}`, {kind:'state'});
-            tx = {...tx, state:'DONE'};
-            tx = perfPhaseEnd(tx, 'total', Date.now(), {outcome:'done-early-delete'});
-            item.tx = tx;
-            item.state = 'DONE';
-            compactCompletedItem(job, item);
-          });
-          onStatus?.(`完了 [${index+1}/${job.items.length}]\n${item.source.remotePath}\nローカル検証済み / Linkex一時コピーはDL前に削除確認済み`);
+
+          let resolveStreamReady;
+          const streamReady = new Promise(resolve => { resolveStreamReady = resolve; });
+          const downloadPromise = ensureDetachedDownloaded(
+            api,
+            job,
+            index,
+            queueRoot,
+            signedUrl,
+            onStatus,
+            {onStreamReady:info => resolveStreamReady?.(info || {at:Date.now()})}
+          );
+          downloadSettled = downloadPromise.then(
+            value => ({ok:true, value}),
+            error => ({ok:false, error})
+          );
+
+          // Destructive action barrier: do not DELETE until the CDN response has yielded its first
+          // non-empty chunk (or a legitimate zero-byte EOF). This mirrors the proven probe sequence.
+          const first = await Promise.race([
+            streamReady.then(info => ({kind:'stream-ready', info})),
+            downloadSettled.then(result => ({kind:'download-settled', result}))
+          ]);
+          if (first.kind === 'download-settled' && !first.result.ok) throw first.result.error;
+
+          let deleteError = null;
+          releaseDelete = await deleteSlots.acquire();
+          try {
+            assertLease();
+            await deleteOwnedTempForEarlyDeletePipeline(api, job, index, onStatus);
+          } catch (e) {
+            deleteError = e;
+          } finally {
+            releaseDelete();
+            releaseDelete = null;
+          }
+
+          const latestAfterDelete = latestItemTx(item);
+          if (latestAfterDelete?.delete?.confirmedAbsentAt) {
+            capacity.release(reservation);
+            capacityReleased = true;
+          }
+
+          // Even when DELETE becomes uncertain, let the already-open local transfer settle so
+          // a successfully verified local file is not discarded. Resume will reconcile DELETE only.
+          const downloadResult = await downloadSettled;
+          if (!downloadResult.ok) throw downloadResult.error;
+          if (deleteError) throw deleteError;
+
+          let completedTx = latestItemTx(item) || item.tx;
+          if (completedTx.state !== 'LOCAL_COMMITTED') throw new LinkexError(`完了前state異常: ${completedTx.state}`, {kind:'state'});
+          if (!completedTx.delete?.confirmedAbsentAt) throw new LinkexError('完了前にLinkex一時コピー削除が未確認です。', {kind:'early_delete_state'});
+          completedTx = {
+            ...completedTx,
+            state:'DONE',
+            download:{
+              ...(completedTx.download||{}),
+              detachedAfterDelete:true,
+              deleteParallel:true,
+              streamBeforeDelete:true
+            }
+          };
+          completedTx = perfPhaseEnd(completedTx, 'total', Date.now(), {outcome:'done-stream-before-delete'});
+          item.tx = completedTx;
+          item.state = 'DONE';
+          compactCompletedItem(job, item);
+          saveQueueItemJournal(job, index);
+          saveQueueJobLazy(job);
+          onStatus?.(`完了 [${index+1}/${job.items.length}]\n${item.source.remotePath}\nDL stream先行 + DELETE並行 / ローカル検証済み / 一時コピー削除確認済み`);
         } catch (e) {
+          if (downloadSettled) {
+            try { await downloadSettled; } catch {}
+          }
           await markFatal(index, e);
         } finally {
-          releaseDownload();
+          if (releaseDelete) releaseDelete();
+          if (releaseDownload) releaseDownload();
+          if (!capacityReleased && latestItemTx(item)?.delete?.confirmedAbsentAt) {
+            capacity.release(reservation);
+            capacityReleased = true;
+          }
           releaseInFlight();
         }
       })();
@@ -2158,30 +3035,47 @@ function sameOwnedIdentity(current, state) {
       if (fatalError) break;
       if (job.stopRequested) { pauseRequested = true; break; }
 
-      await commitQueueJob(job, () => { job.currentIndex = i; });
+      job.currentIndex = i;
+      saveQueueJobLazy(job);
       const item = job.items[i];
+      if (item.tx) syncTxFromProbe(job, i);
       if (item.state === 'DONE' || item.tx?.state === 'DONE') {
         compactCompletedItem(job, item);
-        saveQueueJob(job);
+        saveQueueItemJournal(job, i);
+        saveQueueJobLazy(job);
         continue;
       }
       if (['SKIPPED_CAPACITY','UNFITTABLE'].includes(item.state)) continue;
 
-      if (canRearmEarlyDeleteItem(item)) {
-        onStatus?.(`再開準備 [${i+1}/${job.items.length}]\n前回の一時コピーは削除済み。新しいCOPY/URLを取得してローカルpartialへRange再開します。`);
-        rearmEarlyDeleteItem(job, i);
-      }
-      if (item.tx && ['EARLY_DELETE_INTENT','EARLY_DELETE_REQUEST_SENT','EARLY_DELETE_UNCERTAIN'].includes(item.tx.state)) {
-        // DELETE uncertainty must be reconciled before any new COPY.
+      if (item.tx && needsEarlyDeleteReconcile(item.tx)) {
+        // DELETE intent/request uncertainty is reconciled first and the POST is never replayed.
         try {
           await deleteOwnedTempForEarlyDeletePipeline(api, job, i, onStatus);
-          rearmEarlyDeleteItem(job, i);
+          item.tx = latestItemTx(item);
         } catch (e) {
           await markFatal(i, e);
           break;
         }
       }
-      if (item.tx && !['COPY_INTENT','COPY_REQUEST_SENT','NEEDS_RECONCILE','UNCERTAIN_NO_EVIDENCE','OWNERSHIP_CONFIRMED'].includes(item.tx.state)) {
+
+      if (item.tx?.state === 'LOCAL_COMMITTED' && item.tx?.delete?.confirmedAbsentAt) {
+        let recoveredTx = latestItemTx(item) || item.tx;
+        recoveredTx = {...recoveredTx, state:'DONE'};
+        recoveredTx = perfPhaseEnd(recoveredTx, 'total', Date.now(), {outcome:'recovered-local-and-delete-confirmed'});
+        item.tx = recoveredTx;
+        item.state = 'DONE';
+        compactCompletedItem(job, item);
+        saveQueueItemJournal(job, i);
+        saveQueueJobLazy(job);
+        continue;
+      }
+
+      if (canRearmEarlyDeleteItem(item)) {
+        onStatus?.(`再開準備 [${i+1}/${job.items.length}]\n前回の一時コピーは削除済み。新しいCOPY/URLを取得してローカルpartialへRange再開します。`);
+        rearmEarlyDeleteItem(job, i);
+      }
+
+      if (item.tx && !['COPY_INTENT','COPY_REQUEST_SENT','NEEDS_RECONCILE','UNCERTAIN_NO_EVIDENCE','OWNERSHIP_CONFIRMED','DOWNLOAD_READY','DOWNLOADING','DOWNLOAD_PAUSED','VERIFY_FAILED'].includes(item.tx.state)) {
         await markFatal(i, new LinkexError(`早期DELETE Queueの再開状態を安全に再構成できません: ${item.tx.state}`, {kind:'early_delete_resume_state'}));
         break;
       }
@@ -2224,26 +3118,38 @@ function sameOwnedIdentity(current, state) {
           break;
         }
 
-        let tx = await ensureCopyOwned(api, job, i, onStatus, {capacityReserved:true});
+        let tx = await ensureCopyOwned(api, job, i, onStatus, {
+          capacityReserved:true,
+          beforeIdsHint:rootBaselineIds
+        });
         assertLease();
-        const owned = await refreshOwnedFileUrl(api, tx.confirmedDest?.id);
-        if (!sameOwnedIdentity(owned, tx)) {
-          throw new LinkexError('signed URL取得時にdestId identity変化を検出しました。', {kind:'ownership_lost'});
+        const reconciledRootIds = getTransientRootSnapshot(tx.operationId);
+        if (reconciledRootIds) rootBaselineIds = reconciledRootIds;
+
+        // A freshly reconciled COPY already returned its signed URL. Keep it memory-only and
+        // avoid an immediate second root listing. Resume paths fall back to a fresh identity check.
+        let signedUrl = getTransientSignedUrl(tx.operationId);
+        if (!signedUrl) {
+          const owned = await refreshOwnedFileUrl(api, tx.confirmedDest?.id);
+          if (!sameOwnedIdentity(owned, tx)) {
+            throw new LinkexError('signed URL取得時にdestId identity変化を検出しました。', {kind:'ownership_lost'});
+          }
+          signedUrl = String(owned.url || '');
         }
-        const signedUrl = owned.url; // Memory-only; never persisted.
+        if (!signedUrl) throw new LinkexError('signed URLを取得できませんでした。', {kind:'protocol'});
+
         tx = {
           ...item.tx,
           earlyDelete:{...(item.tx.earlyDelete||{}), signedUrlObtainedAt:Date.now(), signedUrlPersisted:false}
         };
         persistItemTx(job, i, tx, 'COPIED');
 
-        await deleteOwnedTempForEarlyDeletePipeline(api, job, i, onStatus);
-        capacity.release(reservation);
+        // Launch DELETE/DOWNLOAD as a background transaction and immediately prepare the next COPY.
+        // Capacity is released by the task only after DELETE absence is confirmed.
+        launchEarlyDeleteTransaction(i, signedUrl, releaseInFlight, reservation);
+        clearTransientSignedUrl(tx.operationId);
+        clearTransientRootSnapshot(tx.operationId);
         reservation = null;
-
-        // A deleted temporary file no longer consumes Linkex capacity. The signed URL stays only
-        // in this closure; eight extra in-flight slots are allowed to prefetch memory-only signed URLs while DL=8 is active.
-        launchDetachedDownload(i, signedUrl, releaseInFlight);
       } catch (e) {
         if (reservation) capacity.release(reservation);
         releaseInFlight();
@@ -2921,6 +3827,12 @@ function sameOwnedIdentity(current, state) {
     const bundle = {
       product: 'Linkex Downloader',
       version: VERSION,
+      buildTag: BUILD_TAG,
+      queuePersistence:{
+        mode:'item-journal',
+        fullQueueIntervalMs:QUEUE_FULL_PERSIST_INTERVAL_MS,
+        dirtyIndexes:queue ? loadDirtyQueueIndexes(queue).length : 0
+      },
       generatedAt: new Date().toISOString(),
       signatureSelfTest: runSignatureSelfTest().map(x => ({name:x.name, ok:x.ok, actual:x.actual, expected:x.expected})),
       performance: redactForExport(buildPerformanceSummary(queue)),
@@ -3031,11 +3943,11 @@ function sameOwnedIdentity(current, state) {
               <div class="row" style="margin-bottom:0"><button id="lf-abandon" class="secondary" disabled>Queueを安全に破棄</button></div>
               <details id="lf-log-details" class="log">
                 <summary>ログを表示</summary>
-                <div id="lf-status" class="status">共有ページでは「すべてダウンロード」だけで解析からQueue開始まで進めます。\n高速モードは COPY/所有確認 → signed URL → 所有一時copy DELETE → 最大8並列DL/VERIFY。中断時は新COPY/URLからRange再開します。</div>
+                <div id="lf-status" class="status">共有ページでは「すべてダウンロード」だけで解析からQueue開始まで進めます。\n高速モード: COPY/所有確認 → signed URL → Web Worker stream開始 → 所有一時copy DELETEを並行 → DL/VERIFY。中断時は安全照合後にRange再開します。</div>
               </details>
             </div>
           </details>
-          <div class="notice">v1.3の標準は高速DL=8です.Downloaderが所有確認した一時copyだけをsigned URL取得後に先に削除し、ローカルDLを最大8並列で進めます。中断時は新しいCOPY/URLから既存partialへRange再開します。「互換: 保存後DELETE」は従来方式です。</div>
+          <div class="notice">高速モードはCDN streamの最初のchunk確認後に、所有確認済み一時copyのDELETEをDLと並行実行します。ローカルDLは最大8並列。中断時はDELETE状態を照合し、必要に応じて同じ所有copyまたは新COPYからRange再開します。「互換: 保存後DELETE」は従来方式です。</div>
         </div>
       </div>`;
     document.body.appendChild(root);
@@ -3076,7 +3988,7 @@ function sameOwnedIdentity(current, state) {
 
     let lastUiEventText = '';
     let lastUiEventAt = 0;
-    const write = (text, cls='') => {
+    const renderStatus = (text, cls='') => {
       const message = String(text ?? '');
       status.className = `status ${cls}`;
       status.textContent = message;
@@ -3088,15 +4000,24 @@ function sameOwnedIdentity(current, state) {
         moreDetails.open = true;
         logDetails.open = true;
       }
+      refreshProgress();
+      return message;
+    };
+
+    const writeTransient = (text, cls='') => {
+      renderStatus(text, cls);
+    };
+
+    const write = (text, cls='') => {
+      const message = renderStatus(text, cls);
       const now = Date.now();
       // Download progress can update frequently; avoid flooding persistent diagnostics.
-      const isProgress = /^DOWNLOADING\b/.test(message);
+      const isProgress = /^(?:DOWNLOADING|EARLY-DELETE DOWNLOADING)\b/.test(message);
       if (message !== lastUiEventText && (!isProgress || now - lastUiEventAt >= 5000)) {
         recordEvent(cls === 'err' ? 'error' : 'info', 'ui', message);
         lastUiEventText = message;
         lastUiEventAt = now;
       }
-      refreshProgress();
     };
 
     let manifest = null;
@@ -3364,7 +4285,7 @@ function sameOwnedIdentity(current, state) {
       GM_setValue(LAST_URL_KEY, String(sourceInput || '').trim());
       const api = new LinkexApi({token:null});
       write('共有manifestを読み取り中…');
-      const nextManifest = await buildManifest(api, token, x => write(`共有manifestを読み取り中…\nfiles: ${x.files}\n${x.path || ''}`));
+      const nextManifest = await buildManifest(api, token, x => writeTransient(`共有manifestを読み取り中…\nfiles: ${x.files} / folders: ${x.folders ?? 0}\n${x.path || ''}`));
       if (pageTargetAtStart) {
         const currentTarget = detectSharePageTarget(globalThis.location?.href || '');
         if (currentTarget?.shareToken !== token) throw new LinkexError('解析中に共有ページが変わりました。現在の共有をもう一度解析してください。', {kind:'share_context_changed'});
@@ -3981,7 +4902,34 @@ function sameOwnedIdentity(current, state) {
       void refreshPreferredDirectoryState({reloadHandle:false});
       syncSharePageContext({initial:true});
     });
+
+    let runtimeHeartbeatAt = Date.now();
+    const logLifecycle = (type, extra = {}) => recordEvent('info', 'lifecycle', type, {
+      hidden:!!globalThis.document?.hidden,
+      visibilityState:String(globalThis.document?.visibilityState || 'unknown'),
+      ...extra
+    });
+    globalThis.document?.addEventListener?.('visibilitychange', () => {
+      logLifecycle('visibilitychange');
+    });
+    globalThis.addEventListener?.('freeze', () => logLifecycle('freeze'));
+    globalThis.addEventListener?.('resume', () => logLifecycle('resume'));
+    globalThis.addEventListener?.('pageshow', event => logLifecycle('pageshow', {persisted:!!event?.persisted}));
+    setInterval(() => {
+      const now = Date.now();
+      const gapMs = Math.max(0, now - runtimeHeartbeatAt);
+      runtimeHeartbeatAt = now;
+      if (gapMs >= 5000) {
+        recordEvent('warn', 'runtime-stall', `userscript event loop gap ${gapMs} ms`, {
+          gapMs,
+          hidden:!!globalThis.document?.hidden,
+          visibilityState:String(globalThis.document?.visibilityState || 'unknown')
+        });
+      }
+    }, 1000);
+
     globalThis.addEventListener?.('pagehide', event => {
+      logLifecycle('pagehide', {persisted:!!event?.persisted});
       // Reload/navigation destroys this JS context. Drop only our own lease so the
       // replacement context can reconcile the persisted Queue immediately.
       // A BFCache page can return alive, so keep its lease until normal expiry.
@@ -4004,7 +4952,7 @@ function sameOwnedIdentity(current, state) {
       }
       else write(`未完了Full Queueを検出しました。\n\n${queueSummary(existing)}\n\n「Queueを再開」で状態照合から続けられます。`, '');
     }
-    recordEvent('info', 'startup', `Linkex Downloader v${VERSION} 起動`);
+    recordEvent('info', 'startup', `Linkex Downloader v${VERSION} / ${BUILD_TAG} 起動`, {buildTag:BUILD_TAG});
     return root;
   }
 

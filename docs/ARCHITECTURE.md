@@ -8,7 +8,7 @@
 
 Linkex Downloader は、`https://disk.linkex.io/*` と `https://l2e.click/d/*`（`www`含む）上で動作する Tampermonkey userscript です。共有ページでは現在URLからshare tokenを自動検出し、自ストレージページでは従来の手入力導線も維持します。
 
-共有リンク内のファイルを直接 CDN から取得するのではなく、各ファイルを一度自分の Linkex ストレージへコピーし、そのコピー先 ID のownershipを確認します。v1.3候補の高速モードではsigned URLをメモリ上に取得した後、所有確認済み一時copyを先にDELETE・不在確認してLinkex容量を解放し、そのURLから最大8並列でローカル保存します。中断時は新しいCOPY / URLを作り、既存partialへRange resumeします。従来のLOCAL_COMMITTED後DELETE方式も互換モードとして残します。
+共有リンク内のファイルを直接 CDN から取得するのではなく、各ファイルを一度自分の Linkex ストレージへコピーし、そのコピー先 ID のownershipを確認します。現行高速モードではsigned URLをメモリ上に取得し、Web WorkerでCDN streamを開始して最初のchunkを確認した後、所有確認済み一時copyだけをDELETEします。DELETEの不在確認とローカル転送は並行し、ローカルDOWNLOADは最大8並列です。中断時はDELETE状態を先に照合し、同じ所有copyまたは新しいCOPY / URLから既存partialへRange resumeします。従来のLOCAL_COMMITTED後DELETE方式も互換モードとして残します。
 
 ```mermaid
 flowchart TD
@@ -22,15 +22,17 @@ flowchart TD
     H -->|一意に証明| I[OWNERSHIP_CONFIRMED]
     H -->|曖昧| X[安全停止]
     I --> J[fresh signed CDN URL取得 / memory-only]
-    J --> N[early DELETE安全条件を再検証]
-    N --> O[確定destId 1件だけ削除]
-    O --> P[Linkex上で不在を確認]
-    P --> K[最大8並列 Range対応DL]
+    J --> K[Web WorkerでRange対応DL stream開始]
+    K --> S[最初のchunk / zero-byte EOFを確認]
+    S --> N[early DELETE安全条件を再検証]
+    N --> O[確定destId 1件だけDELETE]
+    O --> P[Linkex上の不在確認をDLと並行]
     K --> L[Content-Length / stream EOFで検証]
-    L --> M[LOCAL_COMMITTED]
-    M --> Q[DONE]
-    K -->|中断/URL失効| R[新COPY / 新URLでpartialからresume]
-    R --> N
+    P --> Q{DL検証済み?}
+    L --> Q
+    Q -->|YES| M[LOCAL_COMMITTED / DONE]
+    K -->|中断/URL失効| R[DELETE状態照合 → same copy or new COPY / URLでpartial resume]
+    R --> K
 ```
 
 ## コンポーネント
@@ -44,11 +46,11 @@ flowchart TD
 | Page context | `l2e.click/d/...` の現在share token検出、SPA URL変更時のmanifest guard | `detectSharePageTarget()`, `syncSharePageContext()` |
 | 共有解析 | 共有URL解析、フォルダ再帰、manifest生成 | `parseShareToken()`, `buildManifest()` |
 | 所有権確定 | コピー前後の root ID 差分から `destId` を確定 | `reconcileCopy()`, `isPlausibleCopy()` |
-| ダウンロード | signed URL、Range resume、checkpoint、Content-Length / stream EOF検証 | `downloadOwnedFile()` |
+| ダウンロード | Web Worker優先、signed URL、Range resume、checkpoint、stream-ready barrier、Content-Length / stream EOF検証 | `downloadOwnedFileInWorker()`, `downloadOwnedFile()` |
 | 削除安全ゲート | 高速モードのownership-confirmed early DELETEと、互換モードの`LOCAL_COMMITTED`後DELETE | `assertEarlyDeletePipelineGuards()`, `deleteOwnedTempForEarlyDeletePipeline()`, `assertDeleteGuards()`, `ensureDeleted()` |
-| Queue | COPY/early DELETEは直列、ローカルDOWNLOAD最大8並列、容量skip、pause/resume | `createQueueFromManifest()`, `processEarlyDeletePipeline()`, `processQueue()` |
+| Queue | COPY ownershipは直列、stream開始後のearly DELETEはDLと並行、ローカルDOWNLOAD最大8並列、容量skip、pause/resume | `createQueueFromManifest()`, `processEarlyDeletePipeline()`, `processQueue()` |
 | 排他 | 別タブとの二重実行防止 | `acquireLease()`, `assertLease()` |
-| 永続化 | Queue/transaction/設定/ログ/DirectoryHandle保存 | GM storage, IndexedDB |
+| 永続化 | operation checkpoint + item journalを即時保存し、Full Queueはbatch flush | GM storage, IndexedDB |
 | UI/診断 | 右下パネル、進捗、署名テスト、support JSON | `createPanel()`, `downloadSupportBundle()` |
 
 ## 外部サービスとの関係
