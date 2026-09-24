@@ -4,6 +4,35 @@
 
 ## [Unreleased]
 
+## [1.3.1] - 2026-09-24
+
+### Added
+
+- CDN `fetch` / stream buffering / File System Access書き込みをWeb Workerへ移し、利用不可環境では従来inline転送へ安全にfallback
+- CDN streamの最初のchunk（または正当な0 byte EOF）を確認してから、ownership-confirmed一時copyのDELETEをダウンロードと並行するstream-ready barrier
+- 大量Queueのhot pathをfile単位のitem journalへ分離し、Full Queue全体のGM storage書き込みを最大5秒間隔へbatch化
+- background tab問題の切り分け用に `visibilitychange` / `freeze` / `resume` / runtime stall / 5秒超API request診断を追加
+
+### Changed
+
+- 共有Manifestのフォルダ取得を最大6並列化し、進捗UIを250msへthrottle。中間進捗のpersistent event log書き込みを停止
+- COPY task pollingの固定待ちを短縮し、容量確認はlocal reservation ledgerを優先して不要な `getUsage()` を削減
+- ownership reconcileで取得済みroot snapshotとsigned URLをmemory-onlyで再利用し、小ファイル大量処理のAPI往復を削減
+- DELETE完了を次のCOPY準備の前提にせず、ownership証明を1件ずつ維持したままDELETE/DOWNLOADを後段でoverlap
+
+### Safety
+
+- DELETEは従来どおりDownloader自身が新規作成したと一意に証明できる `destId` 1件だけ
+- destructive DELETEはstream-ready確認後かつ削除直前identity再確認後だけ実行
+- DELETE結果不明時はPOSTを再送せず、nested `delete.phase` をjournalへ保存して存在/不在reconcileを優先
+- pre-DELETE `DOWNLOAD_READY` / `DOWNLOADING` / `DOWNLOAD_PAUSED` / `VERIFY_FAILED` からのRange復旧を追加
+- COPY APIがdestIdを直接返さないため、ownership証明を弱めるCOPY並列化は採用せずCOPY=1を維持
+
+### Validation
+
+- Chromium系 + Tampermonkeyの実機で旧v1.3.0系テスト版よりダウンロード処理の速度改善を確認
+- GitHub Actionsでuserscript構文、Node回帰テスト、repository consistency、deterministic Release Asset生成を検証
+
 ## [1.3.0] - 2026-09-22
 
 ### Added

@@ -6,15 +6,29 @@
 
 ## 現在の状態
 
-2026-09-22 時点:
+2026-09-24 時点:
 
-- `main` source: **v1.3.0**（公開済み / 実機確認済み）
-- 最新公開Stable: **v1.3.0**
-- 最新公開tag: **`v1.3.0`**
-- v1.3.0: GitHub Release公開済み
-- Release commit: `ba62b74475f107a8b749249585eb6c690e54743a`
+- `main` source: **v1.3.1**（公開用 / 実機確認済み）
+- 最新公開Stable: **v1.3.1**
+- 最新公開tag: **`v1.3.1`**
+- v1.3.1: publish workflow対象
+- Release commit: **`v1.3.1` tag対象commit**
 - License: **MIT**
 - CI: `.github/workflows/ci.yml`
+
+## v1.3.1 公開内容
+
+v1.3.1は、大量小ファイル共有で目立っていたcontrol-plane待ちとuserscript hot-path書き込みを削減し、Web Worker転送とstream-before-delete方式を標準化するpatch releaseです。
+
+- Manifest folder fetch: 最大6並列
+- local DOWNLOAD: 最大8 Web Worker
+- early DELETE: stream-ready確認後に最大2並列、DOWNLOADとoverlap
+- Full Queue persistence: item journal即時 + Full Queue最大5秒batch flush
+- COPY ownership proof: 1件ずつ維持
+- signed URL: memory-only
+- background/API stall diagnostics: 有効
+
+Chromium系 + Tampermonkeyの実機で速度改善を確認しています。公開Assetはpublish workflowがtag対象commitからdeterministic生成し、GitHub ReleaseのSHA-256 digestと自動照合します。
 
 ## v1.3.0 公開実績
 

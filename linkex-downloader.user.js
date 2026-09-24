@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Linkex Downloader
 // @namespace    openai-linkex-helper
-// @version      1.3.0
+// @version      1.3.1
 // @description  Linkex共有ページからDL=8高速Queue保存。所有ID限定early DELETE・Range復旧・互換モード・診断付き。
 // @license      MIT
 // @match        https://disk.linkex.io/*
@@ -19,7 +19,7 @@
 (() => {
   'use strict';
 
-  const VERSION = '1.3.0';
+  const VERSION = '1.3.1';
   const BUILD_TAG = 'stream-delete-worker-journal';
   const API_BASE = 'https://prod.linksvc.xyz';
   const SIGNED_HEADER_PREFIX = 'x-linkinflu-';
