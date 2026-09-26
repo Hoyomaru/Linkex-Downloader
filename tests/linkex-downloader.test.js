@@ -462,6 +462,69 @@ test('selected Queue contains only requested manifest indexes and recalculates t
   assert.equal(all.sourceTotalBytes, 60);
 });
 
+test('single selected file can use a direct FileHandle layout without a Queue directory', () => {
+  const {api} = loadRuntime();
+  const manifest = {
+    shareToken:'share-token',
+    shareName:'sample',
+    totalBytes:30,
+    files:[
+      {sourceId:'a', name:'a.bin', size:10, remotePath:'folder/a.bin'},
+      {sourceId:'b', name:'b.bin', size:20, remotePath:'nested/b.bin'},
+    ],
+  };
+
+  const direct = api.createQueueFromManifest(manifest, [1], {directFileName:'renamed.bin'});
+  assert.equal(direct.localLayout, 'direct-file');
+  assert.equal(direct.folderName, '(直接保存)');
+  assert.deepEqual([...direct.items[0].localSegments], ['renamed.bin']);
+  assert.equal(direct.items[0].source.remotePath, 'nested/b.bin');
+
+  const multi = api.createQueueFromManifest(manifest, [0, 1], {directFileName:'ignored.bin'});
+  assert.equal(multi.localLayout, 'queue-directory');
+  assert.notEqual(multi.folderName, '(直接保存)');
+});
+
+test('single-selection direct save uses save picker and does not require the remembered directory', () => {
+  assert.match(SOURCE, /async function invokeSaveFilePicker/);
+  assert.match(SOURCE, /showSaveFilePicker/);
+  assert.match(SOURCE, /directSingleSelection \? 'このファイルを直接保存' : '選択をダウンロード'/);
+  assert.match(SOURCE, /\(!directSingleSelection && !preferredHandleReady\)/);
+
+  const selectedAt = SOURCE.indexOf("selectedStartBtn.addEventListener('click'");
+  const destinationAt = SOURCE.indexOf("destinationBtn.addEventListener('click'", selectedAt);
+  const block = SOURCE.slice(selectedAt, destinationAt);
+  const pickerAt = block.indexOf('await invokeSaveFilePicker');
+  const directoryAt = block.indexOf('await acquirePreferredBaseDirFromGesture');
+  assert.ok(pickerAt >= 0);
+  assert.ok(directoryAt > pickerAt);
+  assert.match(block, /startEarlyDeletePipeline\(new Set\(selectedIndexes\), \{baseDir, directFileHandle, skipConfirm:true\}\)/);
+});
+
+test('new direct-file Queue truncates the user-approved target once, while resume preserves partial data', () => {
+  const helperAt = SOURCE.indexOf('async function prepareDirectFileHandle');
+  const nextAt = SOURCE.indexOf('async function getQueueRootHandle', helperAt);
+  const helper = SOURCE.slice(helperAt, nextAt);
+  assert.match(helper, /createWritable\(\{keepExistingData:false\}\)/);
+  assert.match(helper, /await writable\.close\(\)/);
+
+  const earlyAt = SOURCE.indexOf('async function startEarlyDeletePipeline');
+  const probeAt = SOURCE.indexOf('async function startEarlyDeleteProbe', earlyAt);
+  const early = SOURCE.slice(earlyAt, probeAt);
+  assert.match(early, /await prepareDirectFileHandle\(directFileHandle\)/);
+
+  const compatAt = SOURCE.indexOf('async function startManifestQueue');
+  const nextStartAt = SOURCE.indexOf("earlyDeleteStartBtn.addEventListener", compatAt);
+  const compat = SOURCE.slice(compatAt, nextStartAt);
+  assert.match(compat, /await prepareDirectFileHandle\(directFileHandle\)/);
+
+  const resumeAt = SOURCE.indexOf("resumeBtn.addEventListener('click'");
+  const pauseAt = SOURCE.indexOf("pauseBtn.addEventListener('click'", resumeAt);
+  const resume = SOURCE.slice(resumeAt, pauseAt);
+  assert.match(resume, /const queueRoot = await getQueueRootHandle\(job\)/);
+  assert.doesNotMatch(resume, /prepareDirectFileHandle/);
+});
+
 test('selected Queue rejects an empty selection', () => {
   const {api} = loadRuntime();
   const manifest = {shareToken:'share-token', shareName:'sample', totalBytes:10, files:[{sourceId:'a', name:'a.bin', size:10, remotePath:'a.bin'}]};
