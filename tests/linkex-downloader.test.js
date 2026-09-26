@@ -10,7 +10,7 @@ const {TextEncoder} = require('node:util');
 const SOURCE_PATH = 'linkex-downloader.user.js';
 const SOURCE = fs.readFileSync(SOURCE_PATH, 'utf8');
 const STARTUP = "  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', createPanel, {once:true});\n  else createPanel();\n})();";
-const EXPOSE = "  globalThis.__linkexTest = {allocateLocalPaths, assertDeleteGuards, downloadOwnedFile, sameOwnedIdentity, LinkexApi, compactDoneTx, createQueueFromManifest, buildManifest, parseShareToken, detectSharePageTarget, isSharePageHost, readCredentialBridge, syncCredentialBridgeFromDisk, resolveCredentials};\n})();";
+const EXPOSE = "  globalThis.__linkexTest = {allocateLocalPaths, assertDeleteGuards, downloadOwnedFile, sameOwnedIdentity, LinkexApi, compactDoneTx, createQueueFromManifest, buildManifest, parseShareToken, detectSharePageTarget, isSharePageHost, readCredentialBridge, syncCredentialBridgeFromDisk, resolveCredentials, buildLiveQueueProgress, formatEta};\n})();";
 
 function loadRuntime({href = 'https://disk.linkex.io/', localStorageEntries = {}} = {}) {
   assert.ok(SOURCE.includes(STARTUP), 'test harness could not find userscript startup block');
@@ -466,6 +466,52 @@ test('selected Queue rejects an empty selection', () => {
   const {api} = loadRuntime();
   const manifest = {shareToken:'share-token', shareName:'sample', totalBytes:10, files:[{sourceId:'a', name:'a.bin', size:10, remotePath:'a.bin'}]};
   assert.throws(() => api.createQueueFromManifest(manifest, []), error => error?.kind === 'selection');
+});
+
+test('live queue progress aggregates active worker speed and excludes skipped bytes from ETA', () => {
+  const {api, storage} = loadRuntime();
+  const now = 10_000;
+  storage.set('linkexCopyProbeStateV1:op-live', {
+    operationId:'op-live',
+    state:'DOWNLOADING',
+    download:{
+      downloadedBytes:40,
+      expectedCdnBytes:100,
+      updatedAt:now - 1000,
+      telemetry:{instantBytesPerSecond:20, averageBytesPerSecond:15}
+    }
+  });
+  const job = {
+    items:[
+      {state:'DONE', source:{name:'done.bin', size:100}, tx:{state:'DONE'}},
+      {state:'EARLY_DELETE_DOWNLOADING', source:{name:'live.bin', remotePath:'folder/live.bin', size:100}, tx:{operationId:'op-live', state:'EARLY_DELETE_DOWNLOADING'}},
+      {state:'PENDING', source:{name:'pending.bin', size:200}, tx:null},
+      {state:'SKIPPED_CAPACITY', source:{name:'skip.bin', size:50}, tx:null},
+    ]
+  };
+  const live = api.buildLiveQueueProgress(job, now);
+  assert.equal(live.activeDownloads, 1);
+  assert.equal(live.instantBytesPerSecond, 20);
+  assert.equal(live.remainingBytes, 260);
+  assert.deepEqual([...live.currentFiles], ['folder/live.bin']);
+  assert.equal(api.formatEta(live.remainingBytes / live.instantBytesPerSecond), '約13秒');
+});
+
+test('compact first screen hides compatibility and technical pipeline controls under details', () => {
+  const primaryAt = SOURCE.indexOf('<div class="primary-actions">');
+  const selectionAt = SOURCE.indexOf('<div id="lf-selection"', primaryAt);
+  const primaryBlock = SOURCE.slice(primaryAt, selectionAt);
+  assert.match(primaryBlock, /id="lf-start"[^>]*>すべてダウンロード/);
+  assert.match(primaryBlock, /id="lf-select-mode"[^>]*>ファイルを選ぶ/);
+  assert.doesNotMatch(primaryBlock, /lf-start-early-delete|保存後DELETE|互換/);
+
+  const detailsAt = SOURCE.indexOf('<details id="lf-more" class="more">');
+  const compatibilityAt = SOURCE.indexOf('id="lf-start-early-delete"', detailsAt);
+  const safetyAt = SOURCE.indexOf('<summary>安全方式について</summary>', detailsAt);
+  assert.ok(detailsAt > 0 && compatibilityAt > detailsAt && safetyAt > detailsAt);
+  assert.match(SOURCE, /id="lf-transfer-meta"/);
+  assert.match(SOURCE, /id="lf-current-file"/);
+  assert.match(SOURCE, /setInterval\(refreshProgress, 1000\)/);
 });
 
 test('panel is constrained to the viewport and its body scrolls instead of escaping the screen', () => {
