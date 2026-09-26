@@ -30,8 +30,10 @@ def main() -> None:
     parser.add_argument('--output-dir', default='dist')
     args = parser.parse_args()
 
-    source_bytes = SOURCE.read_bytes()
-    source_text = source_bytes.decode('utf-8')
+    # Release assets are always LF-normalized so the same commit produces
+    # byte-identical artifacts on Windows, macOS, and Linux checkouts.
+    source_text = SOURCE.read_text(encoding='utf-8').replace('\r\n', '\n').replace('\r', '\n')
+    source_bytes = source_text.encode('utf-8')
     version = parse_version(source_text)
     out_dir = Path(args.output_dir)
     if not out_dir.is_absolute():
