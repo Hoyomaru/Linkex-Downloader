@@ -3947,7 +3947,9 @@ const transientSignedUrls = new Map();
         #linkex-full-queue .progress { height:7px; border-radius:999px; background:#1f2937; overflow:hidden; border:1px solid #374151; }
         #linkex-full-queue .progress > i { display:block; height:100%; width:0%; background:#2563eb; transition:width .2s ease; }
         #linkex-full-queue .transfer-meta { min-height:1.35em; font-size:12px; color:#e5e7eb; margin-top:6px; font-variant-numeric:tabular-nums; }
-        #linkex-full-queue .current-file { min-height:1.35em; font-size:11px; color:#9ca3af; margin-top:2px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+        #linkex-full-queue .current-file-row { display:flex; align-items:flex-start; gap:6px; margin-top:2px; min-height:1.35em; }
+        #linkex-full-queue .current-file { min-width:0; flex:1; font-size:11px; line-height:1.35; color:#9ca3af; overflow:hidden; display:-webkit-box; -webkit-box-orient:vertical; -webkit-line-clamp:2; overflow-wrap:anywhere; }
+        #linkex-full-queue .parallel-count { flex:0 0 auto; font-size:10px; line-height:1.2; color:#bfdbfe; background:#172554; border:1px solid #1d4ed8; border-radius:999px; padding:3px 6px; }
         #linkex-full-queue .state-line { font-size:11px; color:#cbd5e1; margin:4px 0 8px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
         #linkex-full-queue .state-line.ok { color:#bbf7d0; }
         #linkex-full-queue .state-line.err { color:#fecaca; }
@@ -3962,14 +3964,17 @@ const transientSignedUrls = new Map();
         #linkex-full-queue .selection { margin:0 0 9px; padding:8px; border:1px solid #374151; border-radius:8px; background:#0b1220; }
         #linkex-full-queue .selection[hidden] { display:none; }
         #linkex-full-queue .selection-meta { font-size:11px; color:#cbd5e1; margin-bottom:6px; }
-        #linkex-full-queue .selection-actions { display:flex; gap:6px; margin-bottom:6px; }
-        #linkex-full-queue .selection-actions button { padding:6px 7px; font-size:11px; }
+        #linkex-full-queue .selection-actions { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:6px; margin-bottom:6px; }
+        #linkex-full-queue .selection-actions button { min-width:0; padding:7px 8px; font-size:11px; }
         #linkex-full-queue .file-list { max-height:190px; overflow:auto; border:1px solid #1f2937; border-radius:6px; }
         #linkex-full-queue .file-option { display:flex; align-items:flex-start; gap:7px; padding:6px 7px; border-bottom:1px solid #1f2937; font-size:11px; line-height:1.35; cursor:pointer; }
         #linkex-full-queue .file-option:last-child { border-bottom:0; }
         #linkex-full-queue .file-option input { width:auto; margin:2px 0 0; flex:0 0 auto; }
-        #linkex-full-queue .file-path { overflow-wrap:anywhere; }
+        #linkex-full-queue .file-path { min-width:0; flex:1; overflow:hidden; overflow-wrap:anywhere; display:-webkit-box; -webkit-box-orient:vertical; -webkit-line-clamp:2; }
         #linkex-full-queue .file-size { color:#9ca3af; white-space:nowrap; margin-left:auto; }
+        #linkex-full-queue .error-actions { margin:0 0 9px; padding:9px; border:1px solid #991b1b; border-radius:8px; background:#2b1013; }
+        #linkex-full-queue .error-actions .error-copy { margin-bottom:7px; color:#fecaca; font-size:11px; line-height:1.45; }
+        #linkex-full-queue .error-actions .row { margin-bottom:0; }
       </style>
       <div class="box">
         <div class="hd">
@@ -3978,14 +3983,14 @@ const transientSignedUrls = new Map();
         </div>
         <div class="body">
           <div id="lf-share-context" class="share-context" hidden></div>
-          <input id="lf-url" placeholder="https://l2e.click/d/xxxxxxxx" />
+          <input id="lf-url" aria-label="共有URL" placeholder="https://l2e.click/d/xxxxxxxx" />
           <div class="primary-actions">
             <button id="lf-start" class="primary action-main" disabled>すべてダウンロード</button>
             <button id="lf-select-mode" class="secondary action-secondary" disabled>ファイルを選ぶ</button>
           </div>
           <div id="lf-selection" class="selection" hidden>
             <div id="lf-selection-meta" class="selection-meta">0 / 0 selected</div>
-            <input id="lf-file-filter" placeholder="ファイル名 / パスで絞り込み" />
+            <input id="lf-file-filter" aria-label="ファイル名またはパスで絞り込み" placeholder="ファイル名 / パスで絞り込み" />
             <div class="selection-actions"><button id="lf-select-all" class="secondary">全件選択</button><button id="lf-clear-all" class="secondary">全解除</button><button id="lf-select-visible" class="secondary">表示中を選択</button><button id="lf-clear-visible" class="secondary">表示中を解除</button></div>
             <div id="lf-file-list" class="file-list"></div>
             <div id="lf-selection-note" class="notice"></div>
@@ -3999,10 +4004,17 @@ const transientSignedUrls = new Map();
           <div class="progress-wrap">
             <div class="progress-meta"><span id="lf-progress-text">Queueなし</span><span id="lf-progress-pct">0%</span></div>
             <div class="progress"><i id="lf-progress-bar"></i></div>
-            <div id="lf-transfer-meta" class="transfer-meta"></div>
-            <div id="lf-current-file" class="current-file"></div>
+            <div id="lf-transfer-meta" class="transfer-meta" aria-live="polite"></div>
+            <div class="current-file-row">
+              <div id="lf-current-file" class="current-file"></div>
+              <span id="lf-parallel-count" class="parallel-count" hidden></span>
+            </div>
           </div>
-          <div id="lf-state-line" class="state-line">待機中</div>
+          <div id="lf-state-line" class="state-line" role="status" aria-live="polite">待機中</div>
+          <div id="lf-error-actions" class="error-actions" role="alert" hidden>
+            <div id="lf-error-copy" class="error-copy">処理は安全側で停止しています。処理済みファイルは保持されます。</div>
+            <div class="row"><button id="lf-error-resume" class="primary">Queueを再開</button><button id="lf-error-export" class="secondary">診断ログを保存</button></div>
+          </div>
           <details id="lf-more" class="more">
             <summary>詳細</summary>
             <div class="more-body">
@@ -4066,6 +4078,11 @@ const transientSignedUrls = new Map();
     const progressBar = root.querySelector('#lf-progress-bar');
     const transferMeta = root.querySelector('#lf-transfer-meta');
     const currentFile = root.querySelector('#lf-current-file');
+    const parallelCount = root.querySelector('#lf-parallel-count');
+    const errorActions = root.querySelector('#lf-error-actions');
+    const errorCopy = root.querySelector('#lf-error-copy');
+    const errorResumeBtn = root.querySelector('#lf-error-resume');
+    const errorExportBtn = root.querySelector('#lf-error-export');
 
     let smoothedTransferRate = 0;
     let lastUiEventText = '';
@@ -4078,9 +4095,12 @@ const transientSignedUrls = new Map();
       stateLine.textContent = firstLine.length > 110 ? `${firstLine.slice(0, 107)}…` : firstLine;
       stateLine.title = firstLine;
       stateLine.className = `state-line ${cls}`;
-      if (cls === 'err') {
-        moreDetails.open = true;
-        logDetails.open = true;
+      const isError = cls === 'err';
+      errorActions.hidden = !isError;
+      if (isError) {
+        errorCopy.textContent = `${firstLine} 処理は安全側で停止しています。処理済みファイルは保持されます。`;
+        moreDetails.open = false;
+        logDetails.open = false;
       }
       refreshProgress();
       return message;
@@ -4258,6 +4278,7 @@ const transientSignedUrls = new Map();
         const path = document.createElement('span');
         path.className = 'file-path';
         path.textContent = file.remotePath || file.name || `(file ${index + 1})`;
+        path.title = path.textContent;
         const size = document.createElement('span');
         size.className = 'file-size';
         size.textContent = formatBytes(file.size);
@@ -4338,12 +4359,18 @@ const transientSignedUrls = new Map();
       if (live.currentFiles.length === 1) {
         currentFile.textContent = live.currentFiles[0];
         currentFile.title = live.currentFiles[0];
+        parallelCount.hidden = true;
+        parallelCount.textContent = '';
       } else if (live.currentFiles.length > 1) {
-        currentFile.textContent = `${live.currentFiles[0]} ほか${live.currentFiles.length - 1}件`;
+        currentFile.textContent = live.currentFiles[0];
         currentFile.title = live.currentFiles.join('\n');
+        parallelCount.hidden = false;
+        parallelCount.textContent = `+ほか${live.currentFiles.length - 1}件`;
       } else {
         currentFile.textContent = '';
         currentFile.title = '';
+        parallelCount.hidden = true;
+        parallelCount.textContent = '';
       }
     }
 
@@ -4363,6 +4390,9 @@ const transientSignedUrls = new Map();
       resumeBtn.disabled = busy || !active || probeActive || recoveryNeedsNewContext;
       resumeBtn.textContent = recoveryNeedsNewContext ? '先にページ再読み込み' : 'Queueを再開';
       resumeBtn.hidden = running || !active || probeActive;
+      errorResumeBtn.disabled = resumeBtn.disabled;
+      errorResumeBtn.hidden = !active || probeActive;
+      errorResumeBtn.textContent = recoveryNeedsNewContext ? '先にページ再読み込み' : 'Queueを再開';
       pauseBtn.disabled = !running || !activeRunJob || !!activeRunJob.stopRequested;
       pauseBtn.hidden = !running;
       queueActions.hidden = resumeBtn.hidden && pauseBtn.hidden;
@@ -4389,6 +4419,9 @@ const transientSignedUrls = new Map();
       collapseBtn.textContent = collapsed ? '+' : '−';
       saveUiPrefs({...loadUiPrefs(), collapsed});
     });
+
+    errorResumeBtn.addEventListener('click', () => resumeBtn.click());
+    errorExportBtn.addEventListener('click', () => exportBtn.click());
 
     root.querySelector('#lf-selftest').addEventListener('click', () => {
       const tests = runSignatureSelfTest();
