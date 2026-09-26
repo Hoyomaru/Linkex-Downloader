@@ -153,8 +153,8 @@ test('DL8 early-delete is primary all/selected path and post-commit delete remai
 
   assert.match(SOURCE.slice(compatAt, mainAt), /startManifestQueue\(null, \{baseDir, skipConfirm:true\}\)/);
   assert.match(SOURCE.slice(mainAt, selectAt), /startEarlyDeletePipeline\(null, \{baseDir, skipConfirm:true\}\)/);
-  assert.match(SOURCE.slice(selectedCompatAt, selectedMainAt), /startManifestQueue\(new Set\(selectedIndexes\), \{baseDir, skipConfirm:true\}\)/);
-  assert.match(SOURCE.slice(selectedMainAt, destinationAt), /startEarlyDeletePipeline\(new Set\(selectedIndexes\), \{baseDir, skipConfirm:true\}\)/);
+  assert.match(SOURCE.slice(selectedCompatAt, selectedMainAt), /startManifestQueue\(new Set\(selectedIndexes\), \{baseDir, directFileHandle, skipConfirm:true\}\)/);
+  assert.match(SOURCE.slice(selectedMainAt, destinationAt), /startEarlyDeletePipeline\(new Set\(selectedIndexes\), \{baseDir, directFileHandle, skipConfirm:true\}\)/);
 });
 
 

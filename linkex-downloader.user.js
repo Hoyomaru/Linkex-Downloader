@@ -2181,7 +2181,7 @@ const transientSignedUrls = new Map();
     };
   }
 
-  function createQueueFromManifest(manifest, selectedIndexes = null) {
+  function createQueueFromManifest(manifest, selectedIndexes = null, {directFileName = null} = {}) {
     if (!manifest?.files?.length) throw new LinkexError('共有内にファイルがありません。');
     const selected = selectedIndexes == null ? null : new Set(Array.from(selectedIndexes, x => Number(x)).filter(Number.isInteger));
     const chosen = manifest.files
@@ -2189,14 +2189,20 @@ const transientSignedUrls = new Map();
       .filter(x => selected == null || selected.has(x.manifestIndex));
     if (!chosen.length) throw new LinkexError('処理するファイルが選択されていません。', {kind:'selection'});
     const sources = chosen.map(x => compactSource(x.source));
-    const localPaths = allocateLocalPaths(sources, manifest.shareName);
+    const directFile = chosen.length === 1 && typeof directFileName === 'string' && directFileName.trim();
+    const localPaths = directFile
+      ? [[String(directFileName)]]
+      : allocateLocalPaths(sources, manifest.shareName);
     const jobId = makeId(selected == null ? 'full' : 'selected');
     const base = sanitizeSegment(manifest.shareName || manifest.shareToken || 'share');
-    const folderName = sanitizeSegment(`Linkex_${base}_${stampForFolder()}_${jobId.slice(-6)}`);
+    const folderName = directFile
+      ? '(直接保存)'
+      : sanitizeSegment(`Linkex_${base}_${stampForFolder()}_${jobId.slice(-6)}`);
     return {
       schemaVersion:2,
       kind:'full-queue',
       selectionMode:selected == null ? 'all' : 'selected',
+      localLayout:directFile ? 'direct-file' : 'queue-directory',
       sourceOriginalCount:manifest.files.length,
       version:VERSION,
       jobId,
@@ -2228,6 +2234,21 @@ const transientSignedUrls = new Map();
     return await Reflect.apply(picker, pageWindow, [options]);
   }
 
+  async function invokeSaveFilePicker(options = {}) {
+    const pageWindow = getNativePageWindow();
+    const picker = pageWindow?.showSaveFilePicker;
+    if (typeof picker !== 'function') throw new LinkexError('このブラウザではshowSaveFilePickerが利用できません。Edge/Chromeの通常ウィンドウで実行してください。', {kind:'filesystem'});
+    return await Reflect.apply(picker, pageWindow, [options]);
+  }
+
+  async function prepareDirectFileHandle(handle) {
+    if (!handle || handle.kind !== 'file') throw new LinkexError('直接保存用のFileHandleがありません。', {kind:'filesystem'});
+    await ensureHandlePermission(handle);
+    const writable = await handle.createWritable({keepExistingData:false});
+    await writable.close();
+    return handle;
+  }
+
   async function getQueueRootHandle(job) {
     return await idbGetHandle(`${QUEUE_HANDLE_PREFIX}${job.jobId}`);
   }
@@ -2236,7 +2257,11 @@ const transientSignedUrls = new Map();
     return await idbPutHandle(`${QUEUE_HANDLE_PREFIX}${job.jobId}`, handle);
   }
 
-  async function getLocalFileHandle(queueRoot, item) {
+  async function getLocalFileHandle(queueRoot, item, job = null) {
+    if (job?.localLayout === 'direct-file') {
+      if (queueRoot?.kind !== 'file') throw new LinkexError('直接保存用のFileHandleが見つかりません。', {kind:'filesystem'});
+      return queueRoot;
+    }
     const segs = Array.isArray(item.localSegments) && item.localSegments.length ? item.localSegments : [sanitizeSegment(item.source?.name || 'file.bin')];
     let dir = queueRoot;
     for (const seg of segs.slice(0, -1)) dir = await dir.getDirectoryHandle(seg, {create:true});
@@ -2265,7 +2290,7 @@ const transientSignedUrls = new Map();
     const parts = [
       `job: ${job.jobId}`,
       `state: ${job.state}`,
-      `folder: ${job.folderName}`,
+      `${job.localLayout === 'direct-file' ? 'file' : 'folder'}: ${job.localLayout === 'direct-file' ? (job.items?.[0]?.localSegments?.[0] || '(unknown)') : job.folderName}`,
       `processed: ${processed}/${job.items.length}  DONE:${c.done}  capacity-skip:${c.skippedCapacity}  unfittable:${c.unfittable}  blocked:${c.blocked}`
     ];
     const current = job.items?.[job.currentIndex];
@@ -2508,7 +2533,7 @@ const transientSignedUrls = new Map();
     if (['LOCAL_COMMITTED','DELETE_INTENT','DELETE_REQUEST_SENT','DELETE_UNCERTAIN','DELETE_UNCERTAIN_PRESENT','DONE'].includes(tx.state)) return tx;
     if (!tx.confirmedDest?.id) throw new LinkexError('ダウンロード前に所有destIdが確定していません。', {kind:'ownership'});
 
-    const handle = await getLocalFileHandle(queueRoot, item);
+    const handle = await getLocalFileHandle(queueRoot, item, job);
     await ensureHandlePermission(handle);
     const owned = await refreshOwnedFileUrl(api, tx.confirmedDest.id);
     if (!sameOwnedIdentity(owned, tx)) throw new LinkexError('ダウンロード開始前にdestIdのidentity変化を検出しました。自動処理を停止します。', {kind:'ownership_lost', destId:tx.confirmedDest.id});
@@ -2768,7 +2793,7 @@ const transientSignedUrls = new Map();
     }
     if (!signedUrl) throw new LinkexError('signed URLがメモリ上にありません。再COPYが必要です。', {kind:'signed_url_missing'});
 
-    const handle = await getLocalFileHandle(queueRoot, item);
+    const handle = await getLocalFileHandle(queueRoot, item, job);
     await ensureHandlePermission(handle);
     const local = await handle.getFile();
     tx = {
@@ -4399,8 +4424,11 @@ const transientSignedUrls = new Map();
       startBtn.disabled = busy || !!active || !hasShareInput || !preferredHandleReady;
       earlyDeleteStartBtn.disabled = busy || !!active || !hasShareInput || !preferredHandleReady;
       selectModeBtn.disabled = busy || !!active || !hasShareInput;
-      selectedStartBtn.disabled = busy || !manifest?.files?.length || selectedIndexes.size === 0 || !!active || !preferredHandleReady;
-      selectedEarlyDeleteStartBtn.disabled = busy || !manifest?.files?.length || selectedIndexes.size === 0 || !!active || !preferredHandleReady;
+      const directSingleSelection = selectedIndexes.size === 1;
+      selectedStartBtn.textContent = directSingleSelection ? 'このファイルを直接保存' : '選択をダウンロード';
+      selectedEarlyDeleteStartBtn.textContent = directSingleSelection ? '互換方式で直接保存' : '互換方式で選択をダウンロード';
+      selectedStartBtn.disabled = busy || !manifest?.files?.length || selectedIndexes.size === 0 || !!active || (!directSingleSelection && !preferredHandleReady);
+      selectedEarlyDeleteStartBtn.disabled = busy || !manifest?.files?.length || selectedIndexes.size === 0 || !!active || (!directSingleSelection && !preferredHandleReady);
       const c = queueCounts(job);
       retryBtn.disabled = busy || !job || !(c.skippedCapacity || c.unfittable) || !isTerminal(job);
       abandonBtn.disabled = busy || !active;
@@ -4534,7 +4562,7 @@ const transientSignedUrls = new Map();
 
 
 
-    async function startEarlyDeletePipeline(selection = null, {baseDir = null, skipConfirm = false, recoveryProbe = false} = {}) {
+    async function startEarlyDeletePipeline(selection = null, {baseDir = null, directFileHandle = null, skipConfirm = false, recoveryProbe = false} = {}) {
       if (!manifest || running) return;
       const selected = selection == null ? null : Array.from(selection).sort((a,b) => a - b);
       const chosenFiles = selected == null ? manifest.files : selected.map(index => manifest.files[index]).filter(Boolean);
@@ -4591,7 +4619,7 @@ const transientSignedUrls = new Map();
       }
 
       let chosenBaseDir = baseDir;
-      if (!chosenBaseDir) {
+      if (!directFileHandle && !chosenBaseDir) {
         try { chosenBaseDir = await invokeDirectoryPicker({mode:'readwrite'}); }
         catch (e) { if (e?.name !== 'AbortError') write(`保存先選択失敗: ${e?.message || e}`, 'err'); return; }
       }
@@ -4601,8 +4629,11 @@ const transientSignedUrls = new Map();
         await acquireLease();
         const activeJob = loadQueueJob();
         if (activeJob && !isTerminal(activeJob)) throw new LinkexError('別の未完了Queueがあります。先に再開または整理してください。', {kind:'queue_conflict'});
-        await ensureHandlePermission(chosenBaseDir);
-        const job = createQueueFromManifest(manifest, selected);
+        const job = createQueueFromManifest(manifest, selected, {
+          directFileName:directFileHandle?.name || null
+        });
+        if (directFileHandle) await prepareDirectFileHandle(directFileHandle);
+        else await ensureHandlePermission(chosenBaseDir);
         job.kind = 'early-delete-pipeline';
         job.experimental = {
           mode:'early-delete',
@@ -4620,7 +4651,7 @@ const transientSignedUrls = new Map();
             }
           } : {})
         };
-        const queueRoot = await chosenBaseDir.getDirectoryHandle(job.folderName, {create:true});
+        const queueRoot = directFileHandle || await chosenBaseDir.getDirectoryHandle(job.folderName, {create:true});
         await putQueueRootHandle(job, queueRoot);
         saveQueueJob(job);
         recordEvent('warn', 'early-delete-queue-created', `早期DELETE Queue作成: ${job.jobId}`, {
@@ -4743,7 +4774,7 @@ const transientSignedUrls = new Map();
       }
     }
 
-    async function startManifestQueue(selection = null, {baseDir = null, skipConfirm = false} = {}) {
+    async function startManifestQueue(selection = null, {baseDir = null, directFileHandle = null, skipConfirm = false} = {}) {
       if (!manifest || running) return;
       const selected = selection == null ? null : Array.from(selection).sort((a,b) => a - b);
       const chosenFiles = selected == null ? manifest.files : selected.map(index => manifest.files[index]).filter(Boolean);
@@ -4769,7 +4800,7 @@ const transientSignedUrls = new Map();
         if (!ok) return;
       }
       let chosenBaseDir = baseDir;
-      if (!chosenBaseDir) {
+      if (!directFileHandle && !chosenBaseDir) {
         try { chosenBaseDir = await invokeDirectoryPicker({mode:'readwrite'}); }
         catch (e) { if (e?.name !== 'AbortError') write(`保存先選択失敗: ${e?.message || e}`, 'err'); return; }
       }
@@ -4778,9 +4809,12 @@ const transientSignedUrls = new Map();
         await acquireLease();
         const activeJob = loadQueueJob();
         if (activeJob && !isTerminal(activeJob)) throw new LinkexError('別の未完了Queueを検出しました。状態を再表示してから再開または整理してください。', {kind:'queue_conflict'});
-        await ensureHandlePermission(chosenBaseDir);
-        const job = createQueueFromManifest(manifest, selected);
-        const queueRoot = await chosenBaseDir.getDirectoryHandle(job.folderName, {create:true});
+        const job = createQueueFromManifest(manifest, selected, {
+          directFileName:directFileHandle?.name || null
+        });
+        if (directFileHandle) await prepareDirectFileHandle(directFileHandle);
+        else await ensureHandlePermission(chosenBaseDir);
+        const queueRoot = directFileHandle || await chosenBaseDir.getDirectoryHandle(job.folderName, {create:true});
         await putQueueRootHandle(job, queueRoot);
         saveQueueJob(job);
         recordEvent('info', 'queue-created', `Queue作成: ${job.jobId}`, {jobId:job.jobId, selectionMode:job.selectionMode, sourceOriginalCount:job.sourceOriginalCount, shareName:job.shareName, folderName:job.folderName, items:job.items.length, totalBytes:job.sourceTotalBytes});
@@ -4861,10 +4895,20 @@ const transientSignedUrls = new Map();
       preparing = true;
       refreshQueueUi();
       try {
-        const baseDir = await acquirePreferredBaseDirFromGesture();
+        let baseDir = null;
+        let directFileHandle = null;
+        if (selectedIndexes.size === 1) {
+          const index = Array.from(selectedIndexes)[0];
+          const source = manifest.files[index];
+          directFileHandle = await invokeSaveFilePicker({
+            suggestedName:sanitizeSegment(source?.name || 'file.bin')
+          });
+        } else {
+          baseDir = await acquirePreferredBaseDirFromGesture();
+        }
         preparing = false;
         refreshQueueUi();
-        await startManifestQueue(new Set(selectedIndexes), {baseDir, skipConfirm:true});
+        await startManifestQueue(new Set(selectedIndexes), {baseDir, directFileHandle, skipConfirm:true});
       } catch (e) {
         if (e?.name !== 'AbortError') write(`保存先準備失敗: ${e?.message || e}`, 'err');
       } finally {
@@ -4879,10 +4923,20 @@ const transientSignedUrls = new Map();
       preparing = true;
       refreshQueueUi();
       try {
-        const baseDir = await acquirePreferredBaseDirFromGesture();
+        let baseDir = null;
+        let directFileHandle = null;
+        if (selectedIndexes.size === 1) {
+          const index = Array.from(selectedIndexes)[0];
+          const source = manifest.files[index];
+          directFileHandle = await invokeSaveFilePicker({
+            suggestedName:sanitizeSegment(source?.name || 'file.bin')
+          });
+        } else {
+          baseDir = await acquirePreferredBaseDirFromGesture();
+        }
         preparing = false;
         refreshQueueUi();
-        await startEarlyDeletePipeline(new Set(selectedIndexes), {baseDir, skipConfirm:true});
+        await startEarlyDeletePipeline(new Set(selectedIndexes), {baseDir, directFileHandle, skipConfirm:true});
       } catch (e) {
         if (e?.name !== 'AbortError') write(`保存先準備失敗: ${e?.message || e}`, 'err');
       } finally { preparing = false; refreshQueueUi(); }
@@ -4938,7 +4992,7 @@ const transientSignedUrls = new Map();
           });
         }
         const queueRoot = await getQueueRootHandle(job);
-        if (!queueRoot) throw new LinkexError('保存先DirectoryHandleが見つかりません。開始時と同じTampermonkeyスクリプトを使用してください。', {kind:'filesystem'});
+        if (!queueRoot) throw new LinkexError('保存先Handleが見つかりません。開始時と同じTampermonkeyスクリプトを使用してください。', {kind:'filesystem'});
         await ensureHandlePermission(queueRoot);
         job.stopRequested = false;
         saveQueueJob(job);
