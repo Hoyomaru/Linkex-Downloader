@@ -2191,7 +2191,7 @@ const transientSignedUrls = new Map();
     const sources = chosen.map(x => compactSource(x.source));
     const directFile = chosen.length === 1 && typeof directFileName === 'string' && directFileName.trim();
     const localPaths = directFile
-      ? [[sanitizeSegment(directFileName)]]
+      ? [[String(directFileName)]]
       : allocateLocalPaths(sources, manifest.shareName);
     const jobId = makeId(selected == null ? 'full' : 'selected');
     const base = sanitizeSegment(manifest.shareName || manifest.shareToken || 'share');
@@ -4629,11 +4629,11 @@ const transientSignedUrls = new Map();
         await acquireLease();
         const activeJob = loadQueueJob();
         if (activeJob && !isTerminal(activeJob)) throw new LinkexError('別の未完了Queueがあります。先に再開または整理してください。', {kind:'queue_conflict'});
-        if (directFileHandle) await prepareDirectFileHandle(directFileHandle);
-        else await ensureHandlePermission(chosenBaseDir);
         const job = createQueueFromManifest(manifest, selected, {
           directFileName:directFileHandle?.name || null
         });
+        if (directFileHandle) await prepareDirectFileHandle(directFileHandle);
+        else await ensureHandlePermission(chosenBaseDir);
         job.kind = 'early-delete-pipeline';
         job.experimental = {
           mode:'early-delete',
@@ -4809,11 +4809,11 @@ const transientSignedUrls = new Map();
         await acquireLease();
         const activeJob = loadQueueJob();
         if (activeJob && !isTerminal(activeJob)) throw new LinkexError('別の未完了Queueを検出しました。状態を再表示してから再開または整理してください。', {kind:'queue_conflict'});
-        if (directFileHandle) await prepareDirectFileHandle(directFileHandle);
-        else await ensureHandlePermission(chosenBaseDir);
         const job = createQueueFromManifest(manifest, selected, {
           directFileName:directFileHandle?.name || null
         });
+        if (directFileHandle) await prepareDirectFileHandle(directFileHandle);
+        else await ensureHandlePermission(chosenBaseDir);
         const queueRoot = directFileHandle || await chosenBaseDir.getDirectoryHandle(job.folderName, {create:true});
         await putQueueRootHandle(job, queueRoot);
         saveQueueJob(job);
