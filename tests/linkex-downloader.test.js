@@ -471,7 +471,7 @@ test('selected Queue rejects an empty selection', () => {
 test('live queue progress aggregates active worker speed and excludes skipped bytes from ETA', () => {
   const {api, storage} = loadRuntime();
   const now = 10_000;
-  storage.set('linkexCopyProbeStateV1:op-live', {
+  storage.set('linkexCopyProbeStateV2:op-live', {
     operationId:'op-live',
     state:'DOWNLOADING',
     download:{
