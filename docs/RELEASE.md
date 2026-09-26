@@ -230,6 +230,21 @@ Chromium系 + Tampermonkeyで少なくとも次を確認します。
 - CHANGELOG / release notesが一致する
 - `main` にversion固定 `.user.js` / `.zip` がtrackedされていない
 
+## 単一ファイル直接保存の実機確認
+
+`feature/direct-single-file` 以降をRelease候補に含める場合、通常Queueの回帰確認に加えて次を実施します。
+
+- [ ] **ファイルを選ぶ** から1件だけ選ぶと **このファイルを直接保存** に変わる
+- [ ] nested folder内の1件でも `Linkex_*` フォルダやremote folder階層を作らない
+- [ ] Save File Pickerで変更したファイル名がそのまま使用される
+- [ ] 既存ファイルを選択した新規Queueは0 byteから開始し、既存サイズをRange partialとして誤認しない
+- [ ] 直接保存を途中停止 → reload → Queue再開し、同じFileHandleへRange resumeできる
+- [ ] 2件以上の選択では従来どおりQueue directory + folder structure維持になる
+- [ ] 高速方式 / 互換方式の双方で直接保存できる
+- [ ] COPY ownership proof / early DELETE / final verifyの診断ログが従来の安全条件を満たす
+
+直接保存は保存レイアウトだけの変更です。COPY / ownership / DELETE / signed URL / Range resumeの安全境界が別実装へ分岐していないことを確認してください。
+
 ## 過去Release
 
 v1.0.0 / v1.1.0のversion固定配布物は各GitHub Releaseに残します。履歴・ロールバック用途はReleaseページを使用し、mainへ複製しません。
