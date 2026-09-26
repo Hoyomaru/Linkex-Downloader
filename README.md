@@ -35,10 +35,10 @@ Web WorkerでCDN stream開始（最初のchunkを確認）
 
 ## Version / 配布状態
 
-- `main` source: **v1.4.0**（Release candidate / 実機確認済み）
-- 最新公開安定版: **v1.3.1**（v1.4.0公開前）
-- 最新公開tag: **`v1.3.1`**（v1.4.0公開前）
-- GitHub Release: **v1.4.0 release candidate（2026-09-27）**
+- `main` source: **v1.4.0**（公開済み / 実機確認済み）
+- 最新公開安定版: **v1.4.0**
+- 最新公開tag: **`v1.4.0`**
+- GitHub Release: **v1.4.0 公開済み（2026-09-27）**
 - 現行CI: **GitHub Actions (`.github/workflows/ci.yml`)** — userscript構文、回帰テスト、repository整合性、Release Asset生成を検証
 - License: **MIT**
 

@@ -8,12 +8,25 @@
 
 2026-09-27 時点:
 
-- `main` source: **v1.4.0**（Release candidate / 実機確認済み）
-- 最新公開Stable: **v1.3.1**（v1.4.0公開前）
-- 最新公開tag: **`v1.3.1`**（v1.4.0公開前）
-- v1.4.0: release candidate（単一file direct-save / UI simplification）
+- `main` source: **v1.4.0**（公開済み / 実機確認済み）
+- 最新公開Stable: **v1.4.0**
+- 最新公開tag: **`v1.4.0`**
+- v1.4.0: GitHub Release公開済み（単一file direct-save / UI simplification）
 - License: **MIT**
 - CI: `.github/workflows/ci.yml`
+
+## v1.4.0 公開実績
+
+GitHub Release `v1.4.0` は2026-09-27に公開済みです。tagはrelease commit `12d463f4ba8fca306b8eb76c526b260cdc175263` を指し、publish workflowでsyntax / Node regression / repository consistency / deterministic Release Asset生成と公開後digest照合までPASSしています。
+
+最終userscript build:
+
+```text
+linkex_downloader_v1.4.0.user.js  244744 bytes  sha256:717e088e3d399ba1e969cefe1780d0bd3438b5adb025ea9c1aed7dfe450229d3
+linkex_downloader_v1.4.0.zip        55577 bytes  sha256:63151ff3d36c70766b9effb4d84b7c690006fcd4247eb8e9fc0759a492c4d8ab
+```
+
+2026-09-27実機でsingle-file direct save、rename、overwrite、reload resume、2件以上Queue、normal/progress/error UIを確認済みです。
 
 ## v1.3.1 公開実績
 
