@@ -650,13 +650,16 @@ test('compact first screen centers quick all-download and file selection while a
   }
 });
 
-test('verbose status log is collapsed under details while one-line state stays visible and errors reveal the log', () => {
+test('verbose status log stays collapsed while errors expose direct recovery actions', () => {
   const progressAt = SOURCE.indexOf('id="lf-progress-bar"');
   const stateAt = SOURCE.indexOf('id="lf-state-line"');
+  const errorAt = SOURCE.indexOf('id="lf-error-actions"');
   const moreAt = SOURCE.indexOf('<details id="lf-more" class="more">');
   const logAt = SOURCE.indexOf('<details id="lf-log-details" class="log">');
   const statusAt = SOURCE.indexOf('id="lf-status" class="status"');
-  assert.ok(progressAt > 0 && stateAt > progressAt && moreAt > stateAt && logAt > moreAt && statusAt > logAt);
+  assert.ok(progressAt > 0 && stateAt > progressAt && errorAt > stateAt && moreAt > errorAt && logAt > moreAt && statusAt > logAt);
+  assert.match(SOURCE, /id="lf-error-resume"[^>]*>Queueを再開/);
+  assert.match(SOURCE, /id="lf-error-export"[^>]*>診断ログを保存/);
 
   const renderAt = SOURCE.indexOf("const renderStatus = (text, cls='') => {");
   const writeAt = SOURCE.indexOf("const write = (text, cls='') => {", renderAt);
@@ -665,8 +668,9 @@ test('verbose status log is collapsed under details while one-line state stays v
   const renderBlock = SOURCE.slice(renderAt, writeAt);
   const writeBlock = SOURCE.slice(writeAt, manifestAt);
   assert.match(renderBlock, /stateLine\.textContent =/);
-  assert.match(renderBlock, /stateLine\.className = `state-line \$\{cls\}`;/);
-  assert.match(renderBlock, /if \(cls === 'err'\) \{\s*moreDetails\.open = true;\s*logDetails\.open = true;\s*\}/);
+  assert.match(renderBlock, /errorActions\.hidden = !isError/);
+  assert.match(renderBlock, /moreDetails\.open = false/);
+  assert.match(renderBlock, /logDetails\.open = false/);
   assert.match(writeBlock, /const message = renderStatus\(text, cls\);/);
 });
 
