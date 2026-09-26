@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Linkex Downloader
 // @namespace    openai-linkex-helper
-// @version      1.4.0
+// @version      1.5.0
 // @description  Linkex共有ページからDL=8高速Queue保存。所有ID限定early DELETE・Range復旧・互換モード・診断付き。
 // @license      MIT
 // @match        https://disk.linkex.io/*
@@ -19,8 +19,8 @@
 (() => {
   'use strict';
 
-  const VERSION = '1.4.0';
-  const BUILD_TAG = 'stream-delete-worker-journal';
+  const VERSION = '1.5.0';
+  const BUILD_TAG = 'batch-import-safety-hardening';
   const API_BASE = 'https://prod.linksvc.xyz';
   const SIGNED_HEADER_PREFIX = 'x-linkinflu-';
   const SIGNATURE_HEADER = 'x-linkinflu-sign';
@@ -616,6 +616,70 @@
     return true;
   }
 
+  function collectCopyCreatedIds(copyResult, taskResult, sourceId = null) {
+    const ids = new Set();
+    const source = String(sourceId || '');
+    const add = value => {
+      if (value == null || typeof value === 'object') return;
+      const id = String(value).trim();
+      if (!id || id === source) return;
+      ids.add(id);
+    };
+    const collectKnown = (value, allowPlainId = false, depth = 0) => {
+      if (!value || typeof value !== 'object' || depth > 5) return;
+      if (allowPlainId) add(value.id);
+      for (const key of ['file_id','fileId','dest_id','destId','destination_id','destinationId','target_id','targetId','created_id','createdId']) add(value[key]);
+      for (const key of ['file_ids','fileIds','dest_ids','destIds','destination_ids','destinationIds','target_ids','targetIds','created_ids','createdIds']) {
+        const list = value[key];
+        if (Array.isArray(list)) list.forEach(add);
+      }
+      for (const key of ['file','dest','destination','target','created_file','createdFile','output','result','data']) {
+        collectKnown(value[key], true, depth + 1);
+      }
+      for (const key of ['files','destinations','targets','created_files','createdFiles','outputs','results']) {
+        const list = value[key];
+        if (Array.isArray(list)) list.forEach(item => collectKnown(item, true, depth + 1));
+      }
+    };
+    collectKnown(copyResult, false);
+    collectKnown(taskResult, false);
+    return [...ids];
+  }
+
+  function buildCopyAttribution(copyResult, taskResult, sourceId) {
+    const taskId = copyResult?.task_id ?? copyResult?.taskId ?? taskResult?.task_id ?? taskResult?.taskId ?? null;
+    return {
+      taskId:taskId == null ? null : String(taskId),
+      expectedDestIds:collectCopyCreatedIds(copyResult, taskResult, sourceId),
+      builtAt:Date.now()
+    };
+  }
+
+  function copyCandidateProof(candidate, state) {
+    if (!candidate || !state) return null;
+    const id = String(candidate.id || '');
+    if (!id) return null;
+    const expected = new Set((state.copyAttribution?.expectedDestIds || []).map(String));
+    if (expected.has(id)) return {verified:true, method:'copy-created-id', evidenceId:id};
+    const taskId = String(state.copyAttribution?.taskId || '');
+    const candidateTaskId = String(candidate.task_id ?? candidate.taskId ?? candidate.copy_task_id ?? candidate.copyTaskId ?? '');
+    if (taskId && candidateTaskId && taskId === candidateTaskId) {
+      return {verified:true, method:'copy-task-id', evidenceId:taskId};
+    }
+    return null;
+  }
+
+  function assertOwnershipProof(state, kind = 'ownership') {
+    const proof = state?.ownershipProof;
+    if (proof?.verified !== true || !proof.method) {
+      throw new LinkexError('今回のCOPY要求とdestIdを直接結び付ける証拠がありません。誤削除防止のため停止します。', {kind});
+    }
+    if (!proof.destId || String(state?.confirmedDest?.id || '') !== String(proof.destId)) {
+      throw new LinkexError('COPY所有権証拠とconfirmedDestが一致しません。誤削除防止のため停止します。', {kind});
+    }
+    return proof;
+  }
+
   function probeKeyFor(operationOrState) {
     const operationId = typeof operationOrState === 'string'
       ? operationOrState
@@ -669,7 +733,7 @@
       if (!task) throw new LinkexError('Copy task not found', {kind:'protocol', taskId});
       const status = String(task.status || '').toLowerCase();
       onStatus?.(status || 'unknown');
-      if (status === 'success') return {taskId, status};
+      if (status === 'success') return {taskId, status, task, response:data};
       if (terminalFail.has(status)) throw new LinkexError(`Copy task failed: ${status}`, {kind:'copy_task', status, task});
       attempt = status !== lastStatus ? 0 : attempt + 1;
       lastStatus = status;
@@ -690,20 +754,28 @@
       const diff = root.filter(item => !before.has(String(item.id)));
       lastDiff = diff;
       const plausible = diff.filter(item => isPlausibleCopy(item, state.source, state.startedAt));
-      onProgress({attempt:attempt + 1, diff, plausible});
+      const attributed = plausible
+        .map(item => ({item, proof:copyCandidateProof(item, state)}))
+        .filter(entry => entry.proof);
+      onProgress({attempt:attempt + 1, diff, plausible, attributed});
 
-      // 安全側: コピー開始後に増えたIDが1件だけで、それが元ファイルと整合するときだけ所有権を確定。
-      if (diff.length === 1 && plausible.length === 1) {
-        return {status:'CONFIRMED', item:plausible[0], diff, root};
+      // 名前・サイズ・作成時刻だけでは「今回のCOPYが作ったID」を証明できない。
+      // COPY/task応答のcreated IDまたはtask IDとroot candidateが直接結び付く場合だけ確定する。
+      if (attributed.length === 1) {
+        return {status:'CONFIRMED', item:attributed[0].item, proof:attributed[0].proof, diff, plausible, root};
       }
-      // 2件以上増えた時点で、どれが自分のコピーかID差分だけでは証明できない。
-      if (diff.length > 1) {
-        return {status:'AMBIGUOUS', diff, plausible, root};
+      if (attributed.length > 1) {
+        return {status:'AMBIGUOUS', diff, plausible, attributed, root};
+      }
+      // 新規IDが見えているのに直接帰属できない場合、待って推測を強めず即座に停止する。
+      // 外部操作の同名・同サイズfileをDownloaderの一時copyとして削除しないため。
+      if (diff.length > 0) {
+        return {status:'UNATTRIBUTED', diff, plausible, attributed, root};
       }
 
       const delay = delays[Math.min(attempt, delays.length - 1)];
       attempt += 1;
-      await sleep(delay);
+      await sleep(Math.min(delay, Math.max(0, deadline - Date.now())));
     }
     return {status:'NO_EVIDENCE', diff:lastDiff, plausible:lastDiff.filter(item => isPlausibleCopy(item, state.source, state.startedAt))};
   }
@@ -1006,6 +1078,33 @@
     return fetch(url, {method:'GET', headers, cache:'no-store', credentials:'omit', signal});
   }
 
+  function parseContentRangeHeader(value) {
+    const text = String(value || '').trim();
+    const match = text.match(/^bytes\s+(\d+)-(\d+)\/(\d+|\*)$/i);
+    if (!match) return null;
+    const start = Number(match[1]);
+    const end = Number(match[2]);
+    const total = match[3] === '*' ? null : Number(match[3]);
+    if (!Number.isSafeInteger(start) || !Number.isSafeInteger(end) || start < 0 || end < start) return null;
+    if (total != null && (!Number.isSafeInteger(total) || total <= end)) return null;
+    return {start, end, total};
+  }
+
+  function validateResumeRangeResponse(res, offset) {
+    const expectedStart = Number(offset || 0);
+    if (!(expectedStart > 0 && res?.status === 206)) return {ok:true, total:null};
+    const parsed = parseContentRangeHeader(res.headers?.get?.('Content-Range'));
+    if (!parsed) return {ok:false, reason:'Content-Rangeを確認できません'};
+    if (parsed.start !== expectedStart) return {ok:false, reason:`Content-Range開始位置不一致: expected=${expectedStart} actual=${parsed.start}`};
+    const rawLength = res.headers?.get?.('Content-Length');
+    const length = rawLength == null ? null : Number(rawLength);
+    const span = parsed.end - parsed.start + 1;
+    if (length != null && Number.isFinite(length) && length >= 0 && length !== span) {
+      return {ok:false, reason:`Content-LengthとContent-Range幅が不一致: length=${length} span=${span}`};
+    }
+    return {ok:true, total:parsed.total};
+  }
+
   async function probeCdnTotalSize(url) {
     // Content-Range is not CORS-exposed in the HAR, so a normal GET's exposed Content-Length is used.
     const ctl = new AbortController();
@@ -1048,6 +1147,16 @@
 let detachedDownloadWorkerUrl = null;
 
   function detachedDownloadWorkerBootstrap() {
+    const parseContentRange = value => {
+      const match = String(value || '').trim().match(/^bytes\s+(\d+)-(\d+)\/(\d+|\*)$/i);
+      if (!match) return null;
+      const start = Number(match[1]);
+      const end = Number(match[2]);
+      const total = match[3] === '*' ? null : Number(match[3]);
+      if (!Number.isSafeInteger(start) || !Number.isSafeInteger(end) || start < 0 || end < start) return null;
+      if (total != null && (!Number.isSafeInteger(total) || total <= end)) return null;
+      return {start, end, total};
+    };
     const mergeChunks = (chunks, totalBytes) => {
       if (!totalBytes) return new Uint8Array(0);
       if (chunks.length === 1 && chunks[0]?.byteLength === totalBytes) return chunks[0];
@@ -1138,6 +1247,21 @@ let detachedDownloadWorkerUrl = null;
         const rawRemaining = res.headers.get('Content-Length');
         const remaining = rawRemaining === null ? null : Number(rawRemaining);
         const hasKnownLength = remaining !== null && Number.isFinite(remaining) && remaining >= 0;
+        let rangeTotal = null;
+        if (offset > 0 && res.status === 206) {
+          const range = parseContentRange(res.headers.get('Content-Range'));
+          const span = range ? range.end - range.start + 1 : null;
+          if (!range || range.start !== offset || (hasKnownLength && remaining !== span)) {
+            try { await res.body?.cancel(); } catch {}
+            const error = new Error(!range
+              ? 'Range再開のContent-Rangeを確認できません。先頭から安全に再取得します。'
+              : `Range再開の応答範囲が不正です: requested=${offset} actual=${range.start}-${range.end}`);
+            error.kind = 'range_unverified';
+            error.status = 206;
+            throw error;
+          }
+          rangeTotal = range.total;
+        }
         resumed = offset > 0 && res.status === 206;
         let base = resumed ? offset : 0;
         if (offset > 0 && res.status === 200) {
@@ -1146,8 +1270,8 @@ let detachedDownloadWorkerUrl = null;
           resumed = false;
         }
 
-        expectedTotal = hasKnownLength ? base + remaining : null;
-        verificationMethod = hasKnownLength ? 'content-length' : 'stream-eof';
+        expectedTotal = rangeTotal != null ? rangeTotal : (hasKnownLength ? base + remaining : null);
+        verificationMethod = expectedTotal != null ? 'content-length' : 'stream-eof';
         transferStartedAt = Date.now();
         transferStartBytes = base;
         received = base;
@@ -1517,7 +1641,7 @@ let detachedDownloadWorkerUrl = null;
       } catch (e) {
         // CSP / userscript sandbox / handle-clone failures fall back to the proven inline path.
         // Network/CDN/filesystem errors remain real transfer errors and are handled by the normal Range retry layer.
-        if (!['worker_unavailable','worker_start','worker_filesystem','range_416','network'].includes(e?.kind)) throw e;
+        if (!['worker_unavailable','worker_start','worker_filesystem','range_416','range_unverified','network'].includes(e?.kind)) throw e;
         console.warn('[Linkex Downloader] Worker path unavailable; falling back to inline transfer.', e);
         recordEvent('warn', 'worker-fallback', 'Web Workerからinline転送へフォールバック', {
           kind:e?.kind || null,
@@ -1595,6 +1719,21 @@ let detachedDownloadWorkerUrl = null;
       }
       if (!res.body) throw new LinkexError('CDN response bodyがストリームではありません。', {kind:'protocol'});
 
+      let rangeTotal = null;
+      if (offset > 0 && res.status === 206) {
+        const rangeCheck = validateResumeRangeResponse(res, offset);
+        if (!rangeCheck.ok) {
+          try { await res.body?.cancel(); } catch {}
+          const w = await handle.createWritable({keepExistingData:false});
+          await w.truncate(0); await w.close();
+          recordEvent('warn', 'range-restart', `Range再開を破棄して先頭から再取得: ${rangeCheck.reason}`, {destId, offset});
+          offset = 0;
+          retried403 = false;
+          continue;
+        }
+        rangeTotal = rangeCheck.total;
+      }
+
       const rawRemaining = res.headers.get('Content-Length');
     const remaining = rawRemaining === null ? null : Number(rawRemaining);
     const hasKnownLength = remaining !== null && Number.isFinite(remaining) && remaining >= 0;
@@ -1608,10 +1747,10 @@ let detachedDownloadWorkerUrl = null;
       offset = 0;
     }
 
-    // Content-LengthがCORS等で見えない正常応答では、HTTP streamが正常EOFまで
-    // 到達したことを完全性証拠として扱う。metadata sizeはCDN実サイズと異なるため使わない。
-    const expectedTotal = hasKnownLength ? base + remaining : null;
-    const verificationMethod = hasKnownLength ? 'content-length' : 'stream-eof';
+    // Content-Rangeの総サイズを読める206ではそれを優先する。読めない/開始位置不一致206は
+    // 上で追記せず0 byteから取り直す。Content-Lengthもない正常full responseはEOFを証拠にする。
+    const expectedTotal = rangeTotal != null ? rangeTotal : (hasKnownLength ? base + remaining : null);
+    const verificationMethod = expectedTotal != null ? 'content-length' : 'stream-eof';
     const transferStartedAt = Date.now();
     const transferStartBytes = base;
     let lastRateAt = transferStartedAt;
@@ -1773,6 +1912,7 @@ let detachedDownloadWorkerUrl = null;
   }
   const destId = String(state.confirmedDest?.id || '');
   if (!destId) throw new LinkexError('削除条件を満たしていません: confirmedDest.id がありません。', {kind:'delete_guard'});
+  assertOwnershipProof(state, 'delete_guard');
   if (state.state === 'AMBIGUOUS_COPY') throw new LinkexError('AMBIGUOUS_COPY は削除できません。', {kind:'delete_guard'});
   if (!Array.isArray(state.beforeIds)) throw new LinkexError('削除条件を満たしていません: コピー前ID集合がありません。', {kind:'delete_guard'});
   if (state.beforeIds.map(String).includes(destId)) {
@@ -1880,6 +2020,8 @@ const transientSignedUrls = new Map();
   // --- Production full queue: all files, safe sequential transactions ---
   const QUEUE_KEY = 'linkexQueueFullV1';
   const QUEUE_HANDLE_PREFIX = 'queue-full:';
+  const SHARE_BATCH_KEY = 'linkexShareBatchV1';
+  const SHARE_BATCH_HANDLE_PREFIX = 'share-batch:';
   const QUEUE_ITEM_JOURNAL_PREFIX = 'linkexQueueItemJournalV1:';
   const QUEUE_DIRTY_INDEX_PREFIX = 'linkexQueueDirtyIndexesV1:';
   const QUEUE_FULL_PERSIST_INTERVAL_MS = 5000;
@@ -1898,6 +2040,122 @@ const transientSignedUrls = new Map();
   let queueCommitTail = Promise.resolve();
   let lastFullQueuePersistAt = 0;
   const dirtyQueueIndexCache = new Map();
+
+  function parseShareBatchInput(input) {
+    const parts = String(input || '')
+      .split(/[\s,;]+/)
+      .map(value => value.trim())
+      .filter(Boolean);
+    if (!parts.length) throw new LinkexError('共有URLを1件以上入力してください。', {kind:'batch_input'});
+    const tokens = [];
+    const seen = new Set();
+    for (const part of parts) {
+      const token = parseShareToken(part);
+      if (seen.has(token)) continue;
+      seen.add(token);
+      tokens.push(token);
+    }
+    if (!tokens.length) throw new LinkexError('有効な共有URLがありません。', {kind:'batch_input'});
+    return tokens;
+  }
+
+  function createShareBatchJob(tokens) {
+    const unique = [];
+    const seen = new Set();
+    for (const value of tokens || []) {
+      const token = String(value || '').trim();
+      if (!token || seen.has(token)) continue;
+      seen.add(token);
+      unique.push(token);
+    }
+    if (!unique.length) throw new LinkexError('一括取り込み対象がありません。', {kind:'batch_input'});
+    const batchId = makeId('batch');
+    return {
+      schemaVersion:1,
+      kind:'share-batch',
+      version:VERSION,
+      batchId,
+      createdAt:Date.now(),
+      updatedAt:Date.now(),
+      state:'READY',
+      currentShareIndex:0,
+      completedAt:null,
+      lastError:null,
+      shares:unique.map((shareToken, index) => ({
+        index,
+        shareToken,
+        state:'PENDING',
+        childJobId:null,
+        shareName:null,
+        fileCount:null,
+        totalBytes:null,
+        startedAt:null,
+        completedAt:null,
+        lastError:null
+      }))
+    };
+  }
+
+  function loadShareBatchJob() {
+    const value = GM_getValue(SHARE_BATCH_KEY, null);
+    return value && typeof value === 'object' && value.kind === 'share-batch' ? value : null;
+  }
+
+  function saveShareBatchJob(job) {
+    if (!job) return null;
+    job.updatedAt = Date.now();
+    GM_setValue(SHARE_BATCH_KEY, job);
+    return job;
+  }
+
+  function isShareBatchTerminal(job) {
+    return !!job && ['DONE','DONE_WITH_SKIPS'].includes(job.state);
+  }
+
+  function shareBatchCounts(job) {
+    const out = {done:0, skipped:0, blocked:0, pending:0};
+    for (const share of job?.shares || []) {
+      if (share.state === 'DONE') out.done += 1;
+      else if (share.state === 'DONE_WITH_SKIPS') out.skipped += 1;
+      else if (['BLOCKED','ERROR','PAUSED'].includes(share.state)) out.blocked += 1;
+      else out.pending += 1;
+    }
+    return out;
+  }
+
+  function shareBatchSummary(job) {
+    if (!job) return '一括取り込みなし';
+    const c = shareBatchCounts(job);
+    const current = job.shares?.[Math.min(Number(job.currentShareIndex || 0), Math.max(0, (job.shares?.length || 1) - 1))];
+    const parts = [
+      `batch: ${job.batchId}`,
+      `state: ${job.state}`,
+      `shares: ${c.done + c.skipped}/${job.shares?.length || 0} 完了 (skipあり ${c.skipped})`
+    ];
+    if (current && !isShareBatchTerminal(job)) {
+      parts.push(`current: [${current.index + 1}/${job.shares.length}] ${current.shareName || current.shareToken} · ${current.state}`);
+    }
+    if (job.lastError?.message) parts.push(`lastError: ${job.lastError.message}`);
+    return parts.join('\n');
+  }
+
+  async function getShareBatchRootHandle(job) {
+    return job?.batchId ? await idbGetHandle(`${SHARE_BATCH_HANDLE_PREFIX}${job.batchId}`) : null;
+  }
+
+  async function putShareBatchRootHandle(job, handle) {
+    if (!job?.batchId) throw new LinkexError('一括取り込みIDがありません。', {kind:'batch_state'});
+    return await idbPutHandle(`${SHARE_BATCH_HANDLE_PREFIX}${job.batchId}`, handle);
+  }
+
+  async function abandonShareBatchJob(job) {
+    if (!job?.batchId) return {cleared:false, handleCleanupError:null};
+    let handleCleanupError = null;
+    try { await idbDeleteHandle(`${SHARE_BATCH_HANDLE_PREFIX}${job.batchId}`); }
+    catch (e) { handleCleanupError = e?.message || String(e); }
+    GM_setValue(SHARE_BATCH_KEY, null);
+    return {cleared:true, handleCleanupError};
+  }
 
   function commitQueueJob(job, mutate = null) {
     const run = queueCommitTail.then(() => {
@@ -2203,6 +2461,11 @@ const transientSignedUrls = new Map();
       kind:'full-queue',
       selectionMode:selected == null ? 'all' : 'selected',
       localLayout:directFile ? 'direct-file' : 'queue-directory',
+      // New v1.5 direct-save queues must initialize a user-approved existing target
+      // only after Queue metadata + FileHandle have already been persisted.
+      // undefined is reserved for legacy queues, whose existing partial must be preserved.
+      directFileInitialized:directFile ? false : null,
+      directFileInitializedAt:null,
       sourceOriginalCount:manifest.files.length,
       version:VERSION,
       jobId,
@@ -2243,9 +2506,26 @@ const transientSignedUrls = new Map();
 
   async function prepareDirectFileHandle(handle) {
     if (!handle || handle.kind !== 'file') throw new LinkexError('直接保存用のFileHandleがありません。', {kind:'filesystem'});
+    // ここでは権限確認だけ行う。既存fileのtruncateはQueue/Handle永続化後、
+    // 実際のdownload開始時にfull responseを0 byteから書く直前まで遅延する。
     await ensureHandlePermission(handle);
+    return handle;
+  }
+
+  async function initializeDirectFileHandle(job, handle) {
+    if (job?.localLayout !== 'direct-file' || job.directFileInitialized !== false) return handle;
+    if (!handle || handle.kind !== 'file') throw new LinkexError('直接保存用のFileHandleがありません。', {kind:'filesystem'});
+    await ensureHandlePermission(handle);
+    // This is called from getLocalFileHandle(), i.e. after ownership/signed-URL preparation
+    // and only after the Queue + FileHandle have already been persisted by the start path.
+    // If the page exits here, a recoverable Queue remains and resume can safely retry init.
     const writable = await handle.createWritable({keepExistingData:false});
-    await writable.close();
+    try { await writable.truncate(0); }
+    finally { await writable.close(); }
+    job.directFileInitialized = true;
+    job.directFileInitializedAt = Date.now();
+    saveQueueJob(job);
+    recordEvent('info', 'direct-file-initialized', `直接保存targetを転送開始用に初期化: ${handle.name || job.items?.[0]?.source?.name || 'file'}`, {jobId:job.jobId});
     return handle;
   }
 
@@ -2260,6 +2540,7 @@ const transientSignedUrls = new Map();
   async function getLocalFileHandle(queueRoot, item, job = null) {
     if (job?.localLayout === 'direct-file') {
       if (queueRoot?.kind !== 'file') throw new LinkexError('直接保存用のFileHandleが見つかりません。', {kind:'filesystem'});
+      await initializeDirectFileHandle(job, queueRoot);
       return queueRoot;
     }
     const segs = Array.isArray(item.localSegments) && item.localSegments.length ? item.localSegments : [sanitizeSegment(item.source?.name || 'file.bin')];
@@ -2472,7 +2753,12 @@ const transientSignedUrls = new Map();
         copyResult = await api.copySharedFile({shareToken:job.shareToken, sourceId:item.source.sourceId});
         tx = {...tx, state:'COPY_REQUEST_SENT', copyResponse:copyResult ?? {}, requestCompletedAt:Date.now()};
         persistItemTx(job, index, tx, 'COPYING');
-        await waitTaskIfPresent(api, copyResult, s => onStatus?.(`COPY task: ${s}\n${item.source.remotePath}`));
+        const taskResult = await waitTaskIfPresent(api, copyResult, s => onStatus?.(`COPY task: ${s}\n${item.source.remotePath}`));
+        tx = {
+          ...tx,
+          copyAttribution:buildCopyAttribution(copyResult, taskResult?.response || taskResult?.task || null, item.source.sourceId),
+          copyTaskStatus:taskResult?.status || null
+        };
         tx = perfPhaseEnd(tx, 'copy', Date.now(), {outcome:'request-complete'});
         persistItemTx(job, index, tx, 'COPYING');
       } catch (e) {
@@ -2504,15 +2790,25 @@ const transientSignedUrls = new Map();
       persistItemTx(job, index, tx, 'COPYING');
       const rec = await reconcileCopy(api, tx, {timeoutMs:90000, onProgress:x => onStatus?.(`コピー照合中 [${index+1}/${job.items.length}]…\n${item.source.remotePath}\n差分: ${x.diff?.length ?? 0}\n候補: ${x.plausible?.length ?? 0}`)});
       tx = perfPhaseEnd(tx, 'ownershipReconcile', Date.now(), {outcome:rec.status});
-      if (rec.status === 'CONFIRMED' || rec.status === 'UNIQUE') {
+      if (rec.status === 'CONFIRMED') {
         rememberTransientSignedUrl(tx.operationId, rec.item);
         rememberTransientRootSnapshot(tx.operationId, rec.root);
-        tx = {...tx, state:'OWNERSHIP_CONFIRMED', confirmedDest:ownedIdentitySnapshot(rec.item), reconciledAt:Date.now()};
+        tx = {
+          ...tx,
+          state:'OWNERSHIP_CONFIRMED',
+          confirmedDest:ownedIdentitySnapshot(rec.item),
+          ownershipProof:{...rec.proof, verified:true, destId:String(rec.item.id), verifiedAt:Date.now()},
+          reconciledAt:Date.now()
+        };
         persistItemTx(job, index, tx, 'COPIED');
       } else if (rec.status === 'AMBIGUOUS') {
         tx = {...tx, state:'AMBIGUOUS_COPY', candidates:rec.diff, reconciledAt:Date.now()};
         persistItemTx(job, index, tx, 'BLOCKED');
         throw new LinkexError('コピー先IDを一意に確定できません。自動処理を停止します。', {kind:'ownership'});
+      } else if (rec.status === 'UNATTRIBUTED') {
+        tx = {...tx, state:'UNATTRIBUTED_COPY', candidates:rec.diff, reconciledAt:Date.now()};
+        persistItemTx(job, index, tx, 'BLOCKED');
+        throw new LinkexError('新規ファイルは見つかりましたが、今回のCOPY要求と作成IDを直接結び付けられません。誤DELETE防止のため停止します。', {kind:'ownership_unattributed'});
       } else {
         tx = {...tx, state:'UNCERTAIN_NO_EVIDENCE', candidates:rec.diff, reconciledAt:Date.now()};
         persistItemTx(job, index, tx, 'BLOCKED');
@@ -2532,6 +2828,7 @@ const transientSignedUrls = new Map();
     let tx = item.tx;
     if (['LOCAL_COMMITTED','DELETE_INTENT','DELETE_REQUEST_SENT','DELETE_UNCERTAIN','DELETE_UNCERTAIN_PRESENT','DONE'].includes(tx.state)) return tx;
     if (!tx.confirmedDest?.id) throw new LinkexError('ダウンロード前に所有destIdが確定していません。', {kind:'ownership'});
+    assertOwnershipProof(tx, 'ownership');
 
     const handle = await getLocalFileHandle(queueRoot, item, job);
     await ensureHandlePermission(handle);
@@ -2606,6 +2903,7 @@ const transientSignedUrls = new Map();
     }
     const destId = String(tx.confirmedDest?.id || '');
     if (!destId) throw new LinkexError('早期DELETE並列DL: confirmedDest.id がありません。', {kind:'early_delete_guard'});
+    assertOwnershipProof(tx, 'early_delete_guard');
     if (!Array.isArray(tx.beforeIds)) throw new LinkexError('早期DELETE並列DL: コピー前ID集合がありません。', {kind:'early_delete_guard'});
     if (tx.beforeIds.map(String).includes(destId)) {
       throw new LinkexError('早期DELETE並列DL拒否: destId はCOPY前から存在していました。', {kind:'early_delete_guard'});
@@ -3882,9 +4180,14 @@ const transientSignedUrls = new Map();
     if (depth > 12) return '[max-depth]';
     if (value == null || typeof value === 'number' || typeof value === 'boolean') return value;
     if (typeof value === 'string') {
-      if (isJwtLike(value)) return '[REDACTED_JWT]';
-      if (/^https?:\/\//i.test(value) && /(?:token=|sign=|signature=|expires=|auth=)/i.test(value)) return '[REDACTED_SIGNED_URL]';
-      return value.length > 12000 ? `${value.slice(0,12000)}…[truncated]` : value;
+      let text = value;
+      if (isJwtLike(text)) return '[REDACTED_JWT]';
+      // Diagnostics often embed a URL/JWT inside a larger error message. Redact those too.
+      text = text.replace(/\b[A-Za-z0-9_-]{12,}\.[A-Za-z0-9_-]{12,}\.[A-Za-z0-9_-]{12,}\b/g, '[REDACTED_JWT]');
+      text = text.replace(/https?:\/\/[^\s"'<>]+/gi, url => (
+        /(?:[?&](?:token|sign|signature|expires|auth)=)/i.test(url) ? '[REDACTED_SIGNED_URL]' : url
+      ));
+      return text.length > 12000 ? `${text.slice(0,12000)}…[truncated]` : text;
     }
     if (Array.isArray(value)) return value.map(v => redactForExport(v, depth + 1));
     if (typeof value === 'object') {
@@ -3908,6 +4211,7 @@ const transientSignedUrls = new Map();
 
   function downloadSupportBundle() {
     const queue = loadQueueJob();
+    const shareBatch = loadShareBatchJob();
     const bundle = {
       product: 'Linkex Downloader',
       version: VERSION,
@@ -3922,6 +4226,7 @@ const transientSignedUrls = new Map();
       performance: redactForExport(buildPerformanceSummary(queue)),
       earlyDeleteProbe: redactForExport(queue?.kind === 'early-delete-probe' ? (queue.probe || queue.items?.[0]?.tx?.probe || null) : null),
       queue: redactForExport(queue),
+      shareBatch: redactForExport(shareBatch),
       events: redactForExport(loadEventLog())
     };
     const blob = new Blob([JSON.stringify(bundle, null, 2)], {type:'application/json'});
@@ -3950,7 +4255,8 @@ const transientSignedUrls = new Map();
         #linkex-full-queue .mini { flex:0 0 auto; width:auto; padding:5px 9px; font-size:12px; background:#374151; color:#fff; }
         #linkex-full-queue .body { padding:12px; overflow-y:auto; overscroll-behavior:contain; min-height:0; scrollbar-gutter:stable; }
         #linkex-full-queue.collapsed .body { display:none; }
-        #linkex-full-queue input { width:100%; box-sizing:border-box; background:#0b1220; border:1px solid #4b5563; color:#fff; border-radius:8px; padding:9px 10px; margin-bottom:8px; }
+        #linkex-full-queue input, #linkex-full-queue textarea { width:100%; box-sizing:border-box; background:#0b1220; border:1px solid #4b5563; color:#fff; border-radius:8px; padding:9px 10px; margin-bottom:8px; }
+        #linkex-full-queue textarea { min-height:96px; resize:vertical; font:12px/1.4 ui-monospace,SFMono-Regular,Consolas,monospace; }
         #linkex-full-queue .row { display:flex; gap:8px; margin-bottom:8px; }
         #linkex-full-queue button { flex:1; border:0; border-radius:8px; padding:9px 10px; cursor:pointer; font-weight:700; }
         #linkex-full-queue button:disabled { opacity:.4; cursor:not-allowed; }
@@ -4048,6 +4354,14 @@ const transientSignedUrls = new Map();
               <div class="row"><button id="lf-refresh" class="secondary">状態を再表示</button><button id="lf-retry" class="secondary" disabled>容量スキップを再試行</button></div>
               <div class="row" style="margin-bottom:0"><button id="lf-abandon" class="secondary" disabled>Queueを安全に破棄</button></div>
               <details class="sub">
+                <summary>複数共有リンクの一括取り込み</summary>
+                <div class="sub-body">
+                  <textarea id="lf-batch-urls" aria-label="複数共有URL" placeholder="共有URLを1行1件で貼り付け\nhttps://l2e.click/d/xxxxxxxx\nhttps://l2e.click/d/yyyyyyyy"></textarea>
+                  <button id="lf-batch-start" class="primary" disabled>一括取り込みを開始</button>
+                  <div class="notice">重複リンクを除外し、保存先を一度だけ選んで共有ごとに既存の高速Queueを順番に処理します。途中停止・再読み込み後は親バッチ状態から再開できます。</div>
+                </div>
+              </details>
+              <details class="sub">
                 <summary>互換モード</summary>
                 <div class="sub-body">
                   <button id="lf-start-early-delete" class="secondary" disabled>互換方式ですべてダウンロード</button>
@@ -4094,6 +4408,8 @@ const transientSignedUrls = new Map();
     const retryBtn = root.querySelector('#lf-retry');
     const abandonBtn = root.querySelector('#lf-abandon');
     const destinationBtn = root.querySelector('#lf-destination');
+    const batchUrls = root.querySelector('#lf-batch-urls');
+    const batchStartBtn = root.querySelector('#lf-batch-start');
     const queueActions = root.querySelector('#lf-queue-actions');
     const exportBtn = root.querySelector('#lf-export');
     const refreshBtn = root.querySelector('#lf-refresh');
@@ -4164,6 +4480,10 @@ const transientSignedUrls = new Map();
     collapseBtn.textContent = prefs.collapsed ? '+' : '−';
 
     function isTerminal(job) { return job && ['DONE','DONE_WITH_SKIPS','PROBE_DONE'].includes(job.state); }
+    function activeShareBatch() {
+      const batch = loadShareBatchJob();
+      return batch && !isShareBatchTerminal(batch) ? batch : null;
+    }
 
     function preferredDirectoryLabel() {
       if (!preferredHandleReady) return '読み込み中…';
@@ -4316,6 +4636,7 @@ const transientSignedUrls = new Map();
     }
 
     input.addEventListener('input', refreshQueueUi);
+    batchUrls.addEventListener('input', refreshQueueUi);
     fileFilter.addEventListener('input', renderSelection);
     fileList.addEventListener('change', event => {
       const checkbox = event.target?.closest?.('input[type="checkbox"][data-index]');
@@ -4345,12 +4666,21 @@ const transientSignedUrls = new Map();
 
     function refreshProgress() {
       const job = loadQueueJob();
+      const batch = loadShareBatchJob();
+      const activeBatchJob = batch && !isShareBatchTerminal(batch) ? batch : null;
+      const batchPrefix = activeBatchJob
+        ? `共有 ${Math.min(Number(activeBatchJob.currentShareIndex || 0) + 1, activeBatchJob.shares.length)} / ${activeBatchJob.shares.length} · `
+        : '';
       if (!job?.items?.length) {
-        progressText.textContent = manifest?.files?.length ? `解析済み: ${manifest.files.length}ファイル / ${formatBytes(manifest.totalBytes)}` : 'Queueなし';
-        progressPct.textContent = '0%';
-        progressBar.style.width = '0%';
+        progressText.textContent = activeBatchJob
+          ? `${batchPrefix}次の共有を準備中`
+          : (manifest?.files?.length ? `解析済み: ${manifest.files.length}ファイル / ${formatBytes(manifest.totalBytes)}` : 'Queueなし');
+        const completedShares = activeBatchJob ? shareBatchCounts(activeBatchJob).done + shareBatchCounts(activeBatchJob).skipped : 0;
+        const batchPct = activeBatchJob?.shares?.length ? completedShares / activeBatchJob.shares.length * 100 : 0;
+        progressPct.textContent = activeBatchJob ? `${batchPct.toFixed(0)}%` : '0%';
+        progressBar.style.width = `${activeBatchJob ? batchPct : 0}%`;
         transferMeta.textContent = '';
-        currentFile.textContent = '';
+        currentFile.textContent = activeBatchJob?.shares?.[activeBatchJob.currentShareIndex]?.shareName || '';
         smoothedTransferRate = 0;
         return;
       }
@@ -4359,7 +4689,7 @@ const transientSignedUrls = new Map();
       const terminal = c.done + c.skippedCapacity + c.unfittable;
       const pct = Math.max(0, Math.min(100, terminal / job.items.length * 100));
       const skipped = c.skippedCapacity + c.unfittable;
-      const labels = [`${c.done} / ${job.items.length}ファイル完了`];
+      const labels = [`${batchPrefix}${c.done} / ${job.items.length}ファイル完了`];
       if (skipped) labels.push(`スキップ ${skipped}`);
       if (c.blocked) labels.push(`要確認 ${c.blocked}`);
       progressText.textContent = labels.join(' · ');
@@ -4401,13 +4731,15 @@ const transientSignedUrls = new Map();
 
     function refreshQueueUi() {
       const job = loadQueueJob();
-      const active = job && !isTerminal(job);
+      const batch = activeShareBatch();
+      const queueActive = job && !isTerminal(job);
+      const active = !!queueActive || !!batch;
       const busy = running || preparing;
       const hasShareInput = !!detectSharePageTarget(globalThis.location?.href || '') || !!String(input.value || '').trim();
-      const probeActive = active && job?.kind === 'early-delete-probe';
+      const probeActive = !!queueActive && job?.kind === 'early-delete-probe';
       const recoveryProbe = job?.experimental?.recoveryProbe;
       const recoveryNeedsNewContext = !!(
-        active &&
+        !!queueActive &&
         recoveryProbe?.stage === 'INTERRUPTED' &&
         recoveryProbe?.interruptContextId &&
         recoveryProbe.interruptContextId === TAB_ID
@@ -4421,14 +4753,15 @@ const transientSignedUrls = new Map();
       pauseBtn.disabled = !running || !activeRunJob || !!activeRunJob.stopRequested;
       pauseBtn.hidden = !running;
       queueActions.hidden = resumeBtn.hidden && pauseBtn.hidden;
-      startBtn.disabled = busy || !!active || !hasShareInput || !preferredHandleReady;
-      earlyDeleteStartBtn.disabled = busy || !!active || !hasShareInput || !preferredHandleReady;
-      selectModeBtn.disabled = busy || !!active || !hasShareInput;
+      startBtn.disabled = busy || active || !hasShareInput || !preferredHandleReady;
+      earlyDeleteStartBtn.disabled = busy || active || !hasShareInput || !preferredHandleReady;
+      selectModeBtn.disabled = busy || active || !hasShareInput;
+      batchStartBtn.disabled = busy || active || !preferredHandleReady || !String(batchUrls.value || '').trim();
       const directSingleSelection = selectedIndexes.size === 1;
       selectedStartBtn.textContent = directSingleSelection ? 'このファイルを直接保存' : '選択をダウンロード';
       selectedEarlyDeleteStartBtn.textContent = directSingleSelection ? '互換方式で直接保存' : '互換方式で選択をダウンロード';
-      selectedStartBtn.disabled = busy || !manifest?.files?.length || selectedIndexes.size === 0 || !!active || (!directSingleSelection && !preferredHandleReady);
-      selectedEarlyDeleteStartBtn.disabled = busy || !manifest?.files?.length || selectedIndexes.size === 0 || !!active || (!directSingleSelection && !preferredHandleReady);
+      selectedStartBtn.disabled = busy || !manifest?.files?.length || selectedIndexes.size === 0 || active || (!directSingleSelection && !preferredHandleReady);
+      selectedEarlyDeleteStartBtn.disabled = busy || !manifest?.files?.length || selectedIndexes.size === 0 || active || (!directSingleSelection && !preferredHandleReady);
       const c = queueCounts(job);
       retryBtn.disabled = busy || !job || !(c.skippedCapacity || c.unfittable) || !isTerminal(job);
       abandonBtn.disabled = busy || !active;
@@ -4562,6 +4895,154 @@ const transientSignedUrls = new Map();
 
 
 
+    async function continueShareBatch(parent, baseDir) {
+      if (!parent || parent.kind !== 'share-batch') throw new LinkexError('一括取り込み状態がありません。', {kind:'batch_state'});
+      await ensureHandlePermission(baseDir);
+      if (!resolveCredentials()) throw new LinkexError(credentialBootstrapMessage(), {kind:'auth'});
+      const resumeFromSkips = parent.state === 'PAUSED_SKIPS';
+      const resumeIndex = Number(parent.currentShareIndex || 0);
+      parent.state = 'RUNNING';
+      parent.lastError = null;
+      saveShareBatchJob(parent);
+
+      for (let i = resumeIndex; i < parent.shares.length; i++) {
+        assertLease();
+        parent.currentShareIndex = i;
+        const share = parent.shares[i];
+
+        // DONE_WITH_SKIPSで一度停止した後、容量スキップを再試行せず再開した場合は
+        // その共有をskipあり完了として確定し、次の共有へ進む。
+        let existing = loadQueueJob();
+        if (resumeFromSkips && i === resumeIndex && share.state === 'DONE_WITH_SKIPS' && existing?.batchParent?.batchId === parent.batchId && isTerminal(existing)) {
+          parent.currentShareIndex = i + 1;
+          parent.state = 'RUNNING';
+          saveShareBatchJob(parent);
+          continue;
+        }
+
+        let child = null;
+        let queueRoot = null;
+        let resumeChild = false;
+        existing = loadQueueJob();
+        if (existing && !isTerminal(existing)) {
+          if (existing.batchParent?.batchId !== parent.batchId || Number(existing.batchParent?.shareIndex) !== i) {
+            throw new LinkexError('一括取り込みと別の未完了Queueが存在します。安全のため停止します。', {kind:'queue_conflict'});
+          }
+          child = existing;
+          queueRoot = await getQueueRootHandle(child);
+          if (!queueRoot) throw new LinkexError('一括取り込み中のQueue保存先Handleが見つかりません。', {kind:'filesystem'});
+          await ensureHandlePermission(queueRoot);
+          child.stopRequested = false;
+          saveQueueJob(child);
+          resumeChild = true;
+          share.state = 'RUNNING';
+          share.childJobId = child.jobId;
+          saveShareBatchJob(parent);
+          write(`一括取り込みを再開 [${i + 1}/${parent.shares.length}]\n${share.shareName || share.shareToken}\n\n${shareBatchSummary(parent)}`);
+        } else if (existing && isTerminal(existing) && existing.batchParent?.batchId === parent.batchId && Number(existing.batchParent?.shareIndex) === i) {
+          child = existing;
+        } else {
+          share.state = 'ANALYZING';
+          share.startedAt = share.startedAt || Date.now();
+          saveShareBatchJob(parent);
+          writeTransient(`一括取り込み: 共有を解析中 [${i + 1}/${parent.shares.length}]\n${share.shareToken}`);
+          const readApi = new LinkexApi({token:null});
+          const shareManifest = await buildManifest(readApi, share.shareToken, x => writeTransient(
+            `一括取り込み: 共有を解析中 [${i + 1}/${parent.shares.length}]\nfiles: ${x.files} / folders: ${x.folders ?? 0}\n${x.path || ''}`
+          ));
+          share.shareName = shareManifest.shareName || share.shareToken;
+          share.fileCount = shareManifest.files.length;
+          share.totalBytes = shareManifest.totalBytes;
+          share.state = 'READY';
+          saveShareBatchJob(parent);
+
+          child = createQueueFromManifest(shareManifest);
+          child.kind = 'early-delete-pipeline';
+          child.batchParent = {batchId:parent.batchId, shareIndex:i};
+          child.experimental = {
+            mode:'early-delete',
+            downloadWorkers:EARLY_DELETE_DOWNLOAD_WORKERS,
+            signedUrlPersistence:false,
+            batchParent:true,
+            createdAt:Date.now()
+          };
+          queueRoot = await baseDir.getDirectoryHandle(child.folderName, {create:true});
+          await putQueueRootHandle(child, queueRoot);
+          saveQueueJob(child);
+          share.childJobId = child.jobId;
+          share.state = 'RUNNING';
+          saveShareBatchJob(parent);
+          recordEvent('info', 'batch-child-created', `一括取り込みQueue作成 [${i + 1}/${parent.shares.length}]: ${child.jobId}`, {
+            batchId:parent.batchId,
+            shareIndex:i,
+            shareName:share.shareName,
+            items:child.items.length,
+            totalBytes:child.sourceTotalBytes
+          });
+          write(`一括取り込み [${i + 1}/${parent.shares.length}]\n共有: ${share.shareName}\n${child.items.length}ファイル / ${formatBytes(child.sourceTotalBytes)}\n\n${shareBatchSummary(parent)}`, 'ok');
+        }
+
+        if (child && !isTerminal(child)) {
+          if (!queueRoot) {
+            queueRoot = await getQueueRootHandle(child);
+            if (!queueRoot) throw new LinkexError('一括取り込み中のQueue保存先Handleが見つかりません。', {kind:'filesystem'});
+            await ensureHandlePermission(queueRoot);
+          }
+          try {
+            child = await runJob(child, queueRoot, resumeChild);
+          } catch (e) {
+            share.state = 'BLOCKED';
+            share.lastError = {message:e?.message || String(e), kind:e?.kind || null, at:Date.now()};
+            parent.state = 'PAUSED';
+            parent.lastError = {...share.lastError, shareIndex:i};
+            saveShareBatchJob(parent);
+            throw e;
+          }
+        }
+
+        if (child?.state === 'PAUSED_USER') {
+          share.state = 'PAUSED';
+          parent.state = 'PAUSED_USER';
+          parent.lastError = null;
+          saveShareBatchJob(parent);
+          return parent;
+        }
+        if (!isTerminal(child)) {
+          throw new LinkexError('一括取り込みchild Queueが終端状態になっていません。', {kind:'batch_state'});
+        }
+
+        share.state = child.state === 'DONE_WITH_SKIPS' ? 'DONE_WITH_SKIPS' : 'DONE';
+        share.completedAt = Date.now();
+        share.lastError = child.lastError || null;
+        saveShareBatchJob(parent);
+
+        if (child.state === 'DONE_WITH_SKIPS') {
+          parent.state = 'PAUSED_SKIPS';
+          parent.lastError = null;
+          saveShareBatchJob(parent);
+          write(
+            `一括取り込みを一時停止 [${i + 1}/${parent.shares.length}]\n${share.shareName || share.shareToken}\n容量/サイズスキップがあります。\n\n「容量スキップを再試行」でこの共有を再試行するか、そのまま「Queueを再開」で次の共有へ進めます。`,
+            'ok'
+          );
+          return parent;
+        }
+
+        parent.currentShareIndex = i + 1;
+        saveShareBatchJob(parent);
+      }
+
+      const counts = shareBatchCounts(parent);
+      parent.state = counts.skipped || counts.blocked ? 'DONE_WITH_SKIPS' : 'DONE';
+      parent.completedAt = Date.now();
+      parent.currentShareIndex = parent.shares.length;
+      saveShareBatchJob(parent);
+      try { await idbDeleteHandle(`${SHARE_BATCH_HANDLE_PREFIX}${parent.batchId}`); }
+      catch (e) { recordEvent('warn', 'batch-handle-cleanup', `一括取り込み保存先Handle整理に失敗: ${e?.message || e}`, {batchId:parent.batchId}); }
+      recordEvent('info', 'batch-done', `一括取り込み完了: ${parent.batchId}`, {counts});
+      write(`一括取り込み完了\n\n${shareBatchSummary(parent)}`, parent.state === 'DONE' ? 'ok' : '');
+      return parent;
+    }
+
     async function startEarlyDeletePipeline(selection = null, {baseDir = null, directFileHandle = null, skipConfirm = false, recoveryProbe = false} = {}) {
       if (!manifest || running) return;
       const selected = selection == null ? null : Array.from(selection).sort((a,b) => a - b);
@@ -4628,6 +5109,8 @@ const transientSignedUrls = new Map();
       try {
         await acquireLease();
         const activeJob = loadQueueJob();
+        const activeBatch = activeShareBatch();
+        if (activeBatch) throw new LinkexError('未完了の複数共有一括取り込みがあります。先に再開または整理してください。', {kind:'queue_conflict'});
         if (activeJob && !isTerminal(activeJob)) throw new LinkexError('別の未完了Queueがあります。先に再開または整理してください。', {kind:'queue_conflict'});
         const job = createQueueFromManifest(manifest, selected, {
           directFileName:directFileHandle?.name || null
@@ -4808,6 +5291,8 @@ const transientSignedUrls = new Map();
       try {
         await acquireLease();
         const activeJob = loadQueueJob();
+        const activeBatch = activeShareBatch();
+        if (activeBatch) throw new LinkexError('未完了の複数共有一括取り込みがあります。先に再開または整理してください。', {kind:'queue_conflict'});
         if (activeJob && !isTerminal(activeJob)) throw new LinkexError('別の未完了Queueを検出しました。状態を再表示してから再開または整理してください。', {kind:'queue_conflict'});
         const job = createQueueFromManifest(manifest, selected, {
           directFileName:directFileHandle?.name || null
@@ -4826,6 +5311,70 @@ const transientSignedUrls = new Map();
         write(`Queue停止: ${e?.message || e}\n\n${queueSummary(job)}\n\n危険な状態では安全側で停止します。「Queueを再開」はcopy/delete POSTを盲目的に再送しません。`, 'err');
       } finally { running = false; releaseLease(); syncSharePageContext({initial:true}); refreshQueueUi(); }
     }
+
+    batchStartBtn.addEventListener('click', async () => {
+      if (running || preparing) return;
+      let tokens;
+      try { tokens = parseShareBatchInput(batchUrls.value); }
+      catch (e) { write(`一括取り込み入力エラー: ${e?.message || e}`, 'err'); return; }
+      const active = loadQueueJob();
+      const batch = activeShareBatch();
+      if (batch || (active && !isTerminal(active))) {
+        write('未完了のQueueまたは一括取り込みがあります。先に再開または整理してください。', 'err');
+        refreshQueueUi();
+        return;
+      }
+      if (!resolveCredentials()) { write(credentialBootstrapMessage(), 'err'); return; }
+
+      const pageWindow = getNativePageWindow();
+      const ok = Reflect.apply(pageWindow.confirm, pageWindow, [
+        `共有 ${tokens.length}件を順番に取り込みます。\n\n保存先は1回だけ選択し、共有ごとに独立したQueueフォルダへ保存します。\n開始しますか？`
+      ]);
+      if (!ok) return;
+
+      preparing = true;
+      refreshQueueUi();
+      let baseDir;
+      try {
+        baseDir = await acquirePreferredBaseDirFromGesture();
+      } catch (e) {
+        if (e?.name !== 'AbortError') write(`保存先準備失敗: ${e?.message || e}`, 'err');
+        preparing = false;
+        refreshQueueUi();
+        return;
+      }
+      preparing = false;
+      running = true;
+      refreshQueueUi();
+
+      try {
+        await acquireLease();
+        const existingBatch = activeShareBatch();
+        const existingQueue = loadQueueJob();
+        if (existingBatch || (existingQueue && !isTerminal(existingQueue))) {
+          throw new LinkexError('開始直前に別の未完了処理を検出しました。', {kind:'queue_conflict'});
+        }
+        const parent = createShareBatchJob(tokens);
+        await putShareBatchRootHandle(parent, baseDir);
+        saveShareBatchJob(parent);
+        recordEvent('info', 'batch-created', `一括取り込み作成: ${parent.batchId}`, {batchId:parent.batchId, shares:parent.shares.length});
+        write(`複数共有リンクの一括取り込みを開始\n\n${shareBatchSummary(parent)}`, 'ok');
+        await continueShareBatch(parent, baseDir);
+      } catch (e) {
+        console.error('[Linkex batch]', e);
+        const parent = loadShareBatchJob();
+        if (parent && !isShareBatchTerminal(parent)) {
+          parent.state = parent.state === 'PAUSED_SKIPS' ? parent.state : 'PAUSED';
+          parent.lastError = {message:e?.message || String(e), kind:e?.kind || null, at:Date.now()};
+          saveShareBatchJob(parent);
+        }
+        write(`一括取り込み停止: ${e?.message || e}\n\n${shareBatchSummary(loadShareBatchJob())}`, 'err');
+      } finally {
+        running = false;
+        releaseLease();
+        refreshQueueUi();
+      }
+    });
 
     earlyDeleteStartBtn.addEventListener('click', async () => {
       if (running || preparing) return;
@@ -4956,8 +5505,39 @@ const transientSignedUrls = new Map();
 
     resumeBtn.addEventListener('click', async () => {
       if (running) return;
+      const batchSnapshot = activeShareBatch();
       const snapshot = loadQueueJob();
-      if (!snapshot || isTerminal(snapshot)) { refreshQueueUi(); return; }
+      if (!batchSnapshot && (!snapshot || isTerminal(snapshot))) { refreshQueueUi(); return; }
+
+      if (batchSnapshot) {
+        if (!resolveCredentials()) { write(credentialBootstrapMessage(), 'err'); return; }
+        running = true;
+        try {
+          await acquireLease();
+          const parent = activeShareBatch();
+          if (!parent) { refreshQueueUi(); return; }
+          const baseDir = await getShareBatchRootHandle(parent);
+          if (!baseDir) throw new LinkexError('一括取り込みの保存先Handleが見つかりません。', {kind:'filesystem'});
+          await ensureHandlePermission(baseDir);
+          write(`一括取り込みを再開\n\n${shareBatchSummary(parent)}`);
+          await continueShareBatch(parent, baseDir);
+        } catch (e) {
+          console.error('[Linkex batch resume]', e);
+          const parent = loadShareBatchJob();
+          if (parent && !isShareBatchTerminal(parent)) {
+            parent.state = parent.state === 'PAUSED_SKIPS' ? parent.state : 'PAUSED';
+            parent.lastError = {message:e?.message || String(e), kind:e?.kind || null, at:Date.now()};
+            saveShareBatchJob(parent);
+          }
+          write(`一括取り込み再開停止: ${e?.message || e}\n\n${shareBatchSummary(loadShareBatchJob())}`, 'err');
+        } finally {
+          running = false;
+          releaseLease();
+          refreshQueueUi();
+        }
+        return;
+      }
+
       const snapshotRecovery = snapshot.experimental?.recoveryProbe;
       if (snapshotRecovery?.stage === 'INTERRUPTED' &&
           snapshotRecovery?.interruptContextId &&
@@ -5029,10 +5609,22 @@ const transientSignedUrls = new Map();
 
     abandonBtn.addEventListener('click', async () => {
       if (running) return;
+      const batchSnapshot = activeShareBatch();
       const snapshot = loadQueueJob();
-      if (!snapshot || isTerminal(snapshot)) { refreshQueueUi(); return; }
+      if (!batchSnapshot && (!snapshot || isTerminal(snapshot))) { refreshQueueUi(); return; }
       const pageWindow = getNativePageWindow();
-      const warning = [
+      const warning = batchSnapshot ? [
+        'この未完了の複数共有一括取り込みと、現在のchild Queueのローカル状態を破棄します。',
+        '',
+        'Linkex上のファイルは一切削除しません。',
+        'COPY/DELETE結果が不明な場合、一時コピーがLinkex上に残っている可能性があります。',
+        '必要なら先に「診断ログを保存」してください。',
+        '',
+        `batch: ${batchSnapshot.batchId}`,
+        `state: ${batchSnapshot.state}`,
+        '',
+        '一括取り込みを破棄しますか？'
+      ].join('\n') : [
         'この未完了Queueのローカル状態だけを破棄します。',
         '',
         'Linkex上のファイルは一切削除しません。',
@@ -5048,6 +5640,21 @@ const transientSignedUrls = new Map();
       running = true;
       try {
         await acquireLease();
+        const parent = activeShareBatch();
+        if (parent) {
+          if (parent.batchId !== batchSnapshot?.batchId) throw new LinkexError('確認後に一括取り込み状態が変更されました。', {kind:'queue_conflict'});
+          const child = loadQueueJob();
+          let childCleanupError = null;
+          if (child && !isTerminal(child) && child.batchParent?.batchId === parent.batchId) {
+            const result = await abandonQueueJob(child);
+            childCleanupError = result.handleCleanupError;
+          }
+          recordEvent('warn', 'batch-abandon', `一括取り込みstateを手動破棄: ${parent.batchId}`, {batchId:parent.batchId, state:parent.state});
+          const result = await abandonShareBatchJob(parent);
+          write(`一括取り込みstateを破棄しました。\nLinkex上のファイルは削除していません。未確定の一時コピーがないかLinkex側を確認してください。${result.handleCleanupError || childCleanupError ? `\n\n保存先Handle整理警告: ${result.handleCleanupError || childCleanupError}` : ''}`, 'ok');
+          return;
+        }
+
         const job = loadQueueJob();
         if (!job || isTerminal(job)) { write('破棄対象の未完了Queueはありません。'); return; }
         if (job.jobId !== snapshot.jobId) throw new LinkexError('確認後にQueueが変更されました。状態を再表示してからやり直してください。', {kind:'queue_conflict'});
@@ -5074,6 +5681,11 @@ const transientSignedUrls = new Map();
 
     refreshBtn.addEventListener('click', () => {
       const job = refreshQueueUi();
+      const batch = loadShareBatchJob();
+      if (batch && !isShareBatchTerminal(batch)) {
+        write(`未完了の複数共有一括取り込みがあります。\n\n${shareBatchSummary(batch)}\n\n「Queueを再開」で続行できます。`);
+        return;
+      }
       if (!job) write('保存済みQueueはありません。');
       else if (job.state === 'DONE') write(`前回Queueは完了済みです。\n\n${queueSummary(job, {detail:true})}`, 'ok');
       else if (job.state === 'DONE_WITH_SKIPS') write(`前回Queueはスキップありで走査完了しています。\n\n${queueSummary(job, {detail:true})}`, 'ok');
@@ -5144,7 +5756,10 @@ const transientSignedUrls = new Map();
     });
 
     const existing = refreshQueueUi();
-    if (existing) {
+    const existingBatch = loadShareBatchJob();
+    if (existingBatch && !isShareBatchTerminal(existingBatch)) {
+      write(`未完了の複数共有一括取り込みを検出しました。\n\n${shareBatchSummary(existingBatch)}\n\n「Queueを再開」で共有単位の処理を続けられます。`, '');
+    } else if (existing) {
       if (existing.state === 'DONE') write(`前回Full Queueは完了済みです。\n\n${queueSummary(existing, {detail:true})}\n\n別共有は「すべてダウンロード」から開始できます。`, 'ok');
       else if (existing.state === 'DONE_WITH_SKIPS') write(`前回Full Queueはスキップありで走査完了しています。\n\n${queueSummary(existing, {detail:true})}\n\n容量条件を変えた場合は「容量スキップを再試行」が使えます。`, 'ok');
       else if (existing.state === 'PROBE_DONE') write(`前回の早期DELETE検証は完了しています。\n\n${queueSummary(existing, {detail:true})}\n\n診断ログを保存してください。`, 'ok');

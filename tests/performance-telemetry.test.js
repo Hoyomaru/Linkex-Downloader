@@ -8,7 +8,7 @@ const {webcrypto} = require('node:crypto');
 const {TextEncoder} = require('node:util');
 
 const SOURCE_PATH = 'linkex-downloader.user.js';
-const SOURCE = fs.readFileSync(SOURCE_PATH, 'utf8');
+const SOURCE = fs.readFileSync(SOURCE_PATH, 'utf8').replace(/\\r\\n/g, '\\n');
 const STARTUP = "  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', createPanel, {once:true});\n  else createPanel();\n})();";
 const EXPOSE = "  globalThis.__perfTest = {perfPhaseStart, perfPhaseEnd, perfPhaseSet, buildPerformanceSummary};\n})();";
 

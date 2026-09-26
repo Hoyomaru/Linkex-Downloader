@@ -36,6 +36,17 @@ require(f'`main` source: **v{version}**' in dev, 'DEVELOPMENT main source versio
 require((ROOT / f'docs/releases/v{version}.md').exists(), f'docs/releases/v{version}.md missing')
 require('[MIT License](LICENSE)' in readme, 'README MIT license link missing')
 
+stable = re.search(r'最新公開安定版: \*\*v([^*]+)\*\*', readme)
+require(stable is not None, 'README latest stable version marker missing')
+stable_version = stable.group(1)
+install_section = readme.split('## インストール', 1)[1].split('## 更新', 1)[0]
+require(f'**v{stable_version}**' in install_section, 'README install stable version is stale')
+require(f'linkex_downloader_v{stable_version}.user.js' in install_section, 'README install userscript asset version is stale')
+require(f'linkex_downloader_v{stable_version}.zip' in install_section, 'README install zip asset version is stale')
+
+gitattributes = text('.gitattributes')
+require('* text=auto eol=lf' in gitattributes, '.gitattributes must enforce LF text checkout')
+
 arch = text('docs/ARCHITECTURE.md')
 require("download.verificationMethod === 'content-length'" in arch, 'ARCHITECTURE missing content-length verification guard')
 require("download.verificationMethod === 'stream-eof'" in arch, 'ARCHITECTURE missing stream-eof verification guard')

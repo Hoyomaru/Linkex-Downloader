@@ -10,7 +10,7 @@ const {TextEncoder} = require('node:util');
 const SOURCE_PATH = 'linkex-downloader.user.js';
 const SOURCE = fs.readFileSync(SOURCE_PATH, 'utf8').replace(/\r\n/g, '\n');
 const STARTUP = "  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', createPanel, {once:true});\n  else createPanel();\n})();";
-const EXPOSE = "  globalThis.__linkexTest = {allocateLocalPaths, assertDeleteGuards, downloadOwnedFile, sameOwnedIdentity, LinkexApi, compactDoneTx, createQueueFromManifest, buildManifest, parseShareToken, detectSharePageTarget, isSharePageHost, readCredentialBridge, syncCredentialBridgeFromDisk, resolveCredentials, buildLiveQueueProgress, formatEta};\n})();";
+const EXPOSE = "  globalThis.__linkexTest = {allocateLocalPaths, assertDeleteGuards, downloadOwnedFile, sameOwnedIdentity, LinkexApi, compactDoneTx, createQueueFromManifest, buildManifest, parseShareToken, parseShareBatchInput, createShareBatchJob, loadShareBatchJob, isShareBatchTerminal, reconcileCopy, buildCopyAttribution, redactForExport, detectSharePageTarget, isSharePageHost, readCredentialBridge, syncCredentialBridgeFromDisk, resolveCredentials, buildLiveQueueProgress, formatEta};\n})();";
 
 function loadRuntime({href = 'https://disk.linkex.io/', localStorageEntries = {}} = {}) {
   assert.ok(SOURCE.includes(STARTUP), 'test harness could not find userscript startup block');
@@ -57,7 +57,7 @@ function ownedApi(item) {
   };
 }
 
-function response({status, length = null, reader = null}) {
+function response({status, length = null, contentRange = null, reader = null}) {
   const body = {
     async cancel() {},
     getReader() {
@@ -68,10 +68,86 @@ function response({status, length = null, reader = null}) {
   return {
     status,
     ok: status >= 200 && status < 300,
-    headers: {get(name) { return name.toLowerCase() === 'content-length' ? length : null; }},
+    headers: {get(name) {
+      const key = name.toLowerCase();
+      if (key === 'content-length') return length;
+      if (key === 'content-range') return contentRange;
+      return null;
+    }},
     body,
   };
 }
+
+test('COPY reconciliation never confirms a same-name/same-size diff without request attribution', async () => {
+  const {api} = loadRuntime();
+  const candidate = {id:'external-1', name:'same.bin', size:10, created_at:Math.floor(Date.now() / 1000)};
+  const fakeApi = {
+    async listFiles() { return {list:[candidate], pagination:{has_next:false}}; }
+  };
+  const state = {
+    beforeIds:[],
+    source:{sourceId:'source-1', name:'same.bin', size:10},
+    startedAt:Date.now() - 1000,
+    copyAttribution:{taskId:'task-1', expectedDestIds:[]}
+  };
+  const result = await api.reconcileCopy(fakeApi, state, {timeoutMs:50});
+  assert.equal(result.status, 'UNATTRIBUTED');
+});
+
+test('COPY reconciliation confirms only an explicitly attributed new destination id', async () => {
+  const {api} = loadRuntime();
+  const candidate = {id:'created-1', name:'same.bin', size:10, created_at:Math.floor(Date.now() / 1000)};
+  const fakeApi = {
+    async listFiles() { return {list:[candidate], pagination:{has_next:false}}; }
+  };
+  const attribution = api.buildCopyAttribution(
+    {task_id:'task-1'},
+    {status:'success', result:{file:{id:'created-1'}}},
+    'source-1'
+  );
+  const state = {
+    beforeIds:[],
+    source:{sourceId:'source-1', name:'same.bin', size:10},
+    startedAt:Date.now() - 1000,
+    copyAttribution:attribution
+  };
+  const result = await api.reconcileCopy(fakeApi, state, {timeoutMs:50});
+  assert.equal(result.status, 'CONFIRMED');
+  assert.equal(result.item.id, 'created-1');
+  assert.equal(result.proof.method, 'copy-created-id');
+});
+
+test('multi-share input deduplicates links and parent job starts with one entry per share', () => {
+  const {api} = loadRuntime();
+  const tokens = api.parseShareBatchInput([
+    'https://l2e.click/d/abcde',
+    'https://l2e.click/d/fghij',
+    'https://l2e.click/d/abcde'
+  ].join('\n'));
+  assert.equal(JSON.stringify([...tokens]), JSON.stringify(['abcde','fghij']));
+  const parent = api.createShareBatchJob(tokens);
+  assert.equal(parent.kind, 'share-batch');
+  assert.equal(parent.state, 'READY');
+  assert.equal(parent.currentShareIndex, 0);
+  assert.equal(parent.shares.length, 2);
+  assert.equal(JSON.stringify(Array.from(parent.shares, x => x.shareToken)), JSON.stringify(['abcde','fghij']));
+  assert.match(SOURCE, /id="lf-batch-urls"/);
+  assert.match(SOURCE, /async function continueShareBatch\(parent, baseDir\)/);
+  assert.match(SOURCE, /child\.batchParent = \{batchId:parent\.batchId, shareIndex:i\}/);
+});
+
+test('diagnostic redaction removes credentials embedded inside larger strings', () => {
+  const {api} = loadRuntime();
+  const jwt = 'abcdefghijkl.mnopqrstuvwxyz.opqrstuvwxyz12';
+  const value = api.redactForExport({
+    message:`request failed at https://cdn.example/file?token=supersecret&expires=123 and jwt ${jwt}`,
+    harmless:'https://example.com/public'
+  });
+  assert.doesNotMatch(value.message, /supersecret|expires=123|abcdefghijkl/);
+  assert.match(value.message, /\[REDACTED_SIGNED_URL\]/);
+  assert.match(value.message, /\[REDACTED_JWT\]/);
+  assert.equal(value.harmless, 'https://example.com/public');
+});
 
 test('manifest crawler overlaps sibling folder requests while staying within six workers', async () => {
   const {api} = loadRuntime();
@@ -128,17 +204,128 @@ test('new explicit size verification permits a verified zero-byte file', () => {
   const state = {
     state: 'LOCAL_COMMITTED',
     confirmedDest: {id: 'd1', name: 'empty.txt', size: 0},
+    ownershipProof: {verified:true, method:'copy-created-id', evidenceId:'d1', destId:'d1'},
     beforeIds: [],
     download: {destId: 'd1', downloadedBytes: 0, expectedCdnBytes: 0, sizeVerified: true, verifiedAt: Date.now()},
   };
   assert.deepEqual({...api.assertDeleteGuards(state)}, {destId: 'd1', downloaded: 0, expected: 0});
 });
 
-test('legacy positive-size LOCAL_COMMITTED state remains compatible, but legacy zero-byte state is not trusted', () => {
+test('legacy positive-size verification remains compatible only with explicit COPY ownership proof', () => {
   const {api} = loadRuntime();
-  const base = {state: 'LOCAL_COMMITTED', confirmedDest: {id: 'd1'}, beforeIds: []};
+  const base = {
+    state:'LOCAL_COMMITTED',
+    confirmedDest:{id:'d1'},
+    ownershipProof:{verified:true, method:'copy-created-id', evidenceId:'d1', destId:'d1'},
+    beforeIds:[]
+  };
   assert.doesNotThrow(() => api.assertDeleteGuards({...base, download: {destId: 'd1', downloadedBytes: 10, expectedCdnBytes: 10, verifiedAt: 1}}));
   assert.throws(() => api.assertDeleteGuards({...base, download: {destId: 'd1', downloadedBytes: 0, expectedCdnBytes: 0, verifiedAt: 1}}));
+  assert.throws(
+    () => api.assertDeleteGuards({state:'LOCAL_COMMITTED', confirmedDest:{id:'d1'}, beforeIds:[], download:{destId:'d1', downloadedBytes:10, expectedCdnBytes:10, verifiedAt:1}}),
+    error => error?.kind === 'delete_guard'
+  );
+});
+
+test('mismatched or unreadable Content-Range is never appended and restarts from zero', async () => {
+  const {api, context} = loadRuntime();
+  const owned = {id:'d1', name:'file.bin', size:4, url:'https://cdn.example/file'};
+  const state = {state:'DOWNLOAD_PAUSED', confirmedDest:{id:'d1', name:'file.bin', size:4}, source:{size:4}};
+  let size = 2;
+  let calls = 0;
+  const handle = {
+    async queryPermission() { return 'granted'; },
+    async getFile() { return {size, name:'file.bin'}; },
+    async createWritable() {
+      return {
+        async seek() {},
+        async truncate(n) { size = n; },
+        async write(value) { size += value?.byteLength || 0; },
+        async close() {},
+      };
+    },
+  };
+  context.fetch = async (_url, options = {}) => {
+    calls += 1;
+    if (calls === 1) {
+      assert.equal(options.headers?.Range, 'bytes=2-');
+      return response({
+        status:206,
+        length:'2',
+        contentRange:'bytes 0-1/4',
+        reader:{async read(){ return {done:true}; }, async cancel(){}}
+      });
+    }
+    assert.equal(options.headers?.Range, undefined);
+    let sent = false;
+    return response({
+      status:200,
+      length:'4',
+      reader:{
+        async read() {
+          if (!sent) { sent = true; return {done:false, value:new Uint8Array([1,2,3,4])}; }
+          return {done:true};
+        },
+        async cancel() {},
+      }
+    });
+  };
+
+  const result = await api.downloadOwnedFile({api:ownedApi(owned), state, handle});
+  assert.equal(calls, 2);
+  assert.equal(result.resumed, false);
+  assert.equal(result.state.download.downloadedBytes, 4);
+  assert.equal(size, 4);
+});
+
+test('206 without readable Content-Range restarts from zero instead of appending', async () => {
+  const {api, context} = loadRuntime();
+  const owned = {id:'d1', name:'file.bin', size:4, url:'https://cdn.example/file'};
+  const state = {state:'DOWNLOAD_PAUSED', confirmedDest:{id:'d1', name:'file.bin', size:4}, source:{size:4}};
+  let size = 2;
+  let calls = 0;
+  const handle = {
+    async queryPermission() { return 'granted'; },
+    async getFile() { return {size, name:'file.bin'}; },
+    async createWritable() {
+      return {
+        async seek() {},
+        async truncate(n) { size = n; },
+        async write(value) { size += value?.byteLength || 0; },
+        async close() {},
+      };
+    },
+  };
+  context.fetch = async (_url, options = {}) => {
+    calls += 1;
+    if (calls === 1) {
+      assert.equal(options.headers?.Range, 'bytes=2-');
+      return response({
+        status:206,
+        length:'2',
+        contentRange:null,
+        reader:{async read(){ return {done:true}; }, async cancel(){}}
+      });
+    }
+    assert.equal(options.headers?.Range, undefined);
+    let sent = false;
+    return response({
+      status:200,
+      length:'4',
+      reader:{
+        async read() {
+          if (!sent) { sent = true; return {done:false, value:new Uint8Array([1,2,3,4])}; }
+          return {done:true};
+        },
+        async cancel() {},
+      }
+    });
+  };
+  const result = await api.downloadOwnedFile({api:ownedApi(owned), state, handle});
+  assert.equal(calls, 2);
+  assert.equal(result.resumed, false);
+  assert.equal(result.state.download.downloadedBytes, 4);
+  assert.equal(size, 4);
 });
 
 test('Range 416 with an already-complete local file commits LOCAL_COMMITTED before returning', async () => {
@@ -165,7 +352,7 @@ test('Range 416 with an already-complete local file commits LOCAL_COMMITTED befo
 test('Content-Length: 0 is a known size and completes as a verified zero-byte download', async () => {
   const {api, context} = loadRuntime();
   const owned = {id: 'd0', name: 'empty.txt', size: 0, url: 'https://cdn.example/empty'};
-  const state = {state: 'OWNERSHIP_CONFIRMED', confirmedDest: {id: 'd0', name: 'empty.txt', size: 0}, source: {size: 0}};
+  const state = {state: 'OWNERSHIP_CONFIRMED', confirmedDest: {id: 'd0', name: 'empty.txt', size: 0}, ownershipProof:{verified:true, method:'copy-created-id', evidenceId:'d0', destId:'d0'}, source: {size: 0}};
   let size = 0;
   const handle = {
     async queryPermission() { return 'granted'; },
@@ -192,7 +379,7 @@ test('Content-Length: 0 is a known size and completes as a verified zero-byte do
 test('missing Content-Length completes only after a normal stream EOF and is safe to delete', async () => {
   const {api, context} = loadRuntime();
   const owned = {id: 'd1', name: 'file.bin', size: 10, url: 'https://cdn.example/file'};
-  const state = {state: 'OWNERSHIP_CONFIRMED', confirmedDest: {id: 'd1', name: 'file.bin', size: 10}, source: {size: 10}};
+  const state = {state: 'OWNERSHIP_CONFIRMED', confirmedDest: {id: 'd1', name: 'file.bin', size: 10}, ownershipProof:{verified:true, method:'copy-created-id', evidenceId:'d1', destId:'d1'}, source: {size: 10}};
   let size = 0;
   const handle = {
     async queryPermission() { return 'granted'; },
@@ -230,7 +417,7 @@ test('missing Content-Length completes only after a normal stream EOF and is saf
 test('missing Content-Length stream interruption remains resumable and never commits', async () => {
   const {api, context, storage} = loadRuntime();
   const owned = {id: 'd1', name: 'file.bin', size: 10, url: 'https://cdn.example/file'};
-  const state = {state: 'OWNERSHIP_CONFIRMED', confirmedDest: {id: 'd1', name: 'file.bin', size: 10}, source: {size: 10}};
+  const state = {state: 'OWNERSHIP_CONFIRMED', confirmedDest: {id: 'd1', name: 'file.bin', size: 10}, ownershipProof:{verified:true, method:'copy-created-id', evidenceId:'d1', destId:'d1'}, source: {size: 10}};
   let size = 0;
   const handle = {
     async queryPermission() { return 'granted'; },
@@ -312,7 +499,7 @@ test('Range 416 without a probe Content-Length restarts from zero and verifies b
 test('download refuses a destId whose identity changed after ownership confirmation', async () => {
   const {api, context} = loadRuntime();
   const changed = {id: 'd1', name: 'renamed.bin', size: 10, url: 'https://cdn.example/file'};
-  const state = {state: 'OWNERSHIP_CONFIRMED', confirmedDest: {id: 'd1', name: 'file.bin', size: 10}, source: {size: 10}};
+  const state = {state: 'OWNERSHIP_CONFIRMED', confirmedDest: {id: 'd1', name: 'file.bin', size: 10}, ownershipProof:{verified:true, method:'copy-created-id', evidenceId:'d1', destId:'d1'}, source: {size: 10}};
   const handle = {
     async queryPermission() { return 'granted'; },
     async getFile() { return {size: 0, name: 'file.bin'}; },
@@ -502,30 +689,42 @@ test('single-selection direct save uses save picker and does not require the rem
   assert.match(block, /startEarlyDeletePipeline\(new Set\(selectedIndexes\), \{baseDir, directFileHandle, skipConfirm:true\}\)/);
 });
 
-test('new direct-file Queue truncates the user-approved target once, while resume preserves partial data', () => {
+test('direct-file target is initialized only after Queue persistence and immediately before local transfer', () => {
   const helperAt = SOURCE.indexOf('async function prepareDirectFileHandle');
-  const nextAt = SOURCE.indexOf('async function getQueueRootHandle', helperAt);
-  const helper = SOURCE.slice(helperAt, nextAt);
-  assert.match(helper, /createWritable\(\{keepExistingData:false\}\)/);
-  assert.match(helper, /await writable\.close\(\)/);
+  const initAt = SOURCE.indexOf('async function initializeDirectFileHandle', helperAt);
+  const queueHandleAt = SOURCE.indexOf('async function getQueueRootHandle', initAt);
+  const prepare = SOURCE.slice(helperAt, initAt);
+  const initialize = SOURCE.slice(initAt, queueHandleAt);
+  assert.doesNotMatch(prepare, /createWritable|truncate\(/);
+  assert.match(prepare, /await ensureHandlePermission\(handle\)/);
+  assert.match(initialize, /createWritable\(\{keepExistingData:false\}\)/);
+  assert.match(initialize, /await writable\.truncate\(0\)/);
+  assert.match(initialize, /job\.directFileInitialized = true/);
+  assert.match(initialize, /saveQueueJob\(job\)/);
 
-  const earlyAt = SOURCE.indexOf('async function startEarlyDeletePipeline');
-  const probeAt = SOURCE.indexOf('async function startEarlyDeleteProbe', earlyAt);
-  const early = SOURCE.slice(earlyAt, probeAt);
-  assert.match(early, /await prepareDirectFileHandle\(directFileHandle\)/);
-  assert.ok(early.indexOf('const job = createQueueFromManifest') < early.indexOf('await prepareDirectFileHandle(directFileHandle)'));
+  const createAt = SOURCE.indexOf('function createQueueFromManifest');
+  const createEnd = SOURCE.indexOf('async function invokeDirectoryPicker', createAt);
+  const create = SOURCE.slice(createAt, createEnd);
+  assert.match(create, /directFileInitialized:directFile \? false : null/);
 
-  const compatAt = SOURCE.indexOf('async function startManifestQueue');
-  const nextStartAt = SOURCE.indexOf("earlyDeleteStartBtn.addEventListener", compatAt);
-  const compat = SOURCE.slice(compatAt, nextStartAt);
-  assert.match(compat, /await prepareDirectFileHandle\(directFileHandle\)/);
-  assert.ok(compat.indexOf('const job = createQueueFromManifest') < compat.indexOf('await prepareDirectFileHandle(directFileHandle)'));
+  const localAt = SOURCE.indexOf('async function getLocalFileHandle');
+  const countsAt = SOURCE.indexOf('function queueCounts', localAt);
+  const local = SOURCE.slice(localAt, countsAt);
+  assert.match(local, /await initializeDirectFileHandle\(job, queueRoot\)/);
 
-  const resumeAt = SOURCE.indexOf("resumeBtn.addEventListener('click'");
-  const pauseAt = SOURCE.indexOf("pauseBtn.addEventListener('click'", resumeAt);
-  const resume = SOURCE.slice(resumeAt, pauseAt);
-  assert.match(resume, /const queueRoot = await getQueueRootHandle\(job\)/);
-  assert.doesNotMatch(resume, /prepareDirectFileHandle/);
+  for (const [startNeedle, endNeedle] of [
+    ['async function startEarlyDeletePipeline', 'async function startEarlyDeleteProbe'],
+    ['async function startManifestQueue', "batchStartBtn.addEventListener('click'"]
+  ]) {
+    const start = SOURCE.indexOf(startNeedle);
+    const end = SOURCE.indexOf(endNeedle, start);
+    const block = SOURCE.slice(start, end);
+    const persistHandleAt = block.indexOf('await putQueueRootHandle(job, queueRoot)');
+    const persistQueueAt = block.indexOf('saveQueueJob(job)');
+    const runAt = block.indexOf('await runJob(job, queueRoot, false)');
+    assert.ok(persistHandleAt >= 0 && persistQueueAt > persistHandleAt && runAt > persistQueueAt);
+    assert.doesNotMatch(block.slice(0, persistQueueAt), /initializeDirectFileHandle/);
+  }
 });
 
 test('selected Queue rejects an empty selection', () => {
@@ -760,7 +959,7 @@ test('preferred download directory is separate from Queue-specific handles and i
   const refreshAt = SOURCE.indexOf('function refreshQueueUi()');
   const collapseAt = SOURCE.indexOf("collapseBtn.addEventListener('click'", refreshAt);
   const block = SOURCE.slice(refreshAt, collapseAt);
-  assert.match(block, /startBtn\.disabled = busy \|\| !!active \|\| !hasShareInput \|\| !preferredHandleReady;/);
+  assert.match(block, /startBtn\.disabled = busy \|\| active \|\| !hasShareInput \|\| !preferredHandleReady;/);
 });
 
 test('quick all-download resolves directory permission before network manifest analysis and starts without confirm', () => {

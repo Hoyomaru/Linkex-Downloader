@@ -14,7 +14,11 @@ permissions:
 
 jobs:
   test:
-    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v5
       - name: Show runtime versions
@@ -28,4 +32,4 @@ jobs:
       - name: Check repository consistency
         run: python tools/check_repo_consistency.py
       - name: Build and verify release assets
-        run: python tools/build_release_assets.py --output-dir "$RUNNER_TEMP/linkex-release"
+        run: python tools/build_release_assets.py --output-dir dist-ci

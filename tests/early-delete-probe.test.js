@@ -4,7 +4,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 
-const SOURCE = fs.readFileSync('linkex-downloader.user.js', 'utf8');
+const SOURCE = fs.readFileSync('linkex-downloader.user.js', 'utf8').replace(/\\r\\n/g, '\\n');
 
 test('normal production delete guard still requires LOCAL_COMMITTED', () => {
   const start = SOURCE.indexOf('function assertDeleteGuards(state)');

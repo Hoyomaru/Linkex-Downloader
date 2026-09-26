@@ -2,7 +2,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 
-const source = fs.readFileSync('linkex-downloader.user.js', 'utf8');
+const source = fs.readFileSync('linkex-downloader.user.js', 'utf8').replace(/\r\n/g, '\n');
 
 test('cadence experiment uses 16 MiB or 1 s checkpoints and 750 ms UI refresh', () => {
   assert.match(source, /const CHECKPOINT_BYTES = 16 \* 1024 \* 1024;/);

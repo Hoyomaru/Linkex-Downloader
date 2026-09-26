@@ -8,7 +8,7 @@
 
 Linkex Downloader は、`https://disk.linkex.io/*` と `https://l2e.click/d/*`（`www`含む）上で動作する Tampermonkey userscript です。共有ページでは現在URLからshare tokenを自動検出し、自ストレージページでは従来の手入力導線も維持します。
 
-共有リンク内のファイルを直接 CDN から取得するのではなく、各ファイルを一度自分の Linkex ストレージへコピーし、そのコピー先 ID のownershipを確認します。現行高速モードではsigned URLをメモリ上に取得し、Web WorkerでCDN streamを開始して最初のchunkを確認した後、所有確認済み一時copyだけをDELETEします。DELETEの不在確認とローカル転送は並行し、ローカルDOWNLOADは最大8並列です。中断時はDELETE状態を先に照合し、同じ所有copyまたは新しいCOPY / URLから既存partialへRange resumeします。従来のLOCAL_COMMITTED後DELETE方式も互換モードとして残します。
+共有リンク内のファイルを直接 CDN から取得するのではなく、各ファイルを一度自分の Linkex ストレージへコピーします。v1.5.0では、copy後の名前・サイズ・単一ID差分だけでownershipを確定せず、COPY/task応答のcreated/destination ID（またはtask ID）とroot candidateを直接結び付けられる場合だけ `ownershipProof` を作ります。現行高速モードではsigned URLをメモリ上に取得し、Web WorkerでCDN streamを開始して最初のchunkを確認した後、ownership proof済み一時copyだけをDELETEします。DELETEの不在確認とローカル転送は並行し、ローカルDOWNLOADは最大8並列です。Range resumeの206は `Content-Range` startを検証し、確認不能/不一致ならpartialへ追記せず先頭から取り直します。従来のLOCAL_COMMITTED後DELETE方式も互換モードとして残します。
 
 ```mermaid
 flowchart TD
@@ -18,7 +18,7 @@ flowchart TD
     D --> E[Linkex空き容量確認]
     E --> F[COPY_INTENT保存]
     F --> G[共有ファイルを1件コピー]
-    G --> H[コピー前後ID差分を照合]
+    G --> H[COPY/task作成IDとroot candidateを直接照合]
     H -->|一意に証明| I[OWNERSHIP_CONFIRMED]
     H -->|曖昧| X[安全停止]
     I --> J[fresh signed CDN URL取得 / memory-only]
@@ -49,8 +49,9 @@ flowchart TD
 | ダウンロード | Web Worker優先、signed URL、Range resume、checkpoint、stream-ready barrier、Content-Length / stream EOF検証 | `downloadOwnedFileInWorker()`, `downloadOwnedFile()` |
 | 削除安全ゲート | 高速モードのownership-confirmed early DELETEと、互換モードの`LOCAL_COMMITTED`後DELETE | `assertEarlyDeletePipelineGuards()`, `deleteOwnedTempForEarlyDeletePipeline()`, `assertDeleteGuards()`, `ensureDeleted()` |
 | Queue | COPY ownershipは直列、stream開始後のearly DELETEはDLと並行、ローカルDOWNLOAD最大8並列、容量skip、pause/resume | `createQueueFromManifest()`, `processEarlyDeletePipeline()`, `processQueue()` |
+| Share batch | 親ジョブが共有ごとの既存Queueを順次起動し、現在share位置を永続化 | `createShareBatchJob()`, `continueShareBatch()` |
 | 排他 | 別タブとの二重実行防止 | `acquireLease()`, `assertLease()` |
-| 永続化 | operation checkpoint + item journalを即時保存し、Full Queueはbatch flush | GM storage, IndexedDB |
+| 永続化 | operation checkpoint + item journal、複数共有親バッチ、File/DirectoryHandle | GM storage, IndexedDB |
 | UI/診断 | 右下パネル、進捗、署名テスト、support JSON | `createPanel()`, `downloadSupportBundle()` |
 
 ## 外部サービスとの関係
@@ -217,6 +218,7 @@ item側には `PENDING`, `COPYING`, `COPIED`, `DOWNLOADING`, `LOCAL_COMMITTED`, 
 | 保存先 | キー/DB | 用途 |
 |---|---|---|
 | GM storage | `linkexQueueFullV1` | Full Queue状態 |
+| GM storage | `linkexShareBatchV1` | 複数共有一括取り込みの親ジョブ状態 |
 | GM storage | `linkexQueueFullLeaseV1` | 多重実行防止lease |
 | GM storage | `linkexCopyProbeStateV1` | 現transaction/probe状態 |
 | IndexedDB | `linkexDownloaderProbeV1` / `handles` | File System Access API handle |
@@ -226,6 +228,8 @@ item側には `PENDING`, `COPYING`, `COPIED`, `DOWNLOADING`, `LOCAL_COMMITTED`, 
 | GM storage | `linkexCredentialBridgeV1` | `disk.linkex.io` から共有ページへ短時間橋渡しするaccess token（refresh tokenは保存しない） |
 
 QueueのDirectoryHandleは `queue-full:<jobId>` を `operationId` として IndexedDB に保存します。
+
+複数共有一括取り込みでは、親の保存先DirectoryHandleを `share-batch:<batchId>` として別に保持し、各共有は従来の `queue-full:<jobId>` child Queueとして独立実行します。direct-saveでは `prepareDirectFileHandle()` は権限確認だけを行い、既存targetのtruncateはQueue/Handle永続化後の実転送開始時まで遅延します。
 
 ## 排他制御
 

@@ -4,7 +4,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 
-const SOURCE = fs.readFileSync('linkex-downloader.user.js', 'utf8');
+const SOURCE = fs.readFileSync('linkex-downloader.user.js', 'utf8').replace(/\\r\\n/g, '\\n');
 
 test('early-delete pipeline keeps COPY serialized while DELETE=2 and DOWNLOAD=8 overlap', () => {
   assert.match(SOURCE, /const EARLY_DELETE_DOWNLOAD_WORKERS = 8;/);
