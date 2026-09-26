@@ -4,19 +4,38 @@
 
 ## [Unreleased]
 
+次回Release向けの変更はここへ記録します。
+
+## [1.4.0] - 2026-09-27
+
+通常操作のUIを簡潔にし、1ファイルだけ選んだときはQueue専用folderを作らず直接保存できるbackward-compatible feature releaseです。
+
 ### Added
 
-- ファイル選択で1件だけ選んだ場合、Queue専用フォルダを作らず **このファイルを直接保存** できる単一ファイルUXを追加。ブラウザのSave File Pickerで保存名/場所を確定し、そのFileHandleを復旧用に保持する。
-
-### Safety
-
-- 単一ファイル直接保存で既存ファイルを選んだ場合、新規Queue開始時にだけ対象を0 byteへ初期化し、既存内容を誤ってRange partialとして扱わない。Queue再開時は再初期化せず既存partialからRange resumeする。
+- ファイル選択で1件だけ選んだ場合、**このファイルを直接保存** へ切り替え、browser Save File Pickerで保存先/保存名を確定するdirect-file modeを追加。
+- direct-fileのFileHandleを既存Queue handle storeへ保持し、page reload後も同じfileへRange resume可能にした。
+- direct-file / multi-file Queue分岐、filename保持、初期化順序、resume safetyの回帰テストを追加。
 
 ### Changed
 
-- 初期画面を **すべてダウンロード / ファイルを選ぶ** の2操作中心へ揃え、全件/選択の互換方式と高速パイプラインの技術説明を詳細へ移動。
-- Queue進捗を内部状態名中心の表示から、完了件数・スキップ/要確認件数・現在ファイル中心の人間向け表示へ変更。
-- 実行中workerのfresh telemetryを集約して合計ダウンロード速度を表示し、平滑化した速度から概算ETAを表示。開始直後やstale telemetryでは数値を推測せず計測中表示にする。
+- 初期画面を **すべてダウンロード / ファイルを選ぶ** の2操作中心へ整理し、互換方式・高速pipelineの技術説明を詳細へ移動。
+- Queue進捗を内部状態名中心から、完了件数・skip/要確認件数・現在file中心の表示へ変更。
+- 実行中workerのfresh telemetryから合計download速度を表示し、平滑化速度から概算ETAを表示。
+- 1件選択ではremote folder hierarchyや `Linkex_*` Queue folderを作らず、ユーザーが選んだfileへ直接書き込む。
+
+### Safety
+
+- 既存fileをdirect-save先に選んだ新規Queueでは、Queue metadata構築後・実download開始前にだけ0 byteへ初期化し、既存sizeをRange partialと誤認しない。
+- reload/resumeでは再初期化せず、既存partialへRange resumeする。
+- Save File Pickerでユーザーが承認したfilenameをQueue metadataでもそのまま保持。
+- COPY ownership / signed URL / DELETE guard / final local verifyは従来pipelineを共有し、安全境界を別実装へ分岐しない。
+- 2件以上の選択は従来どおりQueue directory + folder structure維持。
+
+### Validation
+
+- GitHub Actions syntax / Node regression / repository consistency / deterministic Release Asset build: PASS。
+- 2026-09-27実機で1file直接保存、rename、2件以上Queue、既存file置換、reload resumeを確認。
+- UIのnormal / progress / error / large selection statesを実機確認。
 
 ## [1.3.1] - 2026-09-24
 

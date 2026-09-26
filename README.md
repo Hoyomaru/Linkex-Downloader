@@ -2,7 +2,7 @@
 
 Linkex の共有リンクから、共有内のファイルを **所有権確認付きでローカルへ高速保存する** Tampermonkey userscript です。
 
-v1.3.1では、Linkex の自分のストレージを一時作業領域として利用し、各ファイルを「一時コピー → 所有権確認 → signed URL取得 → CDN stream開始 → 所有済み一時コピーDELETEを並行 → ローカル保存/検証」の順で処理します。COPYの所有権確定は安全のため1件ずつ、ローカルDOWNLOADはWeb Workerで最大8並列です。
+v1.4.0では、通常操作を「すべてダウンロード / ファイルを選ぶ」中心へ整理し、1ファイルだけ選んだ場合はSave File Pickerで指定した場所へ直接保存できます。複数ファイル処理では引き続きLinkex の自分のストレージを一時作業領域として利用し、各ファイルを「一時コピー → 所有権確認 → signed URL取得 → CDN stream開始 → 所有済み一時コピーDELETEを並行 → ローカル保存/検証」の順で処理します。COPYの所有権確定は安全のため1件ずつ、ローカルDOWNLOADはWeb Workerで最大8並列です。
 
 > [!IMPORTANT]
 > 本ツールは **Linkex公式とは無関係の非公式ツール** です。Linkex側のWeb/API仕様変更により動作しなくなる可能性があります。
@@ -35,16 +35,15 @@ Web WorkerでCDN stream開始（最初のchunkを確認）
 
 ## Version / 配布状態
 
-- `main` source: **v1.3.1**（公開済み / 実機確認済み）
-- 最新公開安定版: **v1.3.1**
-- 最新公開tag: **`v1.3.1`**
-- GitHub Release: **v1.3.1 公開済み（2026-09-24）**
-- Release commit: `2ea2dff8f83a77aafa23c6f4a47088b5d0e385d1`
+- `main` source: **v1.4.0**（Release candidate / 実機確認済み）
+- 最新公開安定版: **v1.3.1**（v1.4.0公開前）
+- 最新公開tag: **`v1.3.1`**（v1.4.0公開前）
+- GitHub Release: **v1.4.0 release candidate（2026-09-27）**
 - 現行CI: **GitHub Actions (`.github/workflows/ci.yml`)** — userscript構文、回帰テスト、repository整合性、Release Asset生成を検証
 - License: **MIT**
 
 > [!NOTE]
-> v1.3.1ではManifest 6並列、Web Worker転送、stream開始後DELETE並行、item journal永続化を標準高速パイプラインへ統合しています。「互換: 保存後DELETE」で従来のLOCAL_COMMITTED後DELETE方式へ戻せます。
+> v1.4.0では単一file direct-saveを追加しています。2件以上のQueueではv1.3.1のManifest 6並列、Web Worker転送、stream開始後DELETE並行、item journal永続化をそのまま維持します。「互換: 保存後DELETE」も継続利用できます。
 
 最新の正式配布先は GitHub Releases です。
 

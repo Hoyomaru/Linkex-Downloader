@@ -8,15 +8,14 @@ READMEは利用者向け、CHANGELOGは変更履歴、`docs/ARCHITECTURE.md` は
 
 ## 現在の状態
 
-2026-09-24 時点で確認した状態です。
+2026-09-27 時点で確認した状態です。
 
-- `main` source: **v1.3.1**（公開済み / 実機確認済み）
-- 最新公開Stable: **v1.3.1**
-- userscript metadata `@version`: **1.3.1**
-- `const VERSION`: **1.3.1**
-- 最新公開Git tag: **`v1.3.1`**
-- GitHub Release: **v1.3.1 公開済み**
-- Release commit: `2ea2dff8f83a77aafa23c6f4a47088b5d0e385d1`
+- `main` source: **v1.4.0**（Release candidate / 実機確認済み）
+- 最新公開Stable: **v1.3.1**（v1.4.0公開前）
+- userscript metadata `@version`: **1.4.0**
+- `const VERSION`: **1.4.0**
+- 最新公開Git tag: **`v1.3.1`**（v1.4.0公開前）
+- GitHub Release: **v1.4.0 release candidate**
 - 現行 GitHub Actions: **CIあり**（userscript構文 + Node回帰テスト + repository整合性 + Release Asset生成検証）
 - Runtime: Tampermonkey userscript
 - Targets: `https://disk.linkex.io/*`, `https://l2e.click/d/*`, `https://www.l2e.click/d/*`
@@ -25,7 +24,7 @@ READMEは利用者向け、CHANGELOGは変更履歴、`docs/ARCHITECTURE.md` は
 - Main API origin: `https://prod.linksvc.xyz`
 - 実機確認ブラウザ: Chromium系（Chrome / Edge）
 - License: **MIT**
-- v1.3.1: Manifest 6並列 / Web Worker / stream-before-delete / item journalを統合。大規模共有で実機速度改善を確認。
+- v1.4.0: v1.3.1の高速pipeline/safetyを維持したまま、単一file direct-saveと簡潔なprogress UIを追加。2026-09-27実機確認済み。
 
 ### リポジトリ直下
 
@@ -50,7 +49,8 @@ Linkex-Downloader/
       ├─ v1.2.0.md
       ├─ v1.2.1.md
       ├─ v1.3.0.md
-      └─ v1.3.1.md
+      ├─ v1.3.1.md
+      └─ v1.4.0.md
 ```
 
 `linkex-downloader.user.js` が唯一のtracked userscript正本です。version固定 `.user.js` / `.zip` はGit管理せず、release対象commitから `tools/build_release_assets.py` で生成してGitHub Releaseへ添付します。過去のv1.0.0 / v1.1.0配布物は各GitHub Release Assetとして保持し、リポジトリ直下からは削除します。

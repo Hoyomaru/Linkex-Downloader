@@ -6,13 +6,12 @@
 
 ## 現在の状態
 
-2026-09-24 時点:
+2026-09-27 時点:
 
-- `main` source: **v1.3.1**（公開済み / 実機確認済み）
-- 最新公開Stable: **v1.3.1**
-- 最新公開tag: **`v1.3.1`**
-- v1.3.1: GitHub Release公開済み
-- Release commit: `2ea2dff8f83a77aafa23c6f4a47088b5d0e385d1`
+- `main` source: **v1.4.0**（Release candidate / 実機確認済み）
+- 最新公開Stable: **v1.3.1**（v1.4.0公開前）
+- 最新公開tag: **`v1.3.1`**（v1.4.0公開前）
+- v1.4.0: release candidate（単一file direct-save / UI simplification）
 - License: **MIT**
 - CI: `.github/workflows/ci.yml`
 
