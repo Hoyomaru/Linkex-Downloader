@@ -124,13 +124,13 @@ test('multi-share input deduplicates links and parent job starts with one entry 
     'https://l2e.click/d/fghij',
     'https://l2e.click/d/abcde'
   ].join('\n'));
-  assert.deepEqual([...tokens], ['abcde','fghij']);
+  assert.equal(JSON.stringify([...tokens]), JSON.stringify(['abcde','fghij']));
   const parent = api.createShareBatchJob(tokens);
   assert.equal(parent.kind, 'share-batch');
   assert.equal(parent.state, 'READY');
   assert.equal(parent.currentShareIndex, 0);
   assert.equal(parent.shares.length, 2);
-  assert.deepEqual(parent.shares.map(x => x.shareToken), ['abcde','fghij']);
+  assert.equal(JSON.stringify(Array.from(parent.shares, x => x.shareToken)), JSON.stringify(['abcde','fghij']));
   assert.match(SOURCE, /id="lf-batch-urls"/);
   assert.match(SOURCE, /async function continueShareBatch\(parent, baseDir\)/);
   assert.match(SOURCE, /child\.batchParent = \{batchId:parent\.batchId, shareIndex:i\}/);
