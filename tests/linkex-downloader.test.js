@@ -10,7 +10,7 @@ const {TextEncoder} = require('node:util');
 const SOURCE_PATH = 'linkex-downloader.user.js';
 const SOURCE = fs.readFileSync(SOURCE_PATH, 'utf8').replace(/\r\n/g, '\n');
 const STARTUP = "  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', createPanel, {once:true});\n  else createPanel();\n})();";
-const EXPOSE = "  globalThis.__linkexTest = {allocateLocalPaths, assertDeleteGuards, downloadOwnedFile, sameOwnedIdentity, LinkexApi, compactDoneTx, createQueueFromManifest, buildManifest, parseShareToken, parseShareBatchInput, createShareBatchJob, loadShareBatchJob, isShareBatchTerminal, reconcileCopy, buildCopyAttribution, detectSharePageTarget, isSharePageHost, readCredentialBridge, syncCredentialBridgeFromDisk, resolveCredentials, buildLiveQueueProgress, formatEta};\n})();";
+const EXPOSE = "  globalThis.__linkexTest = {allocateLocalPaths, assertDeleteGuards, downloadOwnedFile, sameOwnedIdentity, LinkexApi, compactDoneTx, createQueueFromManifest, buildManifest, parseShareToken, parseShareBatchInput, createShareBatchJob, loadShareBatchJob, isShareBatchTerminal, reconcileCopy, buildCopyAttribution, redactForExport, detectSharePageTarget, isSharePageHost, readCredentialBridge, syncCredentialBridgeFromDisk, resolveCredentials, buildLiveQueueProgress, formatEta};\n})();";
 
 function loadRuntime({href = 'https://disk.linkex.io/', localStorageEntries = {}} = {}) {
   assert.ok(SOURCE.includes(STARTUP), 'test harness could not find userscript startup block');
@@ -136,6 +136,19 @@ test('multi-share input deduplicates links and parent job starts with one entry 
   assert.match(SOURCE, /child\.batchParent = \{batchId:parent\.batchId, shareIndex:i\}/);
 });
 
+test('diagnostic redaction removes credentials embedded inside larger strings', () => {
+  const {api} = loadRuntime();
+  const jwt = 'abcdefghijkl.mnopqrstuvwxyz.opqrstuvwxyz12';
+  const value = api.redactForExport({
+    message:`request failed at https://cdn.example/file?token=supersecret&expires=123 and jwt ${jwt}`,
+    harmless:'https://example.com/public'
+  });
+  assert.doesNotMatch(value.message, /supersecret|expires=123|abcdefghijkl/);
+  assert.match(value.message, /\[REDACTED_SIGNED_URL\]/);
+  assert.match(value.message, /\[REDACTED_JWT\]/);
+  assert.equal(value.harmless, 'https://example.com/public');
+});
+
 test('manifest crawler overlaps sibling folder requests while staying within six workers', async () => {
   const {api} = loadRuntime();
   let active = 0;
@@ -258,6 +271,56 @@ test('mismatched or unreadable Content-Range is never appended and restarts from
     });
   };
 
+  const result = await api.downloadOwnedFile({api:ownedApi(owned), state, handle});
+  assert.equal(calls, 2);
+  assert.equal(result.resumed, false);
+  assert.equal(result.state.download.downloadedBytes, 4);
+  assert.equal(size, 4);
+});
+
+test('206 without readable Content-Range restarts from zero instead of appending', async () => {
+  const {api, context} = loadRuntime();
+  const owned = {id:'d1', name:'file.bin', size:4, url:'https://cdn.example/file'};
+  const state = {state:'DOWNLOAD_PAUSED', confirmedDest:{id:'d1', name:'file.bin', size:4}, source:{size:4}};
+  let size = 2;
+  let calls = 0;
+  const handle = {
+    async queryPermission() { return 'granted'; },
+    async getFile() { return {size, name:'file.bin'}; },
+    async createWritable() {
+      return {
+        async seek() {},
+        async truncate(n) { size = n; },
+        async write(value) { size += value?.byteLength || 0; },
+        async close() {},
+      };
+    },
+  };
+  context.fetch = async (_url, options = {}) => {
+    calls += 1;
+    if (calls === 1) {
+      assert.equal(options.headers?.Range, 'bytes=2-');
+      return response({
+        status:206,
+        length:'2',
+        contentRange:null,
+        reader:{async read(){ return {done:true}; }, async cancel(){}}
+      });
+    }
+    assert.equal(options.headers?.Range, undefined);
+    let sent = false;
+    return response({
+      status:200,
+      length:'4',
+      reader:{
+        async read() {
+          if (!sent) { sent = true; return {done:false, value:new Uint8Array([1,2,3,4])}; }
+          return {done:true};
+        },
+        async cancel() {},
+      }
+    });
+  };
   const result = await api.downloadOwnedFile({api:ownedApi(owned), state, handle});
   assert.equal(calls, 2);
   assert.equal(result.resumed, false);
@@ -626,34 +689,42 @@ test('single-selection direct save uses save picker and does not require the rem
   assert.match(block, /startEarlyDeletePipeline\(new Set\(selectedIndexes\), \{baseDir, directFileHandle, skipConfirm:true\}\)/);
 });
 
-test('direct-file preparation preserves an existing target until Queue state and handle are persisted', () => {
+test('direct-file target is initialized only after Queue persistence and immediately before local transfer', () => {
   const helperAt = SOURCE.indexOf('async function prepareDirectFileHandle');
-  const nextAt = SOURCE.indexOf('async function getQueueRootHandle', helperAt);
-  const helper = SOURCE.slice(helperAt, nextAt);
-  assert.doesNotMatch(helper, /createWritable|truncate\(/);
-  assert.match(helper, /await ensureHandlePermission\(handle\)/);
+  const initAt = SOURCE.indexOf('async function initializeDirectFileHandle', helperAt);
+  const queueHandleAt = SOURCE.indexOf('async function getQueueRootHandle', initAt);
+  const prepare = SOURCE.slice(helperAt, initAt);
+  const initialize = SOURCE.slice(initAt, queueHandleAt);
+  assert.doesNotMatch(prepare, /createWritable|truncate\(/);
+  assert.match(prepare, /await ensureHandlePermission\(handle\)/);
+  assert.match(initialize, /createWritable\(\{keepExistingData:false\}\)/);
+  assert.match(initialize, /await writable\.truncate\(0\)/);
+  assert.match(initialize, /job\.directFileInitialized = true/);
+  assert.match(initialize, /saveQueueJob\(job\)/);
 
-  const earlyAt = SOURCE.indexOf('async function startEarlyDeletePipeline');
-  const probeAt = SOURCE.indexOf('async function startEarlyDeleteProbe', earlyAt);
-  const early = SOURCE.slice(earlyAt, probeAt);
-  const persistHandleAt = early.indexOf('await putQueueRootHandle(job, queueRoot)');
-  const persistQueueAt = early.indexOf('saveQueueJob(job)');
-  const runAt = early.indexOf('await runJob(job, queueRoot, false)');
-  assert.ok(persistHandleAt >= 0 && persistQueueAt > persistHandleAt && runAt > persistQueueAt);
+  const createAt = SOURCE.indexOf('function createQueueFromManifest');
+  const createEnd = SOURCE.indexOf('async function invokeDirectoryPicker', createAt);
+  const create = SOURCE.slice(createAt, createEnd);
+  assert.match(create, /directFileInitialized:directFile \? false : null/);
 
-  const compatAt = SOURCE.indexOf('async function startManifestQueue');
-  const nextStartAt = SOURCE.indexOf("batchStartBtn.addEventListener('click'", compatAt);
-  const compat = SOURCE.slice(compatAt, nextStartAt);
-  const compatHandleAt = compat.indexOf('await putQueueRootHandle(job, queueRoot)');
-  const compatQueueAt = compat.indexOf('saveQueueJob(job)');
-  const compatRunAt = compat.indexOf('await runJob(job, queueRoot, false)');
-  assert.ok(compatHandleAt >= 0 && compatQueueAt > compatHandleAt && compatRunAt > compatQueueAt);
+  const localAt = SOURCE.indexOf('async function getLocalFileHandle');
+  const countsAt = SOURCE.indexOf('function queueCounts', localAt);
+  const local = SOURCE.slice(localAt, countsAt);
+  assert.match(local, /await initializeDirectFileHandle\(job, queueRoot\)/);
 
-  const resumeAt = SOURCE.indexOf("resumeBtn.addEventListener('click'");
-  const pauseAt = SOURCE.indexOf("pauseBtn.addEventListener('click'", resumeAt);
-  const resume = SOURCE.slice(resumeAt, pauseAt);
-  assert.match(resume, /const queueRoot = await getQueueRootHandle\(job\)/);
-  assert.doesNotMatch(resume, /prepareDirectFileHandle/);
+  for (const [startNeedle, endNeedle] of [
+    ['async function startEarlyDeletePipeline', 'async function startEarlyDeleteProbe'],
+    ['async function startManifestQueue', "batchStartBtn.addEventListener('click'"]
+  ]) {
+    const start = SOURCE.indexOf(startNeedle);
+    const end = SOURCE.indexOf(endNeedle, start);
+    const block = SOURCE.slice(start, end);
+    const persistHandleAt = block.indexOf('await putQueueRootHandle(job, queueRoot)');
+    const persistQueueAt = block.indexOf('saveQueueJob(job)');
+    const runAt = block.indexOf('await runJob(job, queueRoot, false)');
+    assert.ok(persistHandleAt >= 0 && persistQueueAt > persistHandleAt && runAt > persistQueueAt);
+    assert.doesNotMatch(block.slice(0, persistQueueAt), /initializeDirectFileHandle/);
+  }
 });
 
 test('selected Queue rejects an empty selection', () => {
