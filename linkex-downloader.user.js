@@ -633,7 +633,7 @@
         const list = value[key];
         if (Array.isArray(list)) list.forEach(add);
       }
-      for (const key of ['file','dest','destination','target','created_file','createdFile','output','result']) {
+      for (const key of ['file','dest','destination','target','created_file','createdFile','output','result','data']) {
         collectKnown(value[key], true, depth + 1);
       }
       for (const key of ['files','destinations','targets','created_files','createdFiles','outputs','results']) {
@@ -674,7 +674,7 @@
     if (proof?.verified !== true || !proof.method) {
       throw new LinkexError('今回のCOPY要求とdestIdを直接結び付ける証拠がありません。誤削除防止のため停止します。', {kind});
     }
-    if (String(state?.confirmedDest?.id || '') !== String(proof.destId || state?.confirmedDest?.id || '')) {
+    if (!proof.destId || String(state?.confirmedDest?.id || '') !== String(proof.destId)) {
       throw new LinkexError('COPY所有権証拠とconfirmedDestが一致しません。誤削除防止のため停止します。', {kind});
     }
     return proof;
@@ -4871,11 +4871,13 @@ const transientSignedUrls = new Map();
       if (!parent || parent.kind !== 'share-batch') throw new LinkexError('一括取り込み状態がありません。', {kind:'batch_state'});
       await ensureHandlePermission(baseDir);
       if (!resolveCredentials()) throw new LinkexError(credentialBootstrapMessage(), {kind:'auth'});
+      const resumeFromSkips = parent.state === 'PAUSED_SKIPS';
+      const resumeIndex = Number(parent.currentShareIndex || 0);
       parent.state = 'RUNNING';
       parent.lastError = null;
       saveShareBatchJob(parent);
 
-      for (let i = Number(parent.currentShareIndex || 0); i < parent.shares.length; i++) {
+      for (let i = resumeIndex; i < parent.shares.length; i++) {
         assertLease();
         parent.currentShareIndex = i;
         const share = parent.shares[i];
@@ -4883,7 +4885,7 @@ const transientSignedUrls = new Map();
         // DONE_WITH_SKIPSで一度停止した後、容量スキップを再試行せず再開した場合は
         // その共有をskipあり完了として確定し、次の共有へ進む。
         let existing = loadQueueJob();
-        if (parent.state === 'PAUSED_SKIPS' && share.state === 'DONE_WITH_SKIPS' && existing?.batchParent?.batchId === parent.batchId && isTerminal(existing)) {
+        if (resumeFromSkips && i === resumeIndex && share.state === 'DONE_WITH_SKIPS' && existing?.batchParent?.batchId === parent.batchId && isTerminal(existing)) {
           parent.currentShareIndex = i + 1;
           parent.state = 'RUNNING';
           saveShareBatchJob(parent);
