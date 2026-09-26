@@ -137,9 +137,12 @@ test('resume after confirmed early delete rearms with a new COPY while preservin
 
 test('DL8 early-delete is primary all/selected path and post-commit delete remains compatibility fallback', () => {
   assert.match(SOURCE, /id="lf-start" class="primary action-main" disabled>すべてダウンロード<\/button>/);
-  assert.match(SOURCE, /id="lf-start-early-delete" class="secondary action-secondary" disabled>互換: 保存後DELETE<\/button>/);
+  assert.match(SOURCE, /id="lf-start-early-delete" class="secondary" disabled>互換方式ですべてダウンロード<\/button>/);
   assert.match(SOURCE, /id="lf-start-selected" class="primary" disabled>選択をダウンロード<\/button>/);
-  assert.match(SOURCE, /id="lf-start-selected-early-delete" class="secondary" disabled>互換: 選択 保存後DELETE<\/button>/);
+  assert.match(SOURCE, /id="lf-start-selected-early-delete" class="secondary" disabled>互換方式で選択をダウンロード<\/button>/);
+
+  const detailsAt = SOURCE.indexOf('<details id="lf-more" class="more">');
+  assert.ok(SOURCE.indexOf('id="lf-start-early-delete"', detailsAt) > detailsAt);
 
   const compatAt = SOURCE.indexOf("earlyDeleteStartBtn.addEventListener('click'");
   const mainAt = SOURCE.indexOf("startBtn.addEventListener('click'", compatAt);
