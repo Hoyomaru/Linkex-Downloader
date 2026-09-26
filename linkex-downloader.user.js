@@ -2241,6 +2241,14 @@ const transientSignedUrls = new Map();
     return await Reflect.apply(picker, pageWindow, [options]);
   }
 
+  async function prepareDirectFileHandle(handle) {
+    if (!handle || handle.kind !== 'file') throw new LinkexError('直接保存用のFileHandleがありません。', {kind:'filesystem'});
+    await ensureHandlePermission(handle);
+    const writable = await handle.createWritable({keepExistingData:false});
+    await writable.close();
+    return handle;
+  }
+
   async function getQueueRootHandle(job) {
     return await idbGetHandle(`${QUEUE_HANDLE_PREFIX}${job.jobId}`);
   }
@@ -4621,7 +4629,7 @@ const transientSignedUrls = new Map();
         await acquireLease();
         const activeJob = loadQueueJob();
         if (activeJob && !isTerminal(activeJob)) throw new LinkexError('別の未完了Queueがあります。先に再開または整理してください。', {kind:'queue_conflict'});
-        if (directFileHandle) await ensureHandlePermission(directFileHandle);
+        if (directFileHandle) await prepareDirectFileHandle(directFileHandle);
         else await ensureHandlePermission(chosenBaseDir);
         const job = createQueueFromManifest(manifest, selected, {
           directFileName:directFileHandle?.name || null
@@ -4801,7 +4809,7 @@ const transientSignedUrls = new Map();
         await acquireLease();
         const activeJob = loadQueueJob();
         if (activeJob && !isTerminal(activeJob)) throw new LinkexError('別の未完了Queueを検出しました。状態を再表示してから再開または整理してください。', {kind:'queue_conflict'});
-        if (directFileHandle) await ensureHandlePermission(directFileHandle);
+        if (directFileHandle) await prepareDirectFileHandle(directFileHandle);
         else await ensureHandlePermission(chosenBaseDir);
         const job = createQueueFromManifest(manifest, selected, {
           directFileName:directFileHandle?.name || null
