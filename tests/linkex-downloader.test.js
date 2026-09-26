@@ -8,7 +8,7 @@ const {webcrypto} = require('node:crypto');
 const {TextEncoder} = require('node:util');
 
 const SOURCE_PATH = 'linkex-downloader.user.js';
-const SOURCE = fs.readFileSync(SOURCE_PATH, 'utf8');
+const SOURCE = fs.readFileSync(SOURCE_PATH, 'utf8').replace(/\r\n/g, '\n');
 const STARTUP = "  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', createPanel, {once:true});\n  else createPanel();\n})();";
 const EXPOSE = "  globalThis.__linkexTest = {allocateLocalPaths, assertDeleteGuards, downloadOwnedFile, sameOwnedIdentity, LinkexApi, compactDoneTx, createQueueFromManifest, buildManifest, parseShareToken, detectSharePageTarget, isSharePageHost, readCredentialBridge, syncCredentialBridgeFromDisk, resolveCredentials, buildLiveQueueProgress, formatEta};\n})();";
 
@@ -512,6 +512,18 @@ test('compact first screen hides compatibility and technical pipeline controls u
   assert.match(SOURCE, /id="lf-transfer-meta"/);
   assert.match(SOURCE, /id="lf-current-file"/);
   assert.match(SOURCE, /setInterval\(refreshProgress, 1000\)/);
+});
+
+test('audited selection and error states keep recovery controls discoverable', () => {
+  assert.match(SOURCE, /\.selection-actions \{ display:grid; grid-template-columns:repeat\(2,minmax\(0,1fr\)\)/);
+  assert.match(SOURCE, /id="lf-file-filter" aria-label="ファイル名またはパスで絞り込み"/);
+  assert.match(SOURCE, /\.file-path \{[^\n]*-webkit-line-clamp:2/);
+  assert.match(SOURCE, /id="lf-error-actions" class="error-actions" role="alert"/);
+  assert.match(SOURCE, /id="lf-error-resume"[^>]*>Queueを再開/);
+  assert.match(SOURCE, /id="lf-error-export"[^>]*>診断ログを保存/);
+  assert.match(SOURCE, /id="lf-state-line" class="state-line" role="status" aria-live="polite"/);
+  assert.match(SOURCE, /id="lf-transfer-meta" class="transfer-meta" aria-live="polite"/);
+  assert.match(SOURCE, /id="lf-parallel-count" class="parallel-count"/);
 });
 
 test('panel is constrained to the viewport and its body scrolls instead of escaping the screen', () => {
