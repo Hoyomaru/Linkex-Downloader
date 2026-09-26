@@ -6,6 +6,10 @@
 
 次回Release向けの変更はここへ記録します。
 
+## [1.5.0] - 2026-09-27
+
+v1.4.0の通常操作・single-file direct save・高速pipelineを維持しつつ、安全性修正と複数共有リンクの一括取り込みを追加するfeature releaseです。
+
 ### Added
 
 - 複数の `l2e.click/d/...` 共有URLを一括登録し、保存先を1回選んで共有ごとの既存高速Queueを順次実行する親バッチを追加。
@@ -17,6 +21,12 @@
 - Range再開の206応答で `Content-Range` の開始位置とrange幅を検証し、確認不能/不一致ならpartialへ追記せず0 byteから再取得する。
 - direct-saveの既存targetをQueue metadata / FileHandle永続化前にtruncateしないよう修正。
 - Windows CRLF checkoutでもテストハーネスをLF正規化し、Release Asset生成もLFへ固定して環境差のhash変動を解消。
+
+### Validation
+
+- GitHub Actions: Ubuntu 94/94 PASS、Windows 94/94 PASS。
+- userscript構文、repository consistency、deterministic Release Asset生成を確認。
+- 2026-09-27 実環境確認完了。
 
 ### Documentation
 
