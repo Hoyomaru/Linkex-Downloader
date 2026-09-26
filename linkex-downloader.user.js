@@ -733,7 +733,7 @@
       if (!task) throw new LinkexError('Copy task not found', {kind:'protocol', taskId});
       const status = String(task.status || '').toLowerCase();
       onStatus?.(status || 'unknown');
-      if (status === 'success') return {taskId, status, task};
+      if (status === 'success') return {taskId, status, task, response:data};
       if (terminalFail.has(status)) throw new LinkexError(`Copy task failed: ${status}`, {kind:'copy_task', status, task});
       attempt = status !== lastStatus ? 0 : attempt + 1;
       lastStatus = status;
@@ -2461,6 +2461,11 @@ const transientSignedUrls = new Map();
       kind:'full-queue',
       selectionMode:selected == null ? 'all' : 'selected',
       localLayout:directFile ? 'direct-file' : 'queue-directory',
+      // New v1.5 direct-save queues must initialize a user-approved existing target
+      // only after Queue metadata + FileHandle have already been persisted.
+      // undefined is reserved for legacy queues, whose existing partial must be preserved.
+      directFileInitialized:directFile ? false : null,
+      directFileInitializedAt:null,
       sourceOriginalCount:manifest.files.length,
       version:VERSION,
       jobId,
@@ -2507,6 +2512,23 @@ const transientSignedUrls = new Map();
     return handle;
   }
 
+  async function initializeDirectFileHandle(job, handle) {
+    if (job?.localLayout !== 'direct-file' || job.directFileInitialized !== false) return handle;
+    if (!handle || handle.kind !== 'file') throw new LinkexError('直接保存用のFileHandleがありません。', {kind:'filesystem'});
+    await ensureHandlePermission(handle);
+    // This is called from getLocalFileHandle(), i.e. after ownership/signed-URL preparation
+    // and only after the Queue + FileHandle have already been persisted by the start path.
+    // If the page exits here, a recoverable Queue remains and resume can safely retry init.
+    const writable = await handle.createWritable({keepExistingData:false});
+    try { await writable.truncate(0); }
+    finally { await writable.close(); }
+    job.directFileInitialized = true;
+    job.directFileInitializedAt = Date.now();
+    saveQueueJob(job);
+    recordEvent('info', 'direct-file-initialized', `直接保存targetを転送開始用に初期化: ${handle.name || job.items?.[0]?.source?.name || 'file'}`, {jobId:job.jobId});
+    return handle;
+  }
+
   async function getQueueRootHandle(job) {
     return await idbGetHandle(`${QUEUE_HANDLE_PREFIX}${job.jobId}`);
   }
@@ -2518,6 +2540,7 @@ const transientSignedUrls = new Map();
   async function getLocalFileHandle(queueRoot, item, job = null) {
     if (job?.localLayout === 'direct-file') {
       if (queueRoot?.kind !== 'file') throw new LinkexError('直接保存用のFileHandleが見つかりません。', {kind:'filesystem'});
+      await initializeDirectFileHandle(job, queueRoot);
       return queueRoot;
     }
     const segs = Array.isArray(item.localSegments) && item.localSegments.length ? item.localSegments : [sanitizeSegment(item.source?.name || 'file.bin')];
@@ -2733,7 +2756,7 @@ const transientSignedUrls = new Map();
         const taskResult = await waitTaskIfPresent(api, copyResult, s => onStatus?.(`COPY task: ${s}\n${item.source.remotePath}`));
         tx = {
           ...tx,
-          copyAttribution:buildCopyAttribution(copyResult, taskResult?.task || null, item.source.sourceId),
+          copyAttribution:buildCopyAttribution(copyResult, taskResult?.response || taskResult?.task || null, item.source.sourceId),
           copyTaskStatus:taskResult?.status || null
         };
         tx = perfPhaseEnd(tx, 'copy', Date.now(), {outcome:'request-complete'});
@@ -4157,9 +4180,14 @@ const transientSignedUrls = new Map();
     if (depth > 12) return '[max-depth]';
     if (value == null || typeof value === 'number' || typeof value === 'boolean') return value;
     if (typeof value === 'string') {
-      if (isJwtLike(value)) return '[REDACTED_JWT]';
-      if (/^https?:\/\//i.test(value) && /(?:token=|sign=|signature=|expires=|auth=)/i.test(value)) return '[REDACTED_SIGNED_URL]';
-      return value.length > 12000 ? `${value.slice(0,12000)}…[truncated]` : value;
+      let text = value;
+      if (isJwtLike(text)) return '[REDACTED_JWT]';
+      // Diagnostics often embed a URL/JWT inside a larger error message. Redact those too.
+      text = text.replace(/\b[A-Za-z0-9_-]{12,}\.[A-Za-z0-9_-]{12,}\.[A-Za-z0-9_-]{12,}\b/g, '[REDACTED_JWT]');
+      text = text.replace(/https?:\/\/[^\s"'<>]+/gi, url => (
+        /(?:[?&](?:token|sign|signature|expires|auth)=)/i.test(url) ? '[REDACTED_SIGNED_URL]' : url
+      ));
+      return text.length > 12000 ? `${text.slice(0,12000)}…[truncated]` : text;
     }
     if (Array.isArray(value)) return value.map(v => redactForExport(v, depth + 1));
     if (typeof value === 'object') {
