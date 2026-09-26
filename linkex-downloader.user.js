@@ -866,6 +866,65 @@
     };
   }
 
+  function formatEta(seconds) {
+    const value = Number(seconds);
+    if (!Number.isFinite(value) || value < 0) return null;
+    if (value < 60) return `約${Math.max(1, Math.ceil(value))}秒`;
+    const minutes = Math.ceil(value / 60);
+    if (minutes < 60) return `約${minutes}分`;
+    const hours = Math.floor(minutes / 60);
+    const rest = minutes % 60;
+    return rest ? `約${hours}時間${rest}分` : `約${hours}時間`;
+  }
+
+  function buildLiveQueueProgress(job, now = Date.now()) {
+    const result = {
+      activeDownloads:0,
+      instantBytesPerSecond:0,
+      remainingBytes:0,
+      currentFiles:[]
+    };
+    if (!job?.items?.length) return result;
+
+    for (const item of job.items) {
+      const itemState = item?.tx?.state === 'DONE' ? 'DONE' : item?.state;
+      const sourceBytes = Math.max(0, Number(item?.source?.size || 0));
+      if (itemState === 'DONE' || ['SKIPPED_CAPACITY','BLOCKED_CAPACITY','UNFITTABLE'].includes(itemState)) continue;
+
+      let tx = item?.tx;
+      if (tx?.operationId) {
+        const probe = loadProbeState(tx);
+        if (probe?.operationId === tx.operationId) tx = probe;
+      }
+
+      const download = tx?.download || {};
+      const expected = download.expectedCdnBytes == null
+        ? sourceBytes
+        : Math.max(0, Number(download.expectedCdnBytes || 0));
+      const totalForItem = expected > 0 ? expected : sourceBytes;
+      const downloaded = Math.max(0, Math.min(totalForItem || Number(download.downloadedBytes || 0), Number(download.downloadedBytes || 0)));
+      result.remainingBytes += Math.max(0, totalForItem - downloaded);
+
+      const txState = String(tx?.state || itemState || '');
+      const updatedAt = Number(download.updatedAt || tx?.updatedAt || 0);
+      const telemetry = download.telemetry || {};
+      const isDownloading = /DOWNLOADING/.test(txState) || /DOWNLOADING/.test(String(itemState || ''));
+      const fresh = updatedAt > 0 && now - updatedAt <= 6000;
+      if (isDownloading) {
+        result.activeDownloads += 1;
+        const name = item?.source?.remotePath || item?.source?.name || '';
+        if (name) result.currentFiles.push(name);
+        if (fresh) {
+          const instant = Number(telemetry.instantBytesPerSecond || 0);
+          const average = Number(telemetry.averageBytesPerSecond || 0);
+          const speed = instant > 0 ? instant : average;
+          if (Number.isFinite(speed) && speed > 0) result.instantBytesPerSecond += speed;
+        }
+      }
+    }
+    return result;
+  }
+
   function openDownloadDb() {
     return new Promise((resolve, reject) => {
       const req = indexedDB.open(DOWNLOAD_DB, 1);
@@ -3879,12 +3938,19 @@ const transientSignedUrls = new Map();
         #linkex-full-queue details.more { margin-top:9px; border-top:1px solid #374151; padding-top:7px; }
         #linkex-full-queue details.more > summary { cursor:pointer; color:#cbd5e1; font-size:12px; font-weight:700; user-select:none; padding:4px 1px 7px; }
         #linkex-full-queue details.more .more-body { padding-top:2px; }
+        #linkex-full-queue details.sub { margin-top:8px; border:1px solid #374151; border-radius:8px; padding:0 8px; background:#0b1220; }
+        #linkex-full-queue details.sub > summary { cursor:pointer; color:#cbd5e1; font-size:11px; font-weight:700; padding:8px 1px; user-select:none; }
+        #linkex-full-queue details.sub .sub-body { padding:0 0 8px; }
         #linkex-full-queue [hidden] { display:none !important; }
         #linkex-full-queue .progress-wrap { margin:2px 0 9px; }
         #linkex-full-queue .progress-meta { display:flex; justify-content:space-between; gap:8px; font-size:11px; color:#cbd5e1; margin-bottom:4px; }
         #linkex-full-queue .progress { height:7px; border-radius:999px; background:#1f2937; overflow:hidden; border:1px solid #374151; }
         #linkex-full-queue .progress > i { display:block; height:100%; width:0%; background:#2563eb; transition:width .2s ease; }
-        #linkex-full-queue .state-line { font-size:11px; color:#cbd5e1; margin:-2px 0 8px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+        #linkex-full-queue .transfer-meta { min-height:1.35em; font-size:12px; color:#e5e7eb; margin-top:6px; font-variant-numeric:tabular-nums; }
+        #linkex-full-queue .current-file-row { display:flex; align-items:flex-start; gap:6px; margin-top:2px; min-height:1.35em; }
+        #linkex-full-queue .current-file { min-width:0; flex:1; font-size:11px; line-height:1.35; color:#9ca3af; overflow:hidden; display:-webkit-box; -webkit-box-orient:vertical; -webkit-line-clamp:2; overflow-wrap:anywhere; }
+        #linkex-full-queue .parallel-count { flex:0 0 auto; font-size:10px; line-height:1.2; color:#bfdbfe; background:#172554; border:1px solid #1d4ed8; border-radius:999px; padding:3px 6px; }
+        #linkex-full-queue .state-line { font-size:11px; color:#cbd5e1; margin:4px 0 8px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
         #linkex-full-queue .state-line.ok { color:#bbf7d0; }
         #linkex-full-queue .state-line.err { color:#fecaca; }
         #linkex-full-queue details.log { margin-top:8px; }
@@ -3898,42 +3964,57 @@ const transientSignedUrls = new Map();
         #linkex-full-queue .selection { margin:0 0 9px; padding:8px; border:1px solid #374151; border-radius:8px; background:#0b1220; }
         #linkex-full-queue .selection[hidden] { display:none; }
         #linkex-full-queue .selection-meta { font-size:11px; color:#cbd5e1; margin-bottom:6px; }
-        #linkex-full-queue .selection-actions { display:flex; gap:6px; margin-bottom:6px; }
-        #linkex-full-queue .selection-actions button { padding:6px 7px; font-size:11px; }
+        #linkex-full-queue .selection-actions { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:6px; margin-bottom:6px; }
+        #linkex-full-queue .selection-actions button { min-width:0; padding:7px 8px; font-size:11px; }
         #linkex-full-queue .file-list { max-height:190px; overflow:auto; border:1px solid #1f2937; border-radius:6px; }
         #linkex-full-queue .file-option { display:flex; align-items:flex-start; gap:7px; padding:6px 7px; border-bottom:1px solid #1f2937; font-size:11px; line-height:1.35; cursor:pointer; }
         #linkex-full-queue .file-option:last-child { border-bottom:0; }
         #linkex-full-queue .file-option input { width:auto; margin:2px 0 0; flex:0 0 auto; }
-        #linkex-full-queue .file-path { overflow-wrap:anywhere; }
+        #linkex-full-queue .file-path { min-width:0; flex:1; overflow:hidden; overflow-wrap:anywhere; display:-webkit-box; -webkit-box-orient:vertical; -webkit-line-clamp:2; }
         #linkex-full-queue .file-size { color:#9ca3af; white-space:nowrap; margin-left:auto; }
+        #linkex-full-queue .error-actions { margin:0 0 9px; padding:9px; border:1px solid #991b1b; border-radius:8px; background:#2b1013; }
+        #linkex-full-queue .error-actions .error-copy { margin-bottom:7px; color:#fecaca; font-size:11px; line-height:1.45; }
+        #linkex-full-queue .error-actions .row { margin-bottom:0; }
       </style>
       <div class="box">
         <div class="hd">
-          <div class="hd-left"><div class="title">Linkex Downloader v${VERSION}</div><div class="badge">SAFE QUEUE</div></div>
+          <div class="hd-left"><div class="title">Linkex Downloader v${VERSION}</div><div class="badge">安全モード</div></div>
           <button id="lf-collapse" class="mini" title="最小化/展開">−</button>
         </div>
         <div class="body">
           <div id="lf-share-context" class="share-context" hidden></div>
-          <input id="lf-url" placeholder="https://l2e.click/d/xxxxxxxx" />
+          <input id="lf-url" aria-label="共有URL" placeholder="https://l2e.click/d/xxxxxxxx" />
           <div class="primary-actions">
             <button id="lf-start" class="primary action-main" disabled>すべてダウンロード</button>
-            <button id="lf-start-early-delete" class="secondary action-secondary" disabled>互換: 保存後DELETE</button>
             <button id="lf-select-mode" class="secondary action-secondary" disabled>ファイルを選ぶ</button>
           </div>
           <div id="lf-selection" class="selection" hidden>
             <div id="lf-selection-meta" class="selection-meta">0 / 0 selected</div>
-            <input id="lf-file-filter" placeholder="ファイル名 / パスで絞り込み" />
+            <input id="lf-file-filter" aria-label="ファイル名またはパスで絞り込み" placeholder="ファイル名 / パスで絞り込み" />
             <div class="selection-actions"><button id="lf-select-all" class="secondary">全件選択</button><button id="lf-clear-all" class="secondary">全解除</button><button id="lf-select-visible" class="secondary">表示中を選択</button><button id="lf-clear-visible" class="secondary">表示中を解除</button></div>
             <div id="lf-file-list" class="file-list"></div>
             <div id="lf-selection-note" class="notice"></div>
-            <div class="row" style="margin-top:8px;margin-bottom:0"><button id="lf-start-selected" class="primary" disabled>選択をダウンロード</button><button id="lf-start-selected-early-delete" class="secondary" disabled>互換: 選択 保存後DELETE</button></div>
+            <div class="row" style="margin-top:8px;margin-bottom:0"><button id="lf-start-selected" class="primary" disabled>選択をダウンロード</button></div>
+            <details class="sub">
+              <summary>選択ファイルの互換モード</summary>
+              <div class="sub-body"><button id="lf-start-selected-early-delete" class="secondary" disabled>互換方式で選択をダウンロード</button></div>
+            </details>
           </div>
           <div id="lf-queue-actions" class="row" hidden><button id="lf-resume" class="primary" disabled>Queueを再開</button><button id="lf-pause" class="secondary" disabled>現在ファイル後に停止</button></div>
           <div class="progress-wrap">
             <div class="progress-meta"><span id="lf-progress-text">Queueなし</span><span id="lf-progress-pct">0%</span></div>
             <div class="progress"><i id="lf-progress-bar"></i></div>
+            <div id="lf-transfer-meta" class="transfer-meta" aria-live="polite"></div>
+            <div class="current-file-row">
+              <div id="lf-current-file" class="current-file"></div>
+              <span id="lf-parallel-count" class="parallel-count" hidden></span>
+            </div>
           </div>
-          <div id="lf-state-line" class="state-line">待機中</div>
+          <div id="lf-state-line" class="state-line" role="status" aria-live="polite">待機中</div>
+          <div id="lf-error-actions" class="error-actions" role="alert" hidden>
+            <div id="lf-error-copy" class="error-copy">処理は安全側で停止しています。処理済みファイルは保持されます。</div>
+            <div class="row"><button id="lf-error-resume" class="primary">Queueを再開</button><button id="lf-error-export" class="secondary">診断ログを保存</button></div>
+          </div>
           <details id="lf-more" class="more">
             <summary>詳細</summary>
             <div class="more-body">
@@ -3941,13 +4022,23 @@ const transientSignedUrls = new Map();
               <div class="row"><button id="lf-selftest" class="secondary">署名テスト</button><button id="lf-export" class="secondary">診断ログを保存</button></div>
               <div class="row"><button id="lf-refresh" class="secondary">状態を再表示</button><button id="lf-retry" class="secondary" disabled>容量スキップを再試行</button></div>
               <div class="row" style="margin-bottom:0"><button id="lf-abandon" class="secondary" disabled>Queueを安全に破棄</button></div>
+              <details class="sub">
+                <summary>互換モード</summary>
+                <div class="sub-body">
+                  <button id="lf-start-early-delete" class="secondary" disabled>互換方式ですべてダウンロード</button>
+                  <div class="notice">現在の高速方式で問題がある場合だけ使用します。ローカル保存と検証が完了してから、所有確認済みの一時コピーを削除する従来方式です。</div>
+                </div>
+              </details>
+              <details class="sub">
+                <summary>安全方式について</summary>
+                <div class="sub-body notice">通常方式は、CDN stream開始を確認した後に所有確認済み一時コピーの削除をダウンロードと並行します。ローカルダウンロードは最大8並列です。中断時は安全状態を照合し、必要なら新しいCOPY/URLからRange再開します。</div>
+              </details>
               <details id="lf-log-details" class="log">
                 <summary>ログを表示</summary>
                 <div id="lf-status" class="status">共有ページでは「すべてダウンロード」だけで解析からQueue開始まで進めます。\n高速モード: COPY/所有確認 → signed URL → Web Worker stream開始 → 所有一時copy DELETEを並行 → DL/VERIFY。中断時は安全照合後にRange再開します。</div>
               </details>
             </div>
           </details>
-          <div class="notice">高速モードはCDN streamの最初のchunk確認後に、所有確認済み一時copyのDELETEをDLと並行実行します。ローカルDLは最大8並列。中断時はDELETE状態を照合し、必要に応じて同じ所有copyまたは新COPYからRange再開します。「互換: 保存後DELETE」は従来方式です。</div>
         </div>
       </div>`;
     document.body.appendChild(root);
@@ -3985,7 +4076,15 @@ const transientSignedUrls = new Map();
     const progressText = root.querySelector('#lf-progress-text');
     const progressPct = root.querySelector('#lf-progress-pct');
     const progressBar = root.querySelector('#lf-progress-bar');
+    const transferMeta = root.querySelector('#lf-transfer-meta');
+    const currentFile = root.querySelector('#lf-current-file');
+    const parallelCount = root.querySelector('#lf-parallel-count');
+    const errorActions = root.querySelector('#lf-error-actions');
+    const errorCopy = root.querySelector('#lf-error-copy');
+    const errorResumeBtn = root.querySelector('#lf-error-resume');
+    const errorExportBtn = root.querySelector('#lf-error-export');
 
+    let smoothedTransferRate = 0;
     let lastUiEventText = '';
     let lastUiEventAt = 0;
     const renderStatus = (text, cls='') => {
@@ -3996,9 +4095,12 @@ const transientSignedUrls = new Map();
       stateLine.textContent = firstLine.length > 110 ? `${firstLine.slice(0, 107)}…` : firstLine;
       stateLine.title = firstLine;
       stateLine.className = `state-line ${cls}`;
-      if (cls === 'err') {
-        moreDetails.open = true;
-        logDetails.open = true;
+      const isError = cls === 'err';
+      errorActions.hidden = !isError;
+      if (isError) {
+        errorCopy.textContent = `${firstLine} 処理は安全側で停止しています。処理済みファイルは保持されます。`;
+        moreDetails.open = false;
+        logDetails.open = false;
       }
       refreshProgress();
       return message;
@@ -4176,6 +4278,7 @@ const transientSignedUrls = new Map();
         const path = document.createElement('span');
         path.className = 'file-path';
         path.textContent = file.remotePath || file.name || `(file ${index + 1})`;
+        path.title = path.textContent;
         const size = document.createElement('span');
         size.className = 'file-size';
         size.textContent = formatBytes(file.size);
@@ -4218,17 +4321,57 @@ const transientSignedUrls = new Map();
     function refreshProgress() {
       const job = loadQueueJob();
       if (!job?.items?.length) {
-        progressText.textContent = manifest?.files?.length ? `解析済み: ${manifest.files.length} files / ${formatBytes(manifest.totalBytes)}` : 'Queueなし';
+        progressText.textContent = manifest?.files?.length ? `解析済み: ${manifest.files.length}ファイル / ${formatBytes(manifest.totalBytes)}` : 'Queueなし';
         progressPct.textContent = '0%';
         progressBar.style.width = '0%';
+        transferMeta.textContent = '';
+        currentFile.textContent = '';
+        smoothedTransferRate = 0;
         return;
       }
+
       const c = queueCounts(job);
       const terminal = c.done + c.skippedCapacity + c.unfittable;
       const pct = Math.max(0, Math.min(100, terminal / job.items.length * 100));
-      progressText.textContent = `DONE ${c.done}/${job.items.length} · skip ${c.skippedCapacity + c.unfittable} · blocked ${c.blocked}`;
+      const skipped = c.skippedCapacity + c.unfittable;
+      const labels = [`${c.done} / ${job.items.length}ファイル完了`];
+      if (skipped) labels.push(`スキップ ${skipped}`);
+      if (c.blocked) labels.push(`要確認 ${c.blocked}`);
+      progressText.textContent = labels.join(' · ');
       progressPct.textContent = `${pct.toFixed(job.items.length > 200 ? 1 : 0)}%`;
       progressBar.style.width = `${pct}%`;
+
+      const live = buildLiveQueueProgress(job);
+      if (live.instantBytesPerSecond > 0) {
+        smoothedTransferRate = smoothedTransferRate > 0
+          ? smoothedTransferRate * 0.7 + live.instantBytesPerSecond * 0.3
+          : live.instantBytesPerSecond;
+        const eta = live.remainingBytes > 0 ? formatEta(live.remainingBytes / smoothedTransferRate) : null;
+        transferMeta.textContent = `${formatTransferRate(smoothedTransferRate)}${eta ? ` · 残り ${eta}` : ''}`;
+      } else if (live.activeDownloads > 0) {
+        transferMeta.textContent = 'ダウンロード速度を計測中…';
+        smoothedTransferRate = 0;
+      } else {
+        transferMeta.textContent = terminal >= job.items.length ? '完了' : 'ダウンロード準備中';
+        smoothedTransferRate = 0;
+      }
+
+      if (live.currentFiles.length === 1) {
+        currentFile.textContent = live.currentFiles[0];
+        currentFile.title = live.currentFiles[0];
+        parallelCount.hidden = true;
+        parallelCount.textContent = '';
+      } else if (live.currentFiles.length > 1) {
+        currentFile.textContent = live.currentFiles[0];
+        currentFile.title = live.currentFiles.join('\n');
+        parallelCount.hidden = false;
+        parallelCount.textContent = `+ほか${live.currentFiles.length - 1}件`;
+      } else {
+        currentFile.textContent = '';
+        currentFile.title = '';
+        parallelCount.hidden = true;
+        parallelCount.textContent = '';
+      }
     }
 
     function refreshQueueUi() {
@@ -4247,6 +4390,9 @@ const transientSignedUrls = new Map();
       resumeBtn.disabled = busy || !active || probeActive || recoveryNeedsNewContext;
       resumeBtn.textContent = recoveryNeedsNewContext ? '先にページ再読み込み' : 'Queueを再開';
       resumeBtn.hidden = running || !active || probeActive;
+      errorResumeBtn.disabled = resumeBtn.disabled;
+      errorResumeBtn.hidden = !active || probeActive;
+      errorResumeBtn.textContent = recoveryNeedsNewContext ? '先にページ再読み込み' : 'Queueを再開';
       pauseBtn.disabled = !running || !activeRunJob || !!activeRunJob.stopRequested;
       pauseBtn.hidden = !running;
       queueActions.hidden = resumeBtn.hidden && pauseBtn.hidden;
@@ -4264,12 +4410,18 @@ const transientSignedUrls = new Map();
       return job;
     }
 
+    const progressTimer = setInterval(refreshProgress, 1000);
+    globalThis.addEventListener?.('pagehide', () => clearInterval(progressTimer), {once:true});
+
     collapseBtn.addEventListener('click', () => {
       const collapsed = !root.classList.contains('collapsed');
       root.classList.toggle('collapsed', collapsed);
       collapseBtn.textContent = collapsed ? '+' : '−';
       saveUiPrefs({...loadUiPrefs(), collapsed});
     });
+
+    errorResumeBtn.addEventListener('click', () => resumeBtn.click());
+    errorExportBtn.addEventListener('click', () => exportBtn.click());
 
     root.querySelector('#lf-selftest').addEventListener('click', () => {
       const tests = runSignatureSelfTest();

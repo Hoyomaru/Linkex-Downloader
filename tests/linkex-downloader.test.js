@@ -8,9 +8,9 @@ const {webcrypto} = require('node:crypto');
 const {TextEncoder} = require('node:util');
 
 const SOURCE_PATH = 'linkex-downloader.user.js';
-const SOURCE = fs.readFileSync(SOURCE_PATH, 'utf8');
+const SOURCE = fs.readFileSync(SOURCE_PATH, 'utf8').replace(/\r\n/g, '\n');
 const STARTUP = "  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', createPanel, {once:true});\n  else createPanel();\n})();";
-const EXPOSE = "  globalThis.__linkexTest = {allocateLocalPaths, assertDeleteGuards, downloadOwnedFile, sameOwnedIdentity, LinkexApi, compactDoneTx, createQueueFromManifest, buildManifest, parseShareToken, detectSharePageTarget, isSharePageHost, readCredentialBridge, syncCredentialBridgeFromDisk, resolveCredentials};\n})();";
+const EXPOSE = "  globalThis.__linkexTest = {allocateLocalPaths, assertDeleteGuards, downloadOwnedFile, sameOwnedIdentity, LinkexApi, compactDoneTx, createQueueFromManifest, buildManifest, parseShareToken, detectSharePageTarget, isSharePageHost, readCredentialBridge, syncCredentialBridgeFromDisk, resolveCredentials, buildLiveQueueProgress, formatEta};\n})();";
 
 function loadRuntime({href = 'https://disk.linkex.io/', localStorageEntries = {}} = {}) {
   assert.ok(SOURCE.includes(STARTUP), 'test harness could not find userscript startup block');
@@ -468,6 +468,64 @@ test('selected Queue rejects an empty selection', () => {
   assert.throws(() => api.createQueueFromManifest(manifest, []), error => error?.kind === 'selection');
 });
 
+test('live queue progress aggregates active worker speed and excludes skipped bytes from ETA', () => {
+  const {api, storage} = loadRuntime();
+  const now = 10_000;
+  storage.set('linkexCopyProbeStateV2:op-live', {
+    operationId:'op-live',
+    state:'DOWNLOADING',
+    download:{
+      downloadedBytes:40,
+      expectedCdnBytes:100,
+      updatedAt:now - 1000,
+      telemetry:{instantBytesPerSecond:20, averageBytesPerSecond:15}
+    }
+  });
+  const job = {
+    items:[
+      {state:'DONE', source:{name:'done.bin', size:100}, tx:{state:'DONE'}},
+      {state:'EARLY_DELETE_DOWNLOADING', source:{name:'live.bin', remotePath:'folder/live.bin', size:100}, tx:{operationId:'op-live', state:'EARLY_DELETE_DOWNLOADING'}},
+      {state:'PENDING', source:{name:'pending.bin', size:200}, tx:null},
+      {state:'SKIPPED_CAPACITY', source:{name:'skip.bin', size:50}, tx:null},
+    ]
+  };
+  const live = api.buildLiveQueueProgress(job, now);
+  assert.equal(live.activeDownloads, 1);
+  assert.equal(live.instantBytesPerSecond, 20);
+  assert.equal(live.remainingBytes, 260);
+  assert.deepEqual([...live.currentFiles], ['folder/live.bin']);
+  assert.equal(api.formatEta(live.remainingBytes / live.instantBytesPerSecond), '約13秒');
+});
+
+test('compact first screen hides compatibility and technical pipeline controls under details', () => {
+  const primaryAt = SOURCE.indexOf('<div class="primary-actions">');
+  const selectionAt = SOURCE.indexOf('<div id="lf-selection"', primaryAt);
+  const primaryBlock = SOURCE.slice(primaryAt, selectionAt);
+  assert.match(primaryBlock, /id="lf-start"[^>]*>すべてダウンロード/);
+  assert.match(primaryBlock, /id="lf-select-mode"[^>]*>ファイルを選ぶ/);
+  assert.doesNotMatch(primaryBlock, /lf-start-early-delete|保存後DELETE|互換/);
+
+  const detailsAt = SOURCE.indexOf('<details id="lf-more" class="more">');
+  const compatibilityAt = SOURCE.indexOf('id="lf-start-early-delete"', detailsAt);
+  const safetyAt = SOURCE.indexOf('<summary>安全方式について</summary>', detailsAt);
+  assert.ok(detailsAt > 0 && compatibilityAt > detailsAt && safetyAt > detailsAt);
+  assert.match(SOURCE, /id="lf-transfer-meta"/);
+  assert.match(SOURCE, /id="lf-current-file"/);
+  assert.match(SOURCE, /setInterval\(refreshProgress, 1000\)/);
+});
+
+test('audited selection and error states keep recovery controls discoverable', () => {
+  assert.match(SOURCE, /\.selection-actions \{ display:grid; grid-template-columns:repeat\(2,minmax\(0,1fr\)\)/);
+  assert.match(SOURCE, /id="lf-file-filter" aria-label="ファイル名またはパスで絞り込み"/);
+  assert.match(SOURCE, /\.file-path \{[^\n]*-webkit-line-clamp:2/);
+  assert.match(SOURCE, /id="lf-error-actions" class="error-actions" role="alert"/);
+  assert.match(SOURCE, /id="lf-error-resume"[^>]*>Queueを再開/);
+  assert.match(SOURCE, /id="lf-error-export"[^>]*>診断ログを保存/);
+  assert.match(SOURCE, /id="lf-state-line" class="state-line" role="status" aria-live="polite"/);
+  assert.match(SOURCE, /id="lf-transfer-meta" class="transfer-meta" aria-live="polite"/);
+  assert.match(SOURCE, /id="lf-parallel-count" class="parallel-count"/);
+});
+
 test('panel is constrained to the viewport and its body scrolls instead of escaping the screen', () => {
   assert.match(SOURCE, /width:min\(540px, calc\(100vw - 24px\)\)/);
   assert.match(SOURCE, /max-height:calc\(100dvh - 24px\)/);
@@ -604,13 +662,16 @@ test('compact first screen centers quick all-download and file selection while a
   }
 });
 
-test('verbose status log is collapsed under details while one-line state stays visible and errors reveal the log', () => {
+test('verbose status log stays collapsed while errors expose direct recovery actions', () => {
   const progressAt = SOURCE.indexOf('id="lf-progress-bar"');
   const stateAt = SOURCE.indexOf('id="lf-state-line"');
+  const errorAt = SOURCE.indexOf('id="lf-error-actions"');
   const moreAt = SOURCE.indexOf('<details id="lf-more" class="more">');
   const logAt = SOURCE.indexOf('<details id="lf-log-details" class="log">');
   const statusAt = SOURCE.indexOf('id="lf-status" class="status"');
-  assert.ok(progressAt > 0 && stateAt > progressAt && moreAt > stateAt && logAt > moreAt && statusAt > logAt);
+  assert.ok(progressAt > 0 && stateAt > progressAt && errorAt > stateAt && moreAt > errorAt && logAt > moreAt && statusAt > logAt);
+  assert.match(SOURCE, /id="lf-error-resume"[^>]*>Queueを再開/);
+  assert.match(SOURCE, /id="lf-error-export"[^>]*>診断ログを保存/);
 
   const renderAt = SOURCE.indexOf("const renderStatus = (text, cls='') => {");
   const writeAt = SOURCE.indexOf("const write = (text, cls='') => {", renderAt);
@@ -619,8 +680,9 @@ test('verbose status log is collapsed under details while one-line state stays v
   const renderBlock = SOURCE.slice(renderAt, writeAt);
   const writeBlock = SOURCE.slice(writeAt, manifestAt);
   assert.match(renderBlock, /stateLine\.textContent =/);
-  assert.match(renderBlock, /stateLine\.className = `state-line \$\{cls\}`;/);
-  assert.match(renderBlock, /if \(cls === 'err'\) \{\s*moreDetails\.open = true;\s*logDetails\.open = true;\s*\}/);
+  assert.match(renderBlock, /errorActions\.hidden = !isError/);
+  assert.match(renderBlock, /moreDetails\.open = false/);
+  assert.match(renderBlock, /logDetails\.open = false/);
   assert.match(writeBlock, /const message = renderStatus\(text, cls\);/);
 });
 
