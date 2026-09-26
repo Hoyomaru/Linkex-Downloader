@@ -959,7 +959,7 @@ test('preferred download directory is separate from Queue-specific handles and i
   const refreshAt = SOURCE.indexOf('function refreshQueueUi()');
   const collapseAt = SOURCE.indexOf("collapseBtn.addEventListener('click'", refreshAt);
   const block = SOURCE.slice(refreshAt, collapseAt);
-  assert.match(block, /startBtn\.disabled = busy \|\| !!active \|\| !hasShareInput \|\| !preferredHandleReady;/);
+  assert.match(block, /startBtn\.disabled = busy \|\| active \|\| !hasShareInput \|\| !preferredHandleReady;/);
 });
 
 test('quick all-download resolves directory permission before network manifest analysis and starts without confirm', () => {
