@@ -2,7 +2,7 @@
 
 Linkex の共有リンクから、共有内のファイルを **所有権確認付きでローカルへ高速保存する** Tampermonkey userscript です。
 
-v1.4.0では、通常操作を「すべてダウンロード / ファイルを選ぶ」中心へ整理し、1ファイルだけ選んだ場合はSave File Pickerで指定した場所へ直接保存できます。複数ファイル処理では引き続きLinkex の自分のストレージを一時作業領域として利用し、各ファイルを「一時コピー → 所有権確認 → signed URL取得 → CDN stream開始 → 所有済み一時コピーDELETEを並行 → ローカル保存/検証」の順で処理します。COPYの所有権確定は安全のため1件ずつ、ローカルDOWNLOADはWeb Workerで最大8並列です。
+`main` のv1.5.0開発版では、v1.4.0の単一ファイル直接保存に加え、**複数共有リンクの一括取り込み**と安全性修正を追加しています。複数ファイル処理ではLinkex の自分のストレージを一時作業領域として利用し、各ファイルを「一時コピー → 今回のCOPY要求と作成IDの直接照合 → signed URL取得 → CDN stream開始 → 所有済み一時コピーDELETEを並行 → ローカル保存/検証」の順で処理します。COPYの所有権確定は安全のため1件ずつ、ローカルDOWNLOADはWeb Workerで最大8並列です。
 
 > [!IMPORTANT]
 > 本ツールは **Linkex公式とは無関係の非公式ツール** です。Linkex側のWeb/API仕様変更により動作しなくなる可能性があります。
@@ -18,7 +18,7 @@ Linkex Downloader は、その作業をファイルごとに自動化します�
   ↓
 Linkex 自領域へ一時コピー
   ↓
-コピー先 ID を一意に確定
+今回のCOPY応答/taskとコピー先IDを直接照合
   ↓
 signed CDN URL をメモリ上だけで取得
   ↓
@@ -35,7 +35,7 @@ Web WorkerでCDN stream開始（最初のchunkを確認）
 
 ## Version / 配布状態
 
-- `main` source: **v1.4.0**（公開済み / 実機確認済み）
+- `main` source: **v1.5.0**（開発中 / 未公開）
 - 最新公開安定版: **v1.4.0**
 - 最新公開tag: **`v1.4.0`**
 - GitHub Release: **v1.4.0 公開済み（2026-09-27）**
@@ -43,7 +43,7 @@ Web WorkerでCDN stream開始（最初のchunkを確認）
 - License: **MIT**
 
 > [!NOTE]
-> v1.4.0では単一file direct-saveを追加しています。2件以上のQueueではv1.3.1のManifest 6並列、Web Worker転送、stream開始後DELETE並行、item journal永続化をそのまま維持します。「互換: 保存後DELETE」も継続利用できます。
+> 公開安定版v1.4.0では単一file direct-saveまで実機確認済みです。`main` のv1.5.0開発版では、COPY所有権の直接帰属、Range応答検証、direct-save開始前の既存file保護、複数共有リンクの一括取り込みを追加しています。v1.5.0の実Linkex結合確認は未実施です。
 
 最新の正式配布先は GitHub Releases です。
 
@@ -60,13 +60,14 @@ Web WorkerでCDN stream開始（最初のchunkを確認）
 - 共有フォルダの再帰走査
 - 全ファイルmanifest作成
 - Linkex自領域へのCOPY / ownership確認は安全のため1件ずつ実行し、DL stream開始後のearly DELETEは転送と並行
-- コピー前後のID差分による `destId` 所有権確定
+- COPY/task応答の作成ID（またはtask ID）とコピー後candidateを直接照合して `destId` 所有権を確定。名前・サイズ・ID差分だけでは確定しない
 - signed CDN URLを永続化せずメモリ上だけで受け渡し、Web WorkerでローカルDOWNLOADを最大8並列実行
-- Range Requestによる途中再開。中断時はDELETE状態を先に照合し、同じ所有copyが残っていればfresh URLで再開、削除済みなら新COPY / 新signed URLから既存partialへ再開
+- Range Requestによる途中再開。206応答は `Content-Range` の開始位置を検証し、確認できない/不一致なら既存partialへ追記せず0 byteから再取得
 - signed URL失効時（403）のURL再取得
 - Content-Lengthがある場合はCDN実サイズ一致、ない場合はstream正常EOF＋実書込byte数でローカル保存検証
 - 検証済み一時コピー1件だけの自動削除
 - 複数ファイルFull Queue
+- **複数共有リンクの一括取り込み**（URL一覧を重複除外し、1つの保存先で共有ごとのQueueを順次実行・親バッチから再開）
 - 解析後のファイル検索・選択Queue（全件処理も従来どおり利用可能）
 - ページ再読み込み後のQueue再開
 - 容量不足ファイルの安全なskip
@@ -136,15 +137,15 @@ Node.js / Python等の外部ランタイムは不要です。
 ### GitHub Releaseから導入する場合（推奨）
 
 1. Chrome / Edge に Tampermonkey をインストールします。
-2. GitHub Releases から最新の公開安定版 **v1.3.1** を開きます。
-3. Release Assets の `linkex_downloader_v1.3.1.user.js` を取得します。
+2. GitHub Releases から最新の公開安定版 **v1.4.0** を開きます。
+3. Release Assets の `linkex_downloader_v1.4.0.user.js` を取得します。
 4. Tampermonkeyで新規スクリプトを作成し、userscript全文を貼り付けて保存します。
 5. Linkexへログインした状態で `https://disk.linkex.io/` を一度開きます。
 6. 共有ページ `https://l2e.click/d/...` を開き、右下にLinkex Downloaderパネルが表示されれば導入完了です。
 
-ZIP Asset `linkex_downloader_v1.3.1.zip` は同じuserscriptを1ファイルだけ含む補助配布物です。リポジトリ直下のversion固定コピーは今後作成しません。
+ZIP Asset `linkex_downloader_v1.4.0.zip` は同じuserscriptを1ファイルだけ含む補助配布物です。リポジトリ直下のversion固定コピーは今後作成しません。
 
-`linkex-downloader.user.js` は `main` の正本です。現在はv1.3.1 Releaseと同じversionですが、今後の開発では公開安定版より先行する場合があります。
+`linkex-downloader.user.js` は `main` の正本です。現在の`main`はv1.5.0開発版で、公開安定版v1.4.0より先行しています。
 
 ## 更新
 
@@ -181,7 +182,17 @@ v1.1.0 はv1.0.0の通常Queueとの互換性をできる限り維持してい�
 - **1ファイルだけ選択:** ボタンが **このファイルを直接保存** に変わり、ブラウザの「名前を付けて保存」でファイル名と保存場所を指定します。Queue用フォルダや共有内のフォルダ階層は作成しません。
 - **2ファイル以上を選択:** 従来どおり **選択をダウンロード** でQueue用フォルダを作り、共有内のフォルダ構造を維持します。
 
-単一ファイルの直接保存でも、COPY ownership確認・signed URL・DELETE guard・Range resumeなどの安全処理は通常Queueと同じです。途中停止時は選択したFileHandleをQueue用Handleとして保持し、再開時だけ既存partialへRange resumeします。
+単一ファイルの直接保存でも、COPY ownership確認・signed URL・DELETE guard・Range resumeなどの安全処理は通常Queueと同じです。新規direct-saveでは、選択した既存fileをQueue/Handle永続化前に空にしません。実際の転送開始時に初めて書き込みを開始します。
+
+### 複数共有リンクを一括取り込みする（v1.5.0開発版）
+
+1. `disk.linkex.io` で **詳細 → 複数共有リンクの一括取り込み** を開きます。
+2. `https://l2e.click/d/...` を1行1件で貼り付けます。空白・カンマ・セミコロン区切りも受け付け、同じshare tokenは重複除外します。
+3. **一括取り込みを開始** を押し、保存先を1回選びます。
+4. Downloaderは共有ごとにmanifestを解析し、既存の高速Queueを1つずつ順番に実行します。
+5. 停止・再読み込み後は **Queueを再開** で親バッチの現在位置から続行します。容量スキップが出た共有では一度停止し、**容量スキップを再試行**するか、そのまま再開して次の共有へ進めます。
+
+共有ごとのQueueを独立させるため、COPY/DELETEの安全条件や単一Queueキーを混在させません。各共有は保存先配下の独立したQueueフォルダへ保存します。
 
 Queue実行中は、完了ファイル数に加えて現在の合計ダウンロード速度と概算残り時間を表示します。複数workerの速度を合計し、開始直後やtelemetryが古い場合は無理にETAを出さず「計測中」と表示します。
 
@@ -389,7 +400,7 @@ UIの **診断ログを保存** から次のようなJSONを書き出せます�
 
 ## 制限事項・注意事項
 
-- Queue実行中は、別tab・スマホ・別端末からLinkexへファイル追加/コピーをしないでください。ID差分によるownership proofが曖昧になる可能性があります。
+- Queue実行中は、別tab・スマホ・別端末からLinkexへファイル追加/コピーをしないでください。v1.5.0では名前・サイズ・ID差分だけではownershipを確定しませんが、同時操作がある場合は安全停止しやすくなります。
 - 多重実行防止leaseは同一userscript storage上のtabを対象とし、別端末まで排他できるものではありません。
 - 単一ファイル自体がLinkex総容量を超える場合は処理できません。
 - File System Access APIが必要です。
@@ -413,11 +424,11 @@ UIの **診断ログを保存** から次のようなJSONを書き出せます�
 
 ### コピー先IDを一意に確定できない
 
-Queue実行中にLinkex側へ別のファイル追加が発生していないか確認してください。名前だけで対象を推測して手動削除しないでください。
+Queue実行中にLinkex側へ別のファイル追加が発生していないか確認してください。v1.5.0ではCOPY/task応答と作成IDを直接結び付けられないcandidateを自動DELETE対象へ昇格しません。名前やサイズだけで対象を推測して手動削除しないでください。
 
 ### サイズ検証失敗
 
-`LOCAL_COMMITTED` にはならないため、一時コピーは削除されません。ネットワーク/保存先を確認してQueue再開を試してください。
+高速方式ではCDN stream開始後に所有確認済み一時コピーを先にDELETEするため、ローカル検証失敗時でも一時コピーがすでに削除済みの場合があります。再開時は必要に応じて新しいCOPY / signed URLを取得します。互換方式ではローカル検証完了まで一時コピーを削除しません。
 
 詳細は [`docs/TROUBLESHOOTING.md`](docs/TROUBLESHOOTING.md) を参照してください。
 
