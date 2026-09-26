@@ -10,10 +10,10 @@ READMEは利用者向け、CHANGELOGは変更履歴、`docs/ARCHITECTURE.md` は
 
 2026-09-27 時点で確認した状態です。
 
-- `main` source: **v1.4.0**（公開済み / 実機確認済み）
+- `main` source: **v1.5.0**（開発中 / 未公開・実Linkex結合未確認）
 - 最新公開Stable: **v1.4.0**
-- userscript metadata `@version`: **1.4.0**
-- `const VERSION`: **1.4.0**
+- userscript metadata `@version`: **1.5.0**
+- `const VERSION`: **1.5.0**
 - Release commit: `12d463f4ba8fca306b8eb76c526b260cdc175263`
 - 最新公開Git tag: **`v1.4.0`**
 - GitHub Release: **v1.4.0 公開済み**
@@ -26,6 +26,7 @@ READMEは利用者向け、CHANGELOGは変更履歴、`docs/ARCHITECTURE.md` は
 - 実機確認ブラウザ: Chromium系（Chrome / Edge）
 - License: **MIT**
 - v1.4.0: v1.3.1の高速pipeline/safetyを維持したまま、単一file direct-saveと簡潔なprogress UIを追加。2026-09-27実機確認済み。
+- v1.5.0 (`main`, 未公開): COPY作成IDの直接帰属、206 `Content-Range`検証、direct-save永続化前truncate禁止、LF再現性、複数共有リンク親バッチを追加。実Linkex結合確認は未実施。
 
 ### リポジトリ直下
 
@@ -83,10 +84,10 @@ shared file
 3. DELETEは常に `select_all:false` かつ `file_ids:[destId]` の **1件だけ**。
 4. COPY応答が不明なとき、copy POSTを盲目的に再送しない。まず実状態を照合する。
 5. DELETE応答が不明なとき、delete POSTを盲目的に再送しない。まず `destId` の存在/不在を照合する。
-6. コピー前後で新規IDが複数増え、所有権を一意に証明できない場合は停止する。名前から推測して続行しない。
+6. COPY/task応答から今回作成された `destId`（またはtask ID）をcandidateへ直接帰属できる場合だけownership確定する。名前・サイズ・作成時刻・ID差分だけでは確定しない。直接帰属できない新規IDが見えた場合は停止する。
 7. `destId` がコピー前ID集合に含まれていた場合は削除拒否。
 8. ダウンロードに使用したIDと所有権確定IDが一致しない場合は削除拒否。
-9. Content-Lengthが得られる場合はローカル検証済みサイズとCDN実サイズの一致を要求する。Content-Lengthが得られない場合は `verificationMethod === 'stream-eof'`、正常EOF、stream実書込byte数と最終ローカルサイズ一致を要求する。
+9. Range再開の `206` は `Content-Range` の開始位置が要求offsetと一致することを必須とする。ヘッダーを確認できない/不一致の場合はpartialへ追記せず0 byteから再取得する。Content-Lengthが得られる場合はローカル検証済みサイズとCDN実サイズの一致、得られないfull responseでは `stream-eof` を要求する。
 10. 互換モードのDELETEでは`verifiedAt`を要求する。高速モードのearly DELETEでは代わりにsigned URL取得済み・stream開始済み・identity再確認済み・ownership guard済みを要求し、ローカルverifyはDOWNLOAD完了条件として別に必須。
 11. 削除直前の `destId` のname / Linkex metadata sizeが所有権確定時と一致しない場合は削除拒否。
 12. leaseを失った場合は処理を停止する。
@@ -94,6 +95,8 @@ shared file
 14. 共有ページのURL変更で既存Queueの `job.shareToken` を書き換えない。Queueは作成時の共有へ固定する。
 15. `l2e.click` 側のLocal StorageをLinkexアカウント認証として信用しない。認証bridgeは `disk.linkex.io` で検出したtokenだけを書き込む。
 16. credential bridgeへrefresh tokenを保存しない。access tokenもJWT expiryまたは12時間の早い方で失効させる。
+17. direct-saveの既存targetはQueue metadataとFileHandleの永続化が成功する前にtruncateしない。
+18. 複数共有一括取り込みは親バッチが既存の単一共有Queueを順番に起動し、複数shareを1つのtransaction Queueへ混在させない。
 
 **「便利だから」「復旧しやすいから」という理由で、上記ガードを外したり自動再送へ置き換えないこと。**
 
@@ -110,10 +113,11 @@ shared file
 | 認証検出/bridge | disk Local Storageからcredential候補検出、access tokenだけGM bridgeへ同期 | `discoverCredentials()`, `syncCredentialBridgeFromDisk()`, `resolveCredentials()` |
 | Page context | share pageの現在token検出、URL変更時のmanifest guard | `detectSharePageTarget()`, `syncSharePageContext()` |
 | 共有解析 | URL解析、再帰manifest | `parseShareToken()`, `buildManifest()` |
-| Ownership | copy前後ID差分、候補検証 | `reconcileCopy()`, `isPlausibleCopy()` |
+| Ownership | COPY/task作成IDの直接帰属 + candidate検証 | `buildCopyAttribution()`, `reconcileCopy()`, `copyCandidateProof()` |
 | Download | signed URL、Range、checkpoint、verify | `downloadOwnedFile()` |
 | Delete | 最終guard、DELETE、reconcile | `assertDeleteGuards()`, `ensureDeleted()` |
-| Queue | 直列処理、skip、pause/resume | `createQueueFromManifest()`, `processQueue()` |
+| Queue | 単一共有Queue、skip、pause/resume | `createQueueFromManifest()`, `processQueue()`, `processEarlyDeletePipeline()` |
+| Share batch | 複数share親ジョブ、child Queue順次実行/再開 | `createShareBatchJob()`, `continueShareBatch()` |
 | 排他 | tab lease | `acquireLease()`, `assertLease()` |
 | 永続化 | GM storage / IndexedDB | `saveQueueJob()`, `idbPutHandle()` 等 |
 | UI/診断 | パネル、event log、support JSON | `createPanel()`, `downloadSupportBundle()` |
@@ -174,7 +178,7 @@ Share Page Modeでは `l2e.click` が別originのためdisk Local Storageを直�
 
 ## 利用API
 
-現行main（v1.3.1）で確認できる範囲です。
+現行main（v1.5.0開発版）で確認できる範囲です。
 
 | 用途 | Method | Path | 認証 | 書込 |
 |---|---|---|---|---|
@@ -248,29 +252,25 @@ Queue作成時にsource情報をcompact化し、ローカルpathも固定しま�
 
 ### 基本原理
 
-copy前にLinkex root file ID集合を `beforeIds` として保存し、copy後のrootとの差分を取ります。
+copy前にLinkex root file ID集合を `beforeIds` として保存します。copy POST / task pollから得られる「今回作成されたID候補」を `copyAttribution.expectedDestIds` として保持し、copy後rootの新規candidateへ**直接帰属**できる場合だけownershipを確定します。
 
 ownership確定条件:
 
-- 増えたIDが **1件だけ**
-- candidate metadata size == source metadata size
-- extension一致
-- normalized stem一致
-- candidate作成時刻がcopy intentより不自然に古くない
+- candidate IDが `beforeIds` に存在しない
+- candidate metadata size / normalized name /作成時刻がsourceと矛盾しない
+- かつ、candidate IDがCOPY/task応答のcreated/destination IDと一致する、またはcandidateのcopy task IDが今回task IDと一致する
 
-成功時のreconcile resultは `CONFIRMED`。
+成功時のreconcile resultは `CONFIRMED` で、transactionへ `ownershipProof.verified === true` と `destId` を保存します。互換DELETE・early DELETE・download開始はいずれもこのproofを要求します。
 
-Queue側は互換のため `CONFIRMED` または `UNIQUE` を成功として扱いますが、現行 `reconcileCopy()` の返値は `CONFIRMED` です。
+### 直接帰属できない場合
 
-### 曖昧時
+rootに新規IDが見えても、COPY/task応答とcandidateを直接結び付けられなければ `UNATTRIBUTED` として停止します。
 
-差分IDが複数なら `AMBIGUOUS` → transaction `AMBIGUOUS_COPY` → Queue `BLOCKED/PAUSED`。
-
-**名前が似ている等の推測で1件選ばないこと。**
+**同名・同サイズのcandidateが1件だけでも ownership proof にはしません。** 別端末や別操作で追加されたfileを一時copyと誤認し、後でDELETEする経路を防ぐためです。
 
 ### 運用上の重要制限
 
-Queue実行中に別tab・スマホ・別端末・別自動処理からLinkexへfile追加/copyを行うと、ID差分によるownership proofが曖昧になる可能性があります。
+実Linkex APIが常に作成IDまたはtask帰属情報を返すかは未確認です。帰属情報を取得できない環境では、v1.5.0は安全側で処理を停止します。別tab・スマホ・別端末・別自動処理からの同時変更は避けてください。
 
 同一userscript storage内のtabはleaseで防ぎますが、別端末まで排他できません。
 
@@ -283,6 +283,7 @@ Queue実行中に別tab・スマホ・別端末・別自動処理からLinkexへ
 - 約2 MiBごとにcheckpoint
 - 403時は同じ `destId` からURL再取得して再試行
 - Range要求に `200 OK` が返った場合はRange無視とみなし0 byteから書き直し
+- Range要求に `206` が返った場合は `Content-Range` のstartがlocal offsetと一致することを確認。確認不能/不一致/Length矛盾なら追記せず0 byteから再取得
 - `416` ではCDN total sizeとlocal sizeを照合
 - local > CDN totalなら0 byteから安全に書き直し
 - network/CDN/range系はQueue層で最大3回retry
@@ -663,13 +664,13 @@ v0.5.1でstate判定を一致。
 ## 既知制限
 
 - File System Access API必須
-- Queue実行中の外部Linkex変更はownership proofを曖昧化する
+- COPY/taskから作成IDを直接帰属できない場合は安全停止する（実API応答形状の結合確認が必要）
 - leaseは別端末を排他しない
 - 単一fileがLinkex総容量を超えると処理不可
 - Linkex API/Web/CDN変更に依存
 - 自動更新なし
-- 現行CI/CDなし
-- License未設定
+- GitHub Actions CIあり（syntax / Node regression / repository consistency / deterministic Release Asset）
+- License: MIT
 
 ## 現在のGitHubリリース運用
 
