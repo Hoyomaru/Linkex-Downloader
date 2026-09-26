@@ -474,10 +474,11 @@ test('single selected file can use a direct FileHandle layout without a Queue di
     ],
   };
 
-  const direct = api.createQueueFromManifest(manifest, [1], {directFileName:'renamed.bin'});
+  const approvedName = 'x'.repeat(160) + '.bin';
+  const direct = api.createQueueFromManifest(manifest, [1], {directFileName:approvedName});
   assert.equal(direct.localLayout, 'direct-file');
   assert.equal(direct.folderName, '(直接保存)');
-  assert.deepEqual([...direct.items[0].localSegments], ['renamed.bin']);
+  assert.deepEqual([...direct.items[0].localSegments], [approvedName]);
   assert.equal(direct.items[0].source.remotePath, 'nested/b.bin');
 
   const multi = api.createQueueFromManifest(manifest, [0, 1], {directFileName:'ignored.bin'});
@@ -512,11 +513,13 @@ test('new direct-file Queue truncates the user-approved target once, while resum
   const probeAt = SOURCE.indexOf('async function startEarlyDeleteProbe', earlyAt);
   const early = SOURCE.slice(earlyAt, probeAt);
   assert.match(early, /await prepareDirectFileHandle\(directFileHandle\)/);
+  assert.ok(early.indexOf('const job = createQueueFromManifest') < early.indexOf('await prepareDirectFileHandle(directFileHandle)'));
 
   const compatAt = SOURCE.indexOf('async function startManifestQueue');
   const nextStartAt = SOURCE.indexOf("earlyDeleteStartBtn.addEventListener", compatAt);
   const compat = SOURCE.slice(compatAt, nextStartAt);
   assert.match(compat, /await prepareDirectFileHandle\(directFileHandle\)/);
+  assert.ok(compat.indexOf('const job = createQueueFromManifest') < compat.indexOf('await prepareDirectFileHandle(directFileHandle)'));
 
   const resumeAt = SOURCE.indexOf("resumeBtn.addEventListener('click'");
   const pauseAt = SOURCE.indexOf("pauseBtn.addEventListener('click'", resumeAt);
