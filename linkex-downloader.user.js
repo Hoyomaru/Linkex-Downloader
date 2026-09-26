@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Linkex Downloader
 // @namespace    openai-linkex-helper
-// @version      1.4.0
+// @version      1.5.0
 // @description  Linkex共有ページからDL=8高速Queue保存。所有ID限定early DELETE・Range復旧・互換モード・診断付き。
 // @license      MIT
 // @match        https://disk.linkex.io/*
@@ -19,8 +19,8 @@
 (() => {
   'use strict';
 
-  const VERSION = '1.4.0';
-  const BUILD_TAG = 'stream-delete-worker-journal';
+  const VERSION = '1.5.0';
+  const BUILD_TAG = 'batch-import-safety-hardening';
   const API_BASE = 'https://prod.linksvc.xyz';
   const SIGNED_HEADER_PREFIX = 'x-linkinflu-';
   const SIGNATURE_HEADER = 'x-linkinflu-sign';
@@ -616,6 +616,70 @@
     return true;
   }
 
+  function collectCopyCreatedIds(copyResult, taskResult, sourceId = null) {
+    const ids = new Set();
+    const source = String(sourceId || '');
+    const add = value => {
+      if (value == null || typeof value === 'object') return;
+      const id = String(value).trim();
+      if (!id || id === source) return;
+      ids.add(id);
+    };
+    const collectKnown = (value, allowPlainId = false, depth = 0) => {
+      if (!value || typeof value !== 'object' || depth > 5) return;
+      if (allowPlainId) add(value.id);
+      for (const key of ['file_id','fileId','dest_id','destId','destination_id','destinationId','target_id','targetId','created_id','createdId']) add(value[key]);
+      for (const key of ['file_ids','fileIds','dest_ids','destIds','destination_ids','destinationIds','target_ids','targetIds','created_ids','createdIds']) {
+        const list = value[key];
+        if (Array.isArray(list)) list.forEach(add);
+      }
+      for (const key of ['file','dest','destination','target','created_file','createdFile','output','result']) {
+        collectKnown(value[key], true, depth + 1);
+      }
+      for (const key of ['files','destinations','targets','created_files','createdFiles','outputs','results']) {
+        const list = value[key];
+        if (Array.isArray(list)) list.forEach(item => collectKnown(item, true, depth + 1));
+      }
+    };
+    collectKnown(copyResult, false);
+    collectKnown(taskResult, false);
+    return [...ids];
+  }
+
+  function buildCopyAttribution(copyResult, taskResult, sourceId) {
+    const taskId = copyResult?.task_id ?? copyResult?.taskId ?? taskResult?.task_id ?? taskResult?.taskId ?? null;
+    return {
+      taskId:taskId == null ? null : String(taskId),
+      expectedDestIds:collectCopyCreatedIds(copyResult, taskResult, sourceId),
+      builtAt:Date.now()
+    };
+  }
+
+  function copyCandidateProof(candidate, state) {
+    if (!candidate || !state) return null;
+    const id = String(candidate.id || '');
+    if (!id) return null;
+    const expected = new Set((state.copyAttribution?.expectedDestIds || []).map(String));
+    if (expected.has(id)) return {verified:true, method:'copy-created-id', evidenceId:id};
+    const taskId = String(state.copyAttribution?.taskId || '');
+    const candidateTaskId = String(candidate.task_id ?? candidate.taskId ?? candidate.copy_task_id ?? candidate.copyTaskId ?? '');
+    if (taskId && candidateTaskId && taskId === candidateTaskId) {
+      return {verified:true, method:'copy-task-id', evidenceId:taskId};
+    }
+    return null;
+  }
+
+  function assertOwnershipProof(state, kind = 'ownership') {
+    const proof = state?.ownershipProof;
+    if (proof?.verified !== true || !proof.method) {
+      throw new LinkexError('今回のCOPY要求とdestIdを直接結び付ける証拠がありません。誤削除防止のため停止します。', {kind});
+    }
+    if (String(state?.confirmedDest?.id || '') !== String(proof.destId || state?.confirmedDest?.id || '')) {
+      throw new LinkexError('COPY所有権証拠とconfirmedDestが一致しません。誤削除防止のため停止します。', {kind});
+    }
+    return proof;
+  }
+
   function probeKeyFor(operationOrState) {
     const operationId = typeof operationOrState === 'string'
       ? operationOrState
@@ -669,7 +733,7 @@
       if (!task) throw new LinkexError('Copy task not found', {kind:'protocol', taskId});
       const status = String(task.status || '').toLowerCase();
       onStatus?.(status || 'unknown');
-      if (status === 'success') return {taskId, status};
+      if (status === 'success') return {taskId, status, task};
       if (terminalFail.has(status)) throw new LinkexError(`Copy task failed: ${status}`, {kind:'copy_task', status, task});
       attempt = status !== lastStatus ? 0 : attempt + 1;
       lastStatus = status;
@@ -690,20 +754,28 @@
       const diff = root.filter(item => !before.has(String(item.id)));
       lastDiff = diff;
       const plausible = diff.filter(item => isPlausibleCopy(item, state.source, state.startedAt));
-      onProgress({attempt:attempt + 1, diff, plausible});
+      const attributed = plausible
+        .map(item => ({item, proof:copyCandidateProof(item, state)}))
+        .filter(entry => entry.proof);
+      onProgress({attempt:attempt + 1, diff, plausible, attributed});
 
-      // 安全側: コピー開始後に増えたIDが1件だけで、それが元ファイルと整合するときだけ所有権を確定。
-      if (diff.length === 1 && plausible.length === 1) {
-        return {status:'CONFIRMED', item:plausible[0], diff, root};
+      // 名前・サイズ・作成時刻だけでは「今回のCOPYが作ったID」を証明できない。
+      // COPY/task応答のcreated IDまたはtask IDとroot candidateが直接結び付く場合だけ確定する。
+      if (attributed.length === 1) {
+        return {status:'CONFIRMED', item:attributed[0].item, proof:attributed[0].proof, diff, plausible, root};
       }
-      // 2件以上増えた時点で、どれが自分のコピーかID差分だけでは証明できない。
-      if (diff.length > 1) {
-        return {status:'AMBIGUOUS', diff, plausible, root};
+      if (attributed.length > 1) {
+        return {status:'AMBIGUOUS', diff, plausible, attributed, root};
+      }
+      // 新規IDが見えているのに直接帰属できない場合、待って推測を強めず即座に停止する。
+      // 外部操作の同名・同サイズfileをDownloaderの一時copyとして削除しないため。
+      if (diff.length > 0) {
+        return {status:'UNATTRIBUTED', diff, plausible, attributed, root};
       }
 
       const delay = delays[Math.min(attempt, delays.length - 1)];
       attempt += 1;
-      await sleep(delay);
+      await sleep(Math.min(delay, Math.max(0, deadline - Date.now())));
     }
     return {status:'NO_EVIDENCE', diff:lastDiff, plausible:lastDiff.filter(item => isPlausibleCopy(item, state.source, state.startedAt))};
   }
@@ -1006,6 +1078,33 @@
     return fetch(url, {method:'GET', headers, cache:'no-store', credentials:'omit', signal});
   }
 
+  function parseContentRangeHeader(value) {
+    const text = String(value || '').trim();
+    const match = text.match(/^bytes\s+(\d+)-(\d+)\/(\d+|\*)$/i);
+    if (!match) return null;
+    const start = Number(match[1]);
+    const end = Number(match[2]);
+    const total = match[3] === '*' ? null : Number(match[3]);
+    if (!Number.isSafeInteger(start) || !Number.isSafeInteger(end) || start < 0 || end < start) return null;
+    if (total != null && (!Number.isSafeInteger(total) || total <= end)) return null;
+    return {start, end, total};
+  }
+
+  function validateResumeRangeResponse(res, offset) {
+    const expectedStart = Number(offset || 0);
+    if (!(expectedStart > 0 && res?.status === 206)) return {ok:true, total:null};
+    const parsed = parseContentRangeHeader(res.headers?.get?.('Content-Range'));
+    if (!parsed) return {ok:false, reason:'Content-Rangeを確認できません'};
+    if (parsed.start !== expectedStart) return {ok:false, reason:`Content-Range開始位置不一致: expected=${expectedStart} actual=${parsed.start}`};
+    const rawLength = res.headers?.get?.('Content-Length');
+    const length = rawLength == null ? null : Number(rawLength);
+    const span = parsed.end - parsed.start + 1;
+    if (length != null && Number.isFinite(length) && length >= 0 && length !== span) {
+      return {ok:false, reason:`Content-LengthとContent-Range幅が不一致: length=${length} span=${span}`};
+    }
+    return {ok:true, total:parsed.total};
+  }
+
   async function probeCdnTotalSize(url) {
     // Content-Range is not CORS-exposed in the HAR, so a normal GET's exposed Content-Length is used.
     const ctl = new AbortController();
@@ -1048,6 +1147,16 @@
 let detachedDownloadWorkerUrl = null;
 
   function detachedDownloadWorkerBootstrap() {
+    const parseContentRange = value => {
+      const match = String(value || '').trim().match(/^bytes\s+(\d+)-(\d+)\/(\d+|\*)$/i);
+      if (!match) return null;
+      const start = Number(match[1]);
+      const end = Number(match[2]);
+      const total = match[3] === '*' ? null : Number(match[3]);
+      if (!Number.isSafeInteger(start) || !Number.isSafeInteger(end) || start < 0 || end < start) return null;
+      if (total != null && (!Number.isSafeInteger(total) || total <= end)) return null;
+      return {start, end, total};
+    };
     const mergeChunks = (chunks, totalBytes) => {
       if (!totalBytes) return new Uint8Array(0);
       if (chunks.length === 1 && chunks[0]?.byteLength === totalBytes) return chunks[0];
@@ -1138,6 +1247,21 @@ let detachedDownloadWorkerUrl = null;
         const rawRemaining = res.headers.get('Content-Length');
         const remaining = rawRemaining === null ? null : Number(rawRemaining);
         const hasKnownLength = remaining !== null && Number.isFinite(remaining) && remaining >= 0;
+        let rangeTotal = null;
+        if (offset > 0 && res.status === 206) {
+          const range = parseContentRange(res.headers.get('Content-Range'));
+          const span = range ? range.end - range.start + 1 : null;
+          if (!range || range.start !== offset || (hasKnownLength && remaining !== span)) {
+            try { await res.body?.cancel(); } catch {}
+            const error = new Error(!range
+              ? 'Range再開のContent-Rangeを確認できません。先頭から安全に再取得します。'
+              : `Range再開の応答範囲が不正です: requested=${offset} actual=${range.start}-${range.end}`);
+            error.kind = 'range_unverified';
+            error.status = 206;
+            throw error;
+          }
+          rangeTotal = range.total;
+        }
         resumed = offset > 0 && res.status === 206;
         let base = resumed ? offset : 0;
         if (offset > 0 && res.status === 200) {
@@ -1146,8 +1270,8 @@ let detachedDownloadWorkerUrl = null;
           resumed = false;
         }
 
-        expectedTotal = hasKnownLength ? base + remaining : null;
-        verificationMethod = hasKnownLength ? 'content-length' : 'stream-eof';
+        expectedTotal = rangeTotal != null ? rangeTotal : (hasKnownLength ? base + remaining : null);
+        verificationMethod = expectedTotal != null ? 'content-length' : 'stream-eof';
         transferStartedAt = Date.now();
         transferStartBytes = base;
         received = base;
@@ -1517,7 +1641,7 @@ let detachedDownloadWorkerUrl = null;
       } catch (e) {
         // CSP / userscript sandbox / handle-clone failures fall back to the proven inline path.
         // Network/CDN/filesystem errors remain real transfer errors and are handled by the normal Range retry layer.
-        if (!['worker_unavailable','worker_start','worker_filesystem','range_416','network'].includes(e?.kind)) throw e;
+        if (!['worker_unavailable','worker_start','worker_filesystem','range_416','range_unverified','network'].includes(e?.kind)) throw e;
         console.warn('[Linkex Downloader] Worker path unavailable; falling back to inline transfer.', e);
         recordEvent('warn', 'worker-fallback', 'Web Workerからinline転送へフォールバック', {
           kind:e?.kind || null,
@@ -1595,6 +1719,21 @@ let detachedDownloadWorkerUrl = null;
       }
       if (!res.body) throw new LinkexError('CDN response bodyがストリームではありません。', {kind:'protocol'});
 
+      let rangeTotal = null;
+      if (offset > 0 && res.status === 206) {
+        const rangeCheck = validateResumeRangeResponse(res, offset);
+        if (!rangeCheck.ok) {
+          try { await res.body?.cancel(); } catch {}
+          const w = await handle.createWritable({keepExistingData:false});
+          await w.truncate(0); await w.close();
+          recordEvent('warn', 'range-restart', `Range再開を破棄して先頭から再取得: ${rangeCheck.reason}`, {destId, offset});
+          offset = 0;
+          retried403 = false;
+          continue;
+        }
+        rangeTotal = rangeCheck.total;
+      }
+
       const rawRemaining = res.headers.get('Content-Length');
     const remaining = rawRemaining === null ? null : Number(rawRemaining);
     const hasKnownLength = remaining !== null && Number.isFinite(remaining) && remaining >= 0;
@@ -1608,10 +1747,10 @@ let detachedDownloadWorkerUrl = null;
       offset = 0;
     }
 
-    // Content-LengthがCORS等で見えない正常応答では、HTTP streamが正常EOFまで
-    // 到達したことを完全性証拠として扱う。metadata sizeはCDN実サイズと異なるため使わない。
-    const expectedTotal = hasKnownLength ? base + remaining : null;
-    const verificationMethod = hasKnownLength ? 'content-length' : 'stream-eof';
+    // Content-Rangeの総サイズを読める206ではそれを優先する。読めない/開始位置不一致206は
+    // 上で追記せず0 byteから取り直す。Content-Lengthもない正常full responseはEOFを証拠にする。
+    const expectedTotal = rangeTotal != null ? rangeTotal : (hasKnownLength ? base + remaining : null);
+    const verificationMethod = expectedTotal != null ? 'content-length' : 'stream-eof';
     const transferStartedAt = Date.now();
     const transferStartBytes = base;
     let lastRateAt = transferStartedAt;
@@ -1773,6 +1912,7 @@ let detachedDownloadWorkerUrl = null;
   }
   const destId = String(state.confirmedDest?.id || '');
   if (!destId) throw new LinkexError('削除条件を満たしていません: confirmedDest.id がありません。', {kind:'delete_guard'});
+  assertOwnershipProof(state, 'delete_guard');
   if (state.state === 'AMBIGUOUS_COPY') throw new LinkexError('AMBIGUOUS_COPY は削除できません。', {kind:'delete_guard'});
   if (!Array.isArray(state.beforeIds)) throw new LinkexError('削除条件を満たしていません: コピー前ID集合がありません。', {kind:'delete_guard'});
   if (state.beforeIds.map(String).includes(destId)) {
@@ -2243,9 +2383,9 @@ const transientSignedUrls = new Map();
 
   async function prepareDirectFileHandle(handle) {
     if (!handle || handle.kind !== 'file') throw new LinkexError('直接保存用のFileHandleがありません。', {kind:'filesystem'});
+    // ここでは権限確認だけ行う。既存fileのtruncateはQueue/Handle永続化後、
+    // 実際のdownload開始時にfull responseを0 byteから書く直前まで遅延する。
     await ensureHandlePermission(handle);
-    const writable = await handle.createWritable({keepExistingData:false});
-    await writable.close();
     return handle;
   }
 
@@ -2472,7 +2612,12 @@ const transientSignedUrls = new Map();
         copyResult = await api.copySharedFile({shareToken:job.shareToken, sourceId:item.source.sourceId});
         tx = {...tx, state:'COPY_REQUEST_SENT', copyResponse:copyResult ?? {}, requestCompletedAt:Date.now()};
         persistItemTx(job, index, tx, 'COPYING');
-        await waitTaskIfPresent(api, copyResult, s => onStatus?.(`COPY task: ${s}\n${item.source.remotePath}`));
+        const taskResult = await waitTaskIfPresent(api, copyResult, s => onStatus?.(`COPY task: ${s}\n${item.source.remotePath}`));
+        tx = {
+          ...tx,
+          copyAttribution:buildCopyAttribution(copyResult, taskResult?.task || null, item.source.sourceId),
+          copyTaskStatus:taskResult?.status || null
+        };
         tx = perfPhaseEnd(tx, 'copy', Date.now(), {outcome:'request-complete'});
         persistItemTx(job, index, tx, 'COPYING');
       } catch (e) {
@@ -2504,15 +2649,25 @@ const transientSignedUrls = new Map();
       persistItemTx(job, index, tx, 'COPYING');
       const rec = await reconcileCopy(api, tx, {timeoutMs:90000, onProgress:x => onStatus?.(`コピー照合中 [${index+1}/${job.items.length}]…\n${item.source.remotePath}\n差分: ${x.diff?.length ?? 0}\n候補: ${x.plausible?.length ?? 0}`)});
       tx = perfPhaseEnd(tx, 'ownershipReconcile', Date.now(), {outcome:rec.status});
-      if (rec.status === 'CONFIRMED' || rec.status === 'UNIQUE') {
+      if (rec.status === 'CONFIRMED') {
         rememberTransientSignedUrl(tx.operationId, rec.item);
         rememberTransientRootSnapshot(tx.operationId, rec.root);
-        tx = {...tx, state:'OWNERSHIP_CONFIRMED', confirmedDest:ownedIdentitySnapshot(rec.item), reconciledAt:Date.now()};
+        tx = {
+          ...tx,
+          state:'OWNERSHIP_CONFIRMED',
+          confirmedDest:ownedIdentitySnapshot(rec.item),
+          ownershipProof:{...rec.proof, verified:true, destId:String(rec.item.id), verifiedAt:Date.now()},
+          reconciledAt:Date.now()
+        };
         persistItemTx(job, index, tx, 'COPIED');
       } else if (rec.status === 'AMBIGUOUS') {
         tx = {...tx, state:'AMBIGUOUS_COPY', candidates:rec.diff, reconciledAt:Date.now()};
         persistItemTx(job, index, tx, 'BLOCKED');
         throw new LinkexError('コピー先IDを一意に確定できません。自動処理を停止します。', {kind:'ownership'});
+      } else if (rec.status === 'UNATTRIBUTED') {
+        tx = {...tx, state:'UNATTRIBUTED_COPY', candidates:rec.diff, reconciledAt:Date.now()};
+        persistItemTx(job, index, tx, 'BLOCKED');
+        throw new LinkexError('新規ファイルは見つかりましたが、今回のCOPY要求と作成IDを直接結び付けられません。誤DELETE防止のため停止します。', {kind:'ownership_unattributed'});
       } else {
         tx = {...tx, state:'UNCERTAIN_NO_EVIDENCE', candidates:rec.diff, reconciledAt:Date.now()};
         persistItemTx(job, index, tx, 'BLOCKED');
@@ -2532,6 +2687,7 @@ const transientSignedUrls = new Map();
     let tx = item.tx;
     if (['LOCAL_COMMITTED','DELETE_INTENT','DELETE_REQUEST_SENT','DELETE_UNCERTAIN','DELETE_UNCERTAIN_PRESENT','DONE'].includes(tx.state)) return tx;
     if (!tx.confirmedDest?.id) throw new LinkexError('ダウンロード前に所有destIdが確定していません。', {kind:'ownership'});
+    assertOwnershipProof(tx, 'ownership');
 
     const handle = await getLocalFileHandle(queueRoot, item, job);
     await ensureHandlePermission(handle);
@@ -2606,6 +2762,7 @@ const transientSignedUrls = new Map();
     }
     const destId = String(tx.confirmedDest?.id || '');
     if (!destId) throw new LinkexError('早期DELETE並列DL: confirmedDest.id がありません。', {kind:'early_delete_guard'});
+    assertOwnershipProof(tx, 'early_delete_guard');
     if (!Array.isArray(tx.beforeIds)) throw new LinkexError('早期DELETE並列DL: コピー前ID集合がありません。', {kind:'early_delete_guard'});
     if (tx.beforeIds.map(String).includes(destId)) {
       throw new LinkexError('早期DELETE並列DL拒否: destId はCOPY前から存在していました。', {kind:'early_delete_guard'});
