@@ -8,12 +8,25 @@
 
 2026-09-27 時点:
 
-- `main` source: **v1.4.0**（公開済み / 実機確認済み）
-- 最新公開Stable: **v1.4.0**
-- 最新公開tag: **`v1.4.0`**
-- v1.4.0: GitHub Release公開済み（単一file direct-save / UI simplification）
+- `main` source: **v1.5.0**（公開済み / 実環境確認済み）
+- 最新公開Stable: **v1.5.0**
+- 最新公開tag: **`v1.5.0`**
+- v1.5.0: GitHub Release公開済み（安全性強化 / 複数共有リンク一括取り込み）
 - License: **MIT**
 - CI: `.github/workflows/ci.yml`
+
+## v1.5.0 公開実績
+
+GitHub Release `v1.5.0` は2026-09-27に公開済みです。tagはrelease commit `e3b97c115fc58b299263749aad9cd77101bb26e4` を指し、publish workflowでsyntax / Node regression / repository consistency / deterministic Release Asset生成と公開後digest照合までPASSしています。
+
+最終userscript build:
+
+```text
+linkex_downloader_v1.5.0.user.js  275910 bytes  sha256:8aaf40f607a6c7196602477c685c46adefde9b8201d51d8c4bf766d235437736
+linkex_downloader_v1.5.0.zip        62336 bytes  sha256:69f07c10bdef16b8b426b81326497e6e4774ddefe7ed043862281851b58d9c09
+```
+
+v1.5.0ではCOPY/task作成IDの直接帰属、206 `Content-Range` 検証、direct-saveの安全な初期化、LF再現性、複数共有リンク親バッチを追加しました。GitHub ActionsはUbuntu / Windowsの両環境で回帰テストを通過し、2026-09-27に実環境確認を完了しています。
 
 ## v1.4.0 公開実績
 

@@ -2,7 +2,7 @@
 
 Linkex の共有リンクから、共有内のファイルを **所有権確認付きでローカルへ高速保存する** Tampermonkey userscript です。
 
-`main` のv1.5.0開発版では、v1.4.0の単一ファイル直接保存に加え、**複数共有リンクの一括取り込み**と安全性修正を追加しています。複数ファイル処理ではLinkex の自分のストレージを一時作業領域として利用し、各ファイルを「一時コピー → 今回のCOPY要求と作成IDの直接照合 → signed URL取得 → CDN stream開始 → 所有済み一時コピーDELETEを並行 → ローカル保存/検証」の順で処理します。COPYの所有権確定は安全のため1件ずつ、ローカルDOWNLOADはWeb Workerで最大8並列です。
+v1.5.0では、v1.4.0の単一ファイル直接保存に加え、**複数共有リンクの一括取り込み**と安全性修正を追加しています。複数ファイル処理ではLinkex の自分のストレージを一時作業領域として利用し、各ファイルを「一時コピー → 今回のCOPY要求と作成IDの直接照合 → signed URL取得 → CDN stream開始 → 所有済み一時コピーDELETEを並行 → ローカル保存/検証」の順で処理します。COPYの所有権確定は安全のため1件ずつ、ローカルDOWNLOADはWeb Workerで最大8並列です。
 
 > [!IMPORTANT]
 > 本ツールは **Linkex公式とは無関係の非公式ツール** です。Linkex側のWeb/API仕様変更により動作しなくなる可能性があります。
@@ -35,15 +35,15 @@ Web WorkerでCDN stream開始（最初のchunkを確認）
 
 ## Version / 配布状態
 
-- `main` source: **v1.5.0**（開発中 / 未公開）
-- 最新公開安定版: **v1.4.0**
-- 最新公開tag: **`v1.4.0`**
-- GitHub Release: **v1.4.0 公開済み（2026-09-27）**
+- `main` source: **v1.5.0**（公開済み / 実機確認済み）
+- 最新公開安定版: **v1.5.0**
+- 最新公開tag: **`v1.5.0`**
+- GitHub Release: **v1.5.0 公開済み（2026-09-27）**
 - 現行CI: **GitHub Actions (`.github/workflows/ci.yml`)** — userscript構文、回帰テスト、repository整合性、Release Asset生成を検証
 - License: **MIT**
 
 > [!NOTE]
-> 公開安定版v1.4.0では単一file direct-saveまで実機確認済みです。`main` のv1.5.0開発版では、COPY所有権の直接帰属、Range応答検証、direct-save開始前の既存file保護、複数共有リンクの一括取り込みを追加しています。v1.5.0の実Linkex結合確認は未実施です。
+> v1.5.0では、COPY所有権の直接帰属、Range応答検証、direct-save開始前の既存file保護、複数共有リンクの一括取り込みを追加し、2026-09-27に実環境確認を完了しています。
 
 最新の正式配布先は GitHub Releases です。
 
@@ -80,7 +80,7 @@ Web WorkerでCDN stream開始（最初のchunkを確認）
 
 ## 実機確認状況
 
-v1.3.1 までの開発過程で、以下が実機確認済みとして記録されています。
+v1.5.0 までの開発過程で、以下が実機確認済みとして記録されています。
 
 - 共有リンク解析
 - 再帰的な全ファイル列挙
@@ -104,6 +104,7 @@ v1.3.1 までの開発過程で、以下が実機確認済みとして記録さ�
 - preferred保存先を再利用した1クリック開始
 - Share A → B遷移時のstale manifest防止
 - コンパクト初期UI / 詳細ログ折りたたみ / error時自動展開
+- 複数共有リンクの一括取り込み
 
 ブラウザ/Linkex側の仕様は変わり得るため、将来の動作を保証するものではありません。
 
@@ -137,15 +138,15 @@ Node.js / Python等の外部ランタイムは不要です。
 ### GitHub Releaseから導入する場合（推奨）
 
 1. Chrome / Edge に Tampermonkey をインストールします。
-2. GitHub Releases から最新の公開安定版 **v1.4.0** を開きます。
-3. Release Assets の `linkex_downloader_v1.4.0.user.js` を取得します。
+2. GitHub Releases から最新の公開安定版 **v1.5.0** を開きます。
+3. Release Assets の `linkex_downloader_v1.5.0.user.js` を取得します。
 4. Tampermonkeyで新規スクリプトを作成し、userscript全文を貼り付けて保存します。
 5. Linkexへログインした状態で `https://disk.linkex.io/` を一度開きます。
 6. 共有ページ `https://l2e.click/d/...` を開き、右下にLinkex Downloaderパネルが表示されれば導入完了です。
 
-ZIP Asset `linkex_downloader_v1.4.0.zip` は同じuserscriptを1ファイルだけ含む補助配布物です。リポジトリ直下のversion固定コピーは今後作成しません。
+ZIP Asset `linkex_downloader_v1.5.0.zip` は同じuserscriptを1ファイルだけ含む補助配布物です。リポジトリ直下のversion固定コピーは今後作成しません。
 
-`linkex-downloader.user.js` は `main` の正本です。現在の`main`はv1.5.0開発版で、公開安定版v1.4.0より先行しています。
+`linkex-downloader.user.js` は `main` の正本です。現在の`main`は公開安定版v1.5.0と一致しています。
 
 ## 更新
 
@@ -184,7 +185,7 @@ v1.1.0 はv1.0.0の通常Queueとの互換性をできる限り維持してい�
 
 単一ファイルの直接保存でも、COPY ownership確認・signed URL・DELETE guard・Range resumeなどの安全処理は通常Queueと同じです。新規direct-saveでは、選択した既存fileをQueue/Handle永続化前に空にしません。実際の転送開始時に初めて書き込みを開始します。
 
-### 複数共有リンクを一括取り込みする（v1.5.0開発版）
+### 複数共有リンクを一括取り込みする
 
 1. `disk.linkex.io` で **詳細 → 複数共有リンクの一括取り込み** を開きます。
 2. `https://l2e.click/d/...` を1行1件で貼り付けます。空白・カンマ・セミコロン区切りも受け付け、同じshare tokenは重複除外します。

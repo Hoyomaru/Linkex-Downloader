@@ -10,13 +10,13 @@ READMEは利用者向け、CHANGELOGは変更履歴、`docs/ARCHITECTURE.md` は
 
 2026-09-27 時点で確認した状態です。
 
-- `main` source: **v1.5.0**（開発中 / 未公開・実Linkex結合未確認）
-- 最新公開Stable: **v1.4.0**
+- `main` source: **v1.5.0**（公開済み / 実環境確認済み）
+- 最新公開Stable: **v1.5.0**
 - userscript metadata `@version`: **1.5.0**
 - `const VERSION`: **1.5.0**
-- Release commit: `12d463f4ba8fca306b8eb76c526b260cdc175263`
-- 最新公開Git tag: **`v1.4.0`**
-- GitHub Release: **v1.4.0 公開済み**
+- Release commit: `e3b97c115fc58b299263749aad9cd77101bb26e4`
+- 最新公開Git tag: **`v1.5.0`**
+- GitHub Release: **v1.5.0 公開済み**
 - 現行 GitHub Actions: **CIあり**（userscript構文 + Node回帰テスト + repository整合性 + Release Asset生成検証）
 - Runtime: Tampermonkey userscript
 - Targets: `https://disk.linkex.io/*`, `https://l2e.click/d/*`, `https://www.l2e.click/d/*`
@@ -26,7 +26,7 @@ READMEは利用者向け、CHANGELOGは変更履歴、`docs/ARCHITECTURE.md` は
 - 実機確認ブラウザ: Chromium系（Chrome / Edge）
 - License: **MIT**
 - v1.4.0: v1.3.1の高速pipeline/safetyを維持したまま、単一file direct-saveと簡潔なprogress UIを追加。2026-09-27実機確認済み。
-- v1.5.0 (`main`, 未公開): COPY作成IDの直接帰属、206 `Content-Range`検証、direct-save永続化前truncate禁止、LF再現性、複数共有リンク親バッチを追加。実Linkex結合確認は未実施。
+- v1.5.0: COPY作成IDの直接帰属、206 `Content-Range`検証、direct-save永続化前truncate禁止、LF再現性、複数共有リンク親バッチを追加。2026-09-27実環境確認済み。
 
 ### リポジトリ直下
 
@@ -52,7 +52,8 @@ Linkex-Downloader/
       ├─ v1.2.1.md
       ├─ v1.3.0.md
       ├─ v1.3.1.md
-      └─ v1.4.0.md
+      ├─ v1.4.0.md
+      └─ v1.5.0.md
 ```
 
 `linkex-downloader.user.js` が唯一のtracked userscript正本です。version固定 `.user.js` / `.zip` はGit管理せず、release対象commitから `tools/build_release_assets.py` で生成してGitHub Releaseへ添付します。過去のv1.0.0 / v1.1.0配布物は各GitHub Release Assetとして保持し、リポジトリ直下からは削除します。
@@ -270,7 +271,7 @@ rootに新規IDが見えても、COPY/task応答とcandidateを直接結び付�
 
 ### 運用上の重要制限
 
-実Linkex APIが常に作成IDまたはtask帰属情報を返すかは未確認です。帰属情報を取得できない環境では、v1.5.0は安全側で処理を停止します。別tab・スマホ・別端末・別自動処理からの同時変更は避けてください。
+2026-09-27のv1.5.0実環境確認では、COPY/task応答からcandidateへ直接帰属する経路が成立することを確認済みです。帰属情報を取得できない場合は引き続き安全側で処理を停止します。別tab・スマホ・別端末・別自動処理からの同時変更は避けてください。
 
 同一userscript storage内のtabはleaseで防ぎますが、別端末まで排他できません。
 
