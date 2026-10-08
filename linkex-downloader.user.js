@@ -2452,6 +2452,16 @@ const transientSignedUrls = new Map();
     return job;
   }
 
+  function clearQueueShardSet(jobId, count) {
+    const id = String(jobId || '');
+    const n = Math.max(0, Number(count || 0));
+    for (let i = 0; i < n; i++) {
+      const key = queueShardKey(id, i);
+      if (key) GM_setValue(key, null);
+    }
+    if (id) queueShardSerializedCache.delete(id);
+  }
+
   function saveQueueJob(job) {
     if (!job) return job;
     job.updatedAt = Date.now();
@@ -2459,7 +2469,11 @@ const transientSignedUrls = new Map();
     if (bytes > QUEUE_SHARD_THRESHOLD_BYTES) {
       saveQueueJobSharded(job);
     } else {
+      const previousMeta = GM_getValue(QUEUE_SHARD_META_KEY, null);
+      const previousJobId = String(previousMeta?.jobId || '');
+      const previousCount = Number(previousMeta?.persistence?.chunkCount || 0);
       GM_setValue(QUEUE_KEY, job);
+      if (previousJobId && previousJobId !== String(job.jobId || '')) clearQueueShardSet(previousJobId, previousCount);
       GM_setValue(QUEUE_SHARD_META_KEY, null);
     }
     queueMemoryCache = job;
