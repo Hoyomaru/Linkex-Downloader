@@ -2019,6 +2019,13 @@ const transientSignedUrls = new Map();
 
   // --- Production full queue: all files, safe sequential transactions ---
   const QUEUE_KEY = 'linkexQueueFullV1';
+  // v2 persistence shards the full Queue snapshot into small GM storage messages.
+  // This avoids Chromium/Tampermonkey's 64 MiB extension-message ceiling while
+  // retaining the existing per-item journal as the write-ahead log.
+  const QUEUE_SHARD_META_KEY = 'linkexQueueFullV2Meta';
+  const QUEUE_SHARD_PREFIX = 'linkexQueueFullV2Chunk:';
+  const QUEUE_SHARD_TARGET_BYTES = 4 * 1024 * 1024;
+  const QUEUE_SHARD_THRESHOLD_BYTES = 8 * 1024 * 1024;
   const QUEUE_HANDLE_PREFIX = 'queue-full:';
   const SHARE_BATCH_KEY = 'linkexShareBatchV1';
   const SHARE_BATCH_HANDLE_PREFIX = 'share-batch:';
@@ -2039,6 +2046,11 @@ const transientSignedUrls = new Map();
   const EARLY_DELETE_MAX_IN_FLIGHT = EARLY_DELETE_DOWNLOAD_WORKERS * 2;
   let queueCommitTail = Promise.resolve();
   let lastFullQueuePersistAt = 0;
+  // undefined = not loaded yet; null = no Queue. This cache is deliberately
+  // used only by the 1 Hz UI ticker. Explicit actions still call loadQueueJob()
+  // without {cached:true} so cross-tab state is refreshed at action boundaries.
+  let queueMemoryCache = undefined;
+  const queueShardSerializedCache = new Map();
   const dirtyQueueIndexCache = new Map();
 
   function parseShareBatchInput(input) {
@@ -2330,15 +2342,127 @@ const transientSignedUrls = new Map();
     dirtyQueueIndexCache.delete(String(job.jobId || ''));
   }
 
-  function loadQueueJob() {
-    const value = GM_getValue(QUEUE_KEY, null);
-    if (!value || typeof value !== 'object') return null;
-    return applyQueueItemJournals(value);
+  function queueJsonBytes(value) {
+    try {
+      return new TextEncoder().encode(JSON.stringify(value)).byteLength;
+    } catch {
+      return Number.POSITIVE_INFINITY;
+    }
+  }
+
+  function queueShardKey(jobId, chunkIndex) {
+    const id = String(jobId || '');
+    return id ? QUEUE_SHARD_PREFIX + id + ':' + Number(chunkIndex) : null;
+  }
+
+  function queueMetaSnapshot(job, chunkCount, itemCount) {
+    const meta = {...job};
+    delete meta.items;
+    meta.persistence = {
+      schemaVersion:2,
+      itemCount:Number(itemCount || 0),
+      chunkCount:Number(chunkCount || 0)
+    };
+    return meta;
+  }
+
+  function buildQueueShards(items, targetBytes = QUEUE_SHARD_TARGET_BYTES) {
+    const chunks = [];
+    let current = [];
+    let currentBytes = 2;
+    const target = Math.max(64 * 1024, Number(targetBytes) || QUEUE_SHARD_TARGET_BYTES);
+    for (const item of items || []) {
+      const itemBytes = Math.max(2, queueJsonBytes(item));
+      if (current.length && currentBytes + itemBytes + 1 > target) {
+        chunks.push(current);
+        current = [];
+        currentBytes = 2;
+      }
+      current.push(item);
+      currentBytes += itemBytes + 1;
+    }
+    if (current.length || !chunks.length) chunks.push(current);
+    return chunks;
+  }
+
+  function loadQueueSharded(meta) {
+    if (!meta || typeof meta !== 'object') return null;
+    const p = meta.persistence;
+    if (!p || Number(p.schemaVersion) !== 2) return null;
+    const jobId = String(meta.jobId || '');
+    const chunkCount = Math.max(0, Number(p.chunkCount || 0));
+    const items = [];
+    const serializedChunks = [];
+    for (let i = 0; i < chunkCount; i++) {
+      const key = queueShardKey(jobId, i);
+      const chunk = key ? GM_getValue(key, null) : null;
+      if (!Array.isArray(chunk)) throw new LinkexError('Queue保存データが欠損しています（chunk ' + (i + 1) + '/' + chunkCount + '）。', {kind:'queue_storage'});
+      items.push(...chunk);
+      serializedChunks.push(JSON.stringify(chunk));
+    }
+    if (Number(p.itemCount || 0) !== items.length) {
+      throw new LinkexError('Queue保存データ件数が一致しません（' + items.length + '/' + Number(p.itemCount || 0) + '）。', {kind:'queue_storage'});
+    }
+    const job = {...meta, items};
+    delete job.persistence;
+    queueShardSerializedCache.set(jobId, {chunks:serializedChunks, count:chunkCount});
+    return applyQueueItemJournals(job);
+  }
+
+  function saveQueueJobSharded(job) {
+    const jobId = String(job?.jobId || '');
+    if (!jobId) throw new LinkexError('Queue IDがありません。', {kind:'queue_storage'});
+    const chunks = buildQueueShards(job.items || []);
+    const previous = queueShardSerializedCache.get(jobId);
+    const serializedChunks = chunks.map(chunk => JSON.stringify(chunk));
+    for (let i = 0; i < serializedChunks.length; i++) {
+      if (previous?.chunks?.[i] === serializedChunks[i]) continue;
+      const key = queueShardKey(jobId, i);
+      if (key) GM_setValue(key, chunks[i]);
+    }
+    const oldCount = Number(previous?.count || 0);
+    for (let i = serializedChunks.length; i < oldCount; i++) {
+      const key = queueShardKey(jobId, i);
+      if (key) GM_setValue(key, null);
+    }
+    GM_setValue(QUEUE_SHARD_META_KEY, queueMetaSnapshot(job, chunks.length, (job.items || []).length));
+    queueShardSerializedCache.set(jobId, {chunks:serializedChunks, count:serializedChunks.length});
+    // Successful v2 persistence is the point at which the legacy monolithic
+    // snapshot can be removed. Old versions will therefore not resume a v2-only Queue.
+    GM_setValue(QUEUE_KEY, null);
+    return job;
+  }
+
+  function loadQueueJob({cached = false} = {}) {
+    if (cached && queueMemoryCache !== undefined) return queueMemoryCache;
+    let job = null;
+    try {
+      const meta = GM_getValue(QUEUE_SHARD_META_KEY, null);
+      if (meta?.persistence?.schemaVersion === 2) {
+        job = loadQueueSharded(meta);
+      } else {
+        const value = GM_getValue(QUEUE_KEY, null);
+        if (value && typeof value === 'object') job = applyQueueItemJournals(value);
+      }
+    } catch (e) {
+      try { console.error('[Linkex queue storage]', e); } catch {}
+      job = null;
+    }
+    queueMemoryCache = job;
+    return job;
   }
 
   function saveQueueJob(job) {
+    if (!job) return job;
     job.updatedAt = Date.now();
-    GM_setValue(QUEUE_KEY, job);
+    const bytes = queueJsonBytes(job);
+    if (bytes > QUEUE_SHARD_THRESHOLD_BYTES) {
+      saveQueueJobSharded(job);
+    } else {
+      GM_setValue(QUEUE_KEY, job);
+      GM_setValue(QUEUE_SHARD_META_KEY, null);
+    }
+    queueMemoryCache = job;
     lastFullQueuePersistAt = job.updatedAt;
     clearQueueItemJournals(job);
     return job;
@@ -4113,6 +4237,18 @@ const transientSignedUrls = new Map();
     }
     const legacyProbe = loadProbeState();
     GM_setValue(QUEUE_KEY, null);
+    const shardMeta = GM_getValue(QUEUE_SHARD_META_KEY, null);
+    const shardJobId = String(shardMeta?.jobId || '');
+    if (shardJobId === String(job.jobId || '')) {
+      const count = Math.max(0, Number(shardMeta?.persistence?.chunkCount || 0));
+      for (let i = 0; i < count; i++) {
+        const key = queueShardKey(job.jobId, i);
+        if (key) GM_setValue(key, null);
+      }
+      GM_setValue(QUEUE_SHARD_META_KEY, null);
+      queueShardSerializedCache.delete(String(job.jobId || ''));
+    }
+    queueMemoryCache = null;
     if (!legacyProbe || legacyProbe.queueJobId === job.jobId) GM_setValue(PROBE_KEY, null);
     return {cleared:true, handleCleanupError};
   }
@@ -4665,7 +4801,7 @@ const transientSignedUrls = new Map();
     });
 
     function refreshProgress() {
-      const job = loadQueueJob();
+      const job = activeRunJob || loadQueueJob({cached:true});
       const batch = loadShareBatchJob();
       const activeBatchJob = batch && !isShareBatchTerminal(batch) ? batch : null;
       const batchPrefix = activeBatchJob
