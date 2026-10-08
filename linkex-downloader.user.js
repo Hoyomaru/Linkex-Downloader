@@ -2473,7 +2473,7 @@ const transientSignedUrls = new Map();
       const previousJobId = String(previousMeta?.jobId || '');
       const previousCount = Number(previousMeta?.persistence?.chunkCount || 0);
       GM_setValue(QUEUE_KEY, job);
-      if (previousJobId && previousJobId !== String(job.jobId || '')) clearQueueShardSet(previousJobId, previousCount);
+      if (previousJobId) clearQueueShardSet(previousJobId, previousCount);
       GM_setValue(QUEUE_SHARD_META_KEY, null);
     }
     queueMemoryCache = job;
