@@ -10,7 +10,7 @@ const {TextEncoder} = require('node:util');
 const SOURCE_PATH = 'linkex-downloader.user.js';
 const SOURCE = fs.readFileSync(SOURCE_PATH, 'utf8').replace(/\\r\\n/g, '\\n');
 const STARTUP = "  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', createPanel, {once:true});\n  else createPanel();\n})();";
-const EXPOSE = "  globalThis.__pipelineTest = {saveProbeState, loadProbeState, clearProbeState, createAsyncSemaphore, saveQueueJob, loadQueueJob, saveQueueItemJournal, loadDirtyQueueIndexes, clearQueueItemJournals};\n})();";
+const EXPOSE = "  globalThis.__pipelineTest = {saveProbeState, loadProbeState, clearProbeState, createAsyncSemaphore, saveQueueJob, loadQueueJob, saveQueueItemJournal, loadDirtyQueueIndexes, clearQueueItemJournals, buildQueueShards, storage};\n})();";
 
 function loadRuntime() {
   assert.ok(SOURCE.includes(STARTUP), 'test harness could not find userscript startup block');
@@ -126,6 +126,56 @@ test('full Queue flush clears applied item journals', () => {
   const recovered = api.loadQueueJob();
   assert.equal(recovered.items[0].state, 'COPIED');
   assert.equal(recovered.items[0].tx.state, 'OWNERSHIP_CONFIRMED');
+});
+
+test('large Queue snapshots are sharded below the extension-message ceiling', () => {
+  const api = loadRuntime();
+  const item = {
+    index:0,
+    state:'PENDING',
+    source:{sourceId:'source-1', name:'large.bin', type:'file', size:9 * 1024 * 1024, remotePath:'large.bin', extra:'x'.repeat(9 * 1024 * 1024)},
+    localSegments:['large.bin'],
+    tx:null,
+    attempts:{download:0},
+    lastError:null
+  };
+  const job = {
+    schemaVersion:2,
+    kind:'full-queue',
+    jobId:'job-large',
+    state:'READY',
+    updatedAt:0,
+    currentIndex:0,
+    items:[item]
+  };
+  api.saveQueueJob(job);
+  assert.ok(api.storage.has('linkexQueueFullV2Meta'));
+  assert.ok(api.storage.has('linkexQueueFullV2Chunk:job-large:0'));
+  assert.equal(api.storage.has('linkexQueueFullV1'), false);
+  const meta = api.storage.get('linkexQueueFullV2Meta');
+  assert.equal(meta.persistence.schemaVersion, 2);
+  assert.equal(meta.persistence.chunkCount, 1);
+  const recovered = api.loadQueueJob();
+  assert.equal(recovered.items.length, 1);
+  assert.equal(recovered.items[0].source.extra.length, 9 * 1024 * 1024);
+});
+
+test('Queue UI cache avoids rereading the full Queue on every progress tick', () => {
+  const api = loadRuntime();
+  const job = {
+    schemaVersion:2,
+    jobId:'job-cache',
+    state:'READY',
+    currentIndex:0,
+    items:[{index:0, state:'PENDING', tx:null, attempts:{download:0}, lastError:null}]
+  };
+  api.saveQueueJob(job);
+  const first = api.loadQueueJob();
+  first.items[0].state = 'DOWNLOADING';
+  const cached = api.loadQueueJob({cached:true});
+  assert.equal(cached.items[0].state, 'DOWNLOADING');
+  api.storage.set('linkexQueueFullV1', null);
+  assert.equal(api.loadQueueJob({cached:true}).items[0].state, 'DOWNLOADING');
 });
 
 test('early-delete resume accepts pre-delete download states and reacquires a fresh memory-only URL', () => {
